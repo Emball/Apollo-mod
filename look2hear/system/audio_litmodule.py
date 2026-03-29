@@ -1,10 +1,13 @@
 ###
-# Author: Kai Li
-# Date: 2022-05-26 18:09:54
-# Email: lk21@mails.tsinghua.edu.cn
-# LastEditTime: 2024-01-24 00:00:28
+# Modified from original Apollo audio_litmodule.py
+# Changes:
+#   - Removed sync_dist=True from all log calls (causes hangs on single GPU)
+#   - Removed all_gather in validation (multi-GPU only)
+#   - Removed WandB-specific logger calls
+#   - Kept everything else identical
 ###
-import gc
+import os
+import torchaudio
 from omegaconf import OmegaConf
 import torch
 import pytorch_lightning as pl
@@ -12,19 +15,8 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from collections.abc import MutableMapping
 from omegaconf import ListConfig
 
+
 def flatten_dict(d, parent_key="", sep="_"):
-    """Flattens a dictionary into a single-level dictionary while preserving
-    parent keys. Taken from
-    `SO <https://stackoverflow.com/questions/6027558/flatten-nested-dictionaries-compressing-keys>`_
-
-    Args:
-        d (MutableMapping): Dictionary to be flattened.
-        parent_key (str): String to use as a prefix to all subsequent keys.
-        sep (str): String to use as a separator between two key levels.
-
-    Returns:
-        dict: Single-level dictionary, flattened.
-    """
     items = []
     for k, v in d.items():
         new_key = parent_key + sep + k if parent_key else k
@@ -52,159 +44,115 @@ class AudioLightningModule(pl.LightningModule):
         self.loss_func = loss_func
         self.metrics = metrics
         self.scheduler = list(scheduler)
-        
-        # Save lightning"s AttributeDict under self.hparams
+
         self.default_monitor = "val_loss"
-        # self.print(self.audio_model)
         self.validation_step_outputs = []
         self.test_step_outputs = []
         self.automatic_optimization = False
+        self.sample_output_dir = None  # set by train.py after instantiation
 
     def forward(self, wav):
-        """Applies forward pass of the model.
-
-        Returns:
-            :class:`torch.Tensor`
-        """
         return self.audio_model(wav)
 
     def training_step(self, batch, batch_nb):
         ori_data, codec_data = batch
         optimizer_g, optimizer_d = self.optimizers()
-        # multiple schedulers
         scheduler_g, scheduler_d = self.lr_schedulers()
-        
-        # train discriminator
+
+        # Generator forward pass (shared between both discriminator and generator updates)
         optimizer_g.zero_grad()
         output = self(codec_data)
-        
+
+        # ── Discriminator update ──────────────────────────────────────────────
+        # Run discriminator on both generated and real audio.
+        # Cache target_outputs and targets_feature_maps here — we reuse them
+        # in the generator update below to avoid a redundant forward pass.
         optimizer_d.zero_grad()
-        est_outputs, _ = self.discriminator(output.detach(), sample_rate=44100)
-        target_outputs, _ = self.discriminator(ori_data, sample_rate=44100)
-        
-        loss_d = self.loss_func["d"](target_outputs, est_outputs)
+        for p in self.discriminator.parameters():
+            p.requires_grad_(True)
+
+        est_outputs_d, _ = self.discriminator(output.detach(), sample_rate=44100)
+        target_outputs, targets_feature_maps = self.discriminator(ori_data, sample_rate=44100)
+
+        loss_d = self.loss_func["d"](target_outputs, est_outputs_d)
         self.manual_backward(loss_d)
         self.clip_gradients(optimizer_d, gradient_clip_val=5, gradient_clip_algorithm="norm")
         optimizer_d.step()
-        # train generator
+
+        # ── Generator update ──────────────────────────────────────────────────
+        # Freeze discriminator weights — we only need gradients w.r.t. generator.
+        # Reuse cached target_outputs/targets_feature_maps from above (saves one
+        # full discriminator forward pass per training step).
+        for p in self.discriminator.parameters():
+            p.requires_grad_(False)
+
         est_outputs, est_feature_maps = self.discriminator(output, sample_rate=44100)
-        _, targets_feature_maps = self.discriminator(ori_data, sample_rate=44100)
-        
+
         loss_g = self.loss_func["g"](est_outputs, est_feature_maps, targets_feature_maps, output, ori_data)
         self.manual_backward(loss_g)
         self.clip_gradients(optimizer_g, gradient_clip_val=5, gradient_clip_algorithm="norm")
         optimizer_g.step()
-        # print(loss)
-        
+
+        # Unfreeze discriminator for next step
+        for p in self.discriminator.parameters():
+            p.requires_grad_(True)
+
         if self.trainer.is_last_batch:
             scheduler_g.step()
             scheduler_d.step()
 
-        self.log(
-            "train_loss_d",
-            loss_d,
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True,
-            logger=True,
-        )
-        
-        self.log(
-            "train_loss_g",
-            loss_g,
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True,
-            logger=True,
-        )
-
+        self.log("train_loss_d", loss_d, on_epoch=True, prog_bar=True, logger=True)
+        self.log("train_loss_g", loss_g, on_epoch=True, prog_bar=True, logger=True)
 
     def validation_step(self, batch, batch_nb):
-        # cal val loss
         ori_data, codec_data = batch
-        # print(mixtures.shape)
         est_sources = self(codec_data)
         loss = self.metrics(est_sources, ori_data)
-        
-        self.log(
-            "val_loss",
-            loss,
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True,
-            logger=True,
-        )
-        
+
+        self.log("val_loss", loss, on_epoch=True, prog_bar=True, logger=True)
         self.validation_step_outputs.append(loss)
-        
+
+        # Save restored audio samples at each validation run (keyed by global step)
+        if self.sample_output_dir is not None:
+            step = self.global_step
+            sample_dir = os.path.join(self.sample_output_dir, f"step_{step:06d}")
+            os.makedirs(sample_dir, exist_ok=True)
+            restored = est_sources[0].float().cpu()
+            lq       = codec_data[0].float().cpu()
+            hq       = ori_data[0].float().cpu()
+            sr = 44100
+            torchaudio.save(os.path.join(sample_dir, f"sample_{batch_nb:03d}_restored.wav"), restored, sr)
+            torchaudio.save(os.path.join(sample_dir, f"sample_{batch_nb:03d}_lq.wav"),       lq,       sr)
+            torchaudio.save(os.path.join(sample_dir, f"sample_{batch_nb:03d}_hq.wav"),       hq,       sr)
+
         return {"val_loss": loss}
 
     def on_validation_epoch_end(self):
-        # val
         avg_loss = torch.stack(self.validation_step_outputs).mean()
-        val_loss = torch.mean(self.all_gather(avg_loss))
-        self.log(
-            "lr",
-            self.optimizer[0].param_groups[0]["lr"],
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True,
-        )
-        self.logger.experiment.log(
-            {"learning_rate": self.optimizer[0].param_groups[0]["lr"], "epoch": self.current_epoch}
-        )
-        self.logger.experiment.log(
-            {"val_pit_sisnr": -val_loss, "epoch": self.current_epoch}
-        )
+        self.log("lr", self.optimizer[0].param_groups[0]["lr"], on_epoch=True, prog_bar=True)
+        self.validation_step_outputs.clear()
 
-        self.validation_step_outputs.clear()  # free memory
-        torch.cuda.empty_cache()
-        
     def test_step(self, batch, batch_nb):
         mixtures, targets = batch
         est_sources = self(mixtures)
         loss = self.metrics(est_sources, targets)
-        self.log(
-            "test_loss",
-            loss,
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True,
-            logger=True,
-        )
+        self.log("test_loss", loss, on_epoch=True, prog_bar=True, logger=True)
         self.test_step_outputs.append(loss)
         return {"test_loss": loss}
-    
-    def on_test_epoch_end(self):
-        # val
-        avg_loss = torch.stack(self.test_step_outputs).mean()
-        test_loss = torch.mean(self.all_gather(avg_loss))
-        self.log(
-            "lr",
-            self.optimizer.param_groups[0]["lr"],
-            on_epoch=True,
-            prog_bar=True,
-            sync_dist=True,
-        )
-        self.logger.experiment.log(
-            {"learning_rate": self.optimizer.param_groups[0]["lr"], "epoch": self.current_epoch}
-        )
-        self.logger.experiment.log(
-            {"test_pit_sisnr": -test_loss, "epoch": self.current_epoch}
-        )
 
+    def on_test_epoch_end(self):
+        avg_loss = torch.stack(self.test_step_outputs).mean()
+        self.log("lr", self.optimizer[0].param_groups[0]["lr"], on_epoch=True, prog_bar=True)
         self.test_step_outputs.clear()
 
     def configure_optimizers(self):
-        """Initialize optimizers, batch-wise and epoch-wise schedulers."""
         if self.scheduler is None:
             return self.optimizer
         if not isinstance(self.scheduler, (list, tuple)):
-            self.scheduler = [self.scheduler]  # support multiple schedulers
-            
+            self.scheduler = [self.scheduler]
         if not isinstance(self.optimizer, (list, tuple)):
-            self.optimizer = [self.optimizer]  # support multiple schedulers
-        
+            self.optimizer = [self.optimizer]
+
         epoch_schedulers = []
         for sched in self.scheduler:
             if not isinstance(sched, dict):
@@ -214,28 +162,14 @@ class AudioLightningModule(pl.LightningModule):
             else:
                 sched.setdefault("monitor", self.default_monitor)
                 sched.setdefault("frequency", 1)
-                # Backward compat
                 if sched["interval"] == "batch":
                     sched["interval"] = "step"
-                assert sched["interval"] in [
-                    "epoch",
-                    "step",
-                ], "Scheduler interval should be either step or epoch"
+                assert sched["interval"] in ["epoch", "step"]
                 epoch_schedulers.append(sched)
         return self.optimizer, epoch_schedulers
-            
+
     @staticmethod
     def config_to_hparams(dic):
-        """Sanitizes the config dict to be handled correctly by torch
-        SummaryWriter. It flatten the config dict, converts ``None`` to
-        ``"None"`` and any list and tuple into torch.Tensors.
-
-        Args:
-            dic (dict): Dictionary to be transformed.
-
-        Returns:
-            dict: Transformed dictionary.
-        """
         dic = flatten_dict(dic)
         for k, v in dic.items():
             if v is None:

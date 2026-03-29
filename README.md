@@ -1,120 +1,136 @@
-<p align="center">
-  <img src="asserts/apollo-logo.png" alt="Logo" width="150"/>
-</p>
+# Apollo — Single-GPU Fine-Tuning Fork
 
-<p align="center">
-  <strong>Kai Li<sup>1,2</sup>, Yi Luo<sup>2</sup></strong><br>
-    <strong><sup>1</sup>Tsinghua University, Beijing, China</strong><br>
-    <strong><sup>2</sup>Tencent AI Lab, Shenzhen, China</strong><br>
-  <a href="https://arxiv.org/abs/2409.08514">ArXiv</a> | <a href="https://cslikai.cn/Apollo/">Demo</a>
+A fork of [JusperLee/Apollo](https://github.com/JusperLee/Apollo) adapted for fine-tuning on a **single consumer GPU** against a **static paired dataset** of known codec degradation. The upstream repo targets 8-GPU distributed training on dynamically-generated codec data; this fork strips that out and replaces it with a self-contained pipeline oriented around a fixed LQ/HQ audio pair collection.
 
-<p align="center">
-  <img src="https://visitor-badge.laobi.icu/badge?page_id=JusperLee.Apollo" alt="访客统计" />
-  <img src="https://img.shields.io/github/stars/JusperLee/Apollo?style=social" alt="GitHub stars" />
-  <img alt="Static Badge" src="https://img.shields.io/badge/license-CC%20BY--SA%204.0-lightgrey">
-</p>
+Original paper: *Apollo: Band-sequence Modeling for High-Quality Music Restoration in Compressed Audio* (Li et al., 2024).
 
-<p align="center">
+---
 
-# Apollo: Band-sequence Modeling for High-Quality Audio Restoration
+## What's different from upstream
 
-## 📖 Abstract
+### Training pipeline (`train.py`)
 
-Audio restoration has become increasingly significant in modern society, not only due to the demand for high-quality auditory experiences enabled by advanced playback devices, but also because the growing capabilities of generative audio models necessitate high-fidelity audio. Typically, audio restoration is defined as a task of predicting undistorted audio from damaged input, often trained using a GAN framework to balance perception and distortion. Since audio degradation is primarily concentrated in mid- and high-frequency ranges, especially due to codecs, a key challenge lies in designing a generator capable of preserving low-frequency information while accurately reconstructing high-quality mid- and high-frequency content. Inspired by recent advancements in high-sample-rate music separation, speech enhancement, and audio codec models, we propose Apollo, a generative model designed for high-sample-rate audio restoration. Apollo employs an explicit **frequency band split module** to model the relationships between different frequency bands, allowing for **more coherent and higher-quality** restored audio. Evaluated on the MUSDB18-HQ and MoisesDB datasets, Apollo consistently outperforms existing SR-GAN models across various bit rates and music genres, particularly excelling in complex scenarios involving mixtures of multiple instruments and vocals. Apollo significantly improves music restoration quality while maintaining computational efficiency.
+The original `train.py` is a thin launcher that assumes data is already prepared and a multi-GPU DDP environment is available. This fork's `train.py` is substantially rewritten:
 
-## 🔥 News
+- **Auto-preprocessing pipeline.** Drop raw paired audio into `data/LQ/` and `data/HQ/` (matched by filename stem) and the script chunks, resamples, and force-converts to stereo automatically before training begins. If `chunks/` is already populated it skips this step entirely.
+- **Eval bootstrapping.** If `eval/` is empty, 3 chunk pairs are randomly moved out of `chunks/` into `eval/` at startup so there is always a held-out validation set without any manual setup.
+- **Pretrained weight loading.** Accepts a local `.ckpt` or `.pth` via `--weights_path`. Handles both Lightning checkpoint format (keys prefixed `audio_model.`) and bare state dict format automatically. Falls back to downloading the official weights from HuggingFace if no path is given.
+- **Selective layer freezing with per-group learning rates.** BSNet layers 0–1 are frozen to preserve low-level pretrained representations. Layers 2–3 (newly unfrozen relative to a more conservative baseline) train at `0.3×` base LR to protect their pretrained features. Layers 4–5, BN front-ends, and output heads train at the full base LR.
+- **Single-GPU / single-process target.** `sync_dist`, `all_gather`, DDP strategy, and `sync_batchnorm` are all removed. `torch.set_float32_matmul_precision` set to `"high"` (TF32) rather than `"highest"` for a meaningful throughput gain with negligible quality difference.
+- **Validation audio saving.** At each validation run, restored, LQ, and HQ samples from the first batch are written to `Exps/<name>/samples/step_XXXXXX/` for listening-based monitoring without needing a separate inference script.
+- **Resume from last checkpoint.** Pass `--resume` to automatically find and resume from the most recent checkpoint in the experiment directory.
 
-- [2025.03.07] We released the training data preprocessing code on [Apollo-data-preprocess](https://github.com/JusperLee/Apollo-data-preprocess).
-- [2024.09.10] Apollo is now available on [ArXiv](#) and [Demo](https://cslikai.cn/Apollo/).
-- [2024.09.10] Apollo checkpoints and pre-trained models are available for download.
+### Data module (`paired_datamodule.py`)
 
-## ⚡️ Installation
+Replaces the original `MusdbMoisesdbDataModule` (which streams from HDF5 files and synthesises codec degradation on the fly) with `PairedAudioDataModule`, which reads pre-chunked stereo WAV pairs from `chunks/LQ/` and `chunks/HQ/`. Training pairs are assumed to already represent the target degradation — no on-the-fly codec simulation is performed.
 
-clone the repository
+### Generator loss (`look2hear/losses/gan_losses.py`)
 
-```bash
-git clone https://github.com/JusperLee/Apollo.git && cd Apollo
-conda create --name look2hear --file look2hear.yml
-conda activate look2hear
+- **High-frequency perceptual weighting.** `freq_MAE` now applies a frequency-dependent weight to the multi-scale STFT magnitude error. Bins above 50% of Nyquist (~11 kHz at 44100 Hz) are penalised at `3×` the rate of low/mid bins (`HF_BOOST = 3.0`, `HF_THRESHOLD_RATIO = 0.5`). This compensates for the natural energy imbalance that causes unweighted MAE to effectively ignore the high end.
+- **Buffered windows and weight tensors.** All 7 Hann windows and their corresponding per-bin weight tensors are pre-registered as `nn.Module` buffers in `MultiFrequencyGenLoss.__init__`. The original code reallocated these on every forward pass (14 host-to-device transfers per step). They now live on the correct device from startup and are never reallocated.
+- `freq_MAE` is now an instance method `_freq_MAE` on `MultiFrequencyGenLoss` rather than a module-level function, so it has access to the buffered tensors.
+
+### Discriminator (`look2hear/discriminators/frequencydis.py`)
+
+- **Inverse window-size weighting.** `MultiFrequencyDiscriminator` now scales each sub-discriminator's output by a weight inversely proportional to its window size before aggregating. The smallest windows (32, 64) — which have the finest frequency resolution in the high end — contribute most to the discriminator signal. Weights are normalised so the overall loss scale is unchanged relative to the original equal-weight scheme.
+
+### Model (`look2hear/models/apollo.py`)
+
+- **Buffered Hann window.** The Hann window used for STFT/iSTFT in the forward pass is registered as a buffer (`self.hann_win`) rather than being created fresh each call.
+- **fp16-safe STFT.** Input is explicitly cast to `float32` before `torch.stft` (cuFFT does not support fp16 for non-power-of-two FFT sizes). The output is cast back to the input dtype before returning, keeping the rest of the forward pass in fp16 during mixed-precision training.
+- **iSTFT complex cast.** `est_spec` is cast to `torch.complex64` before `torch.istft` to avoid dtype mismatches under mixed precision.
+
+### Training system (`look2hear/system/audio_litmodule.py`)
+
+- Removed `sync_dist=True` from all `self.log` calls (causes hangs on single GPU).
+- Removed `all_gather` in validation and test epoch end hooks (multi-GPU only).
+- Removed WandB-specific logger calls (`self.logger.experiment.log`).
+- Discriminator forward passes in `training_step` restructured to cache `target_outputs` and `targets_feature_maps` from the discriminator update and reuse them in the generator update, eliminating one full discriminator forward pass per step.
+- Explicit `requires_grad_(True/False)` toggling around the generator update to avoid computing unnecessary gradients through the discriminator during the generator loss backward pass.
+- Validation step saves audio samples to disk if `sample_output_dir` is set (wired up by `train.py`).
+
+### Configuration
+
+Two configs are provided:
+
+| Config | Model | `feature_dim` | `batch_size` | Notes |
+|---|---|---|---|---|
+| `configs/apollo.yaml` | Base Apollo | 256 | 2 | Lighter, faster per step |
+| `configs/apollo_uni.yaml` | Apollo Universal | 384 | 1 | Wider model, step-based validation |
+
+Both configs are set for single-GPU training (`devices: [0]`), `16-mixed` precision, TensorBoard logging, and `num_workers: 2` (safe default for Windows `spawn`-based multiprocessing with 16 GB RAM).
+
+### New files
+
+| File | Purpose |
+|---|---|
+| `paired_datamodule.py` | Dataset/datamodule for pre-chunked LQ/HQ WAV pairs |
+| `export_for_uvr.py` | Export a trained Lightning checkpoint to a UVR-compatible `.pth` |
+| `requirements.txt` | Pinned dependencies for the WinPython environment |
+
+---
+
+## Directory layout expected at training time
+
+```
+apollo-mod/
+├── data/
+│   ├── LQ/          ← raw degraded audio (any supported format)
+│   └── HQ/          ← raw clean audio (matched filenames)
+├── chunks/          ← auto-populated by train.py from data/
+│   ├── LQ/
+│   └── HQ/
+├── eval/            ← auto-bootstrapped from chunks/ if empty
+│   ├── LQ/
+│   └── HQ/
+├── configs/
+│   ├── apollo.yaml
+│   └── apollo_uni.yaml
+└── train.py
 ```
 
-## 🖥️ Usage
+If `chunks/` is already populated, `data/` is not required. Supported input formats: `.wav`, `.flac`, `.mp3`, `.aac`, `.ogg`, `.m4a`.
 
-### 🗂️ Datasets
+---
 
-Apollo is trained on the MUSDB18-HQ and MoisesDB datasets. To download the datasets, run the following commands:
+## Usage
 
-```bash
-wget https://zenodo.org/records/3338373/files/musdb18hq.zip?download=1
-wget https://ds-website-downloads.55c2710389d9da776875002a7d018e59.r2.cloudflarestorage.com/moisesdb.zip
+**Standard run (Universal model, recommended):**
 ```
-During data preprocessing, we drew inspiration from music separation techniques and implemented the following steps:
-
-1. **Source Activity Detection (SAD):**  
-   We used a Source Activity Detector (SAD) to remove silent regions from the audio tracks, retaining only the significant portions for training.
-
-2. **Data Augmentation:**  
-   We performed real-time data augmentation by mixing tracks from different songs. For each mix, we randomly selected between 1 and 8 stems from the 11 available tracks, extracting 3-second clips from each selected stem. These clips were scaled in energy by a random factor within the range of [-10, 10] dB relative to their original levels. The selected clips were then summed together to create simulated mixed music.
-
-3. **Simulating Dynamic Bitrate Compression:**  
-   We simulated various bitrate scenarios by applying MP3 codecs with bitrates of [24000, 32000, 48000, 64000, 96000, 128000]. 
-
-4. **Rescaling:**  
-   To ensure consistency across all samples, we rescaled both the target and the encoded audio based on their maximum absolute values.
-
-5. **Saving as HDF5:**  
-   After preprocessing, all data (including the source stems, mixed tracks, and compressed audio) was saved in HDF5 format, making it easy to load for training and evaluation purposes.
-
-### 🚀 Training
-To train the Apollo model, run the following command:
-
-```bash
-python train.py --conf_dir=configs/apollo.yml
+python train.py --conf_dir configs/apollo_uni.yaml --weights_path ./apollo_model_uni.ckpt
 ```
 
-### 🎨 Evaluation
-To evaluate the Apollo model, run the following command:
-
-```bash
-python inference.py --in_wav=assets/input.wav --out_wav=assets/output.wav
+**Base model:**
+```
+python train.py --conf_dir configs/apollo.yaml --weights_path ./apollo_model.pth
 ```
 
-## 📊 Results
-
-*Here, you can include a brief overview of the performance metrics or results that Apollo achieves using different bitrates*
-
-![](./asserts/bitrates.png)
-
-
-*Different methods' SDR/SI-SNR/VISQOL scores for various types of music, as well as the number of model parameters and GPU inference time. For the GPU inference time test, a music signal with a sampling rate of 44.1 kHz and a length of 1 second was used.*
-![](./asserts/types.png)
-
-## License
-
-<a rel="license" href="http://creativecommons.org/licenses/by-sa/4.0/"><img alt="Creative Commons License" style="border-width:0" src="https://i.creativecommons.org/l/by-sa/4.0/88x31.png" /></a><br />This work is licensed under a <a rel="license" href="http://creativecommons.org/licenses/by-sa/4.0/">Creative Commons Attribution-ShareAlike 4.0 International License</a>.
-
-## Third Party
-
-[Apollo-Colab-Inference](https://github.com/jarredou/Apollo-Colab-Inference)
-
-## Acknowledgements
-
-Apollo is developed by the **Look2Hear** at Tsinghua University.
-
-## Citation
-
-If you use Apollo in your research or project, please cite the following paper:
-
-```bibtex
-@inproceedings{li2025apollo,
-  title={Apollo: Band-sequence Modeling for High-Quality Music Restoration in Compressed Audio},
-  author={Li, Kai and Luo, Yi},
-  booktitle={IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)},
-  year={2025},
-  organization={IEEE}
-}
+**Resume from last checkpoint:**
+```
+python train.py --conf_dir configs/apollo_uni.yaml --resume
 ```
 
-## Contact
+**Export to UVR after training:**
+```
+python export_for_uvr.py --ckpt ./Exps/Apollo_Universal/checkpoints/best.ckpt --out ./my_model_uvr.pth
+```
 
-For any questions or feedback regarding Apollo, feel free to reach out to us via email: `tsinghua.kaili@gmail.com`
+Logs and checkpoints are written to `Exps/<exp.name>/`. Launch TensorBoard with:
+```
+tensorboard --logdir Exps/
+```
+
+---
+
+## Tuning reference
+
+| Parameter | Location | Default | Notes |
+|---|---|---|---|
+| `HF_BOOST` | `gan_losses.py` | `3.0` | Extra penalty weight for bins above `HF_THRESHOLD_RATIO` of Nyquist |
+| `HF_THRESHOLD_RATIO` | `gan_losses.py` | `0.5` | Fraction of Nyquist above which HF boost applies (~11 kHz) |
+| `n_layers_to_freeze` | `train.py` | `2` | Number of BSNet layers (from layer 0) to keep frozen |
+| Base LR multiplier for layers 2–3 | `train.py` | `0.3` | Scale factor applied to newly-unfrozen mid layers |
+| `optimizer_g.lr` | config yaml | `1e-5` | Generator base learning rate |
+| `optimizer_d.lr` | config yaml | `1e-6` | Discriminator learning rate |
+| `batch_size` | config yaml | `1–2` | Reduce to `1` if VRAM is tight |
+| `num_workers` | config yaml | `2` | Keep at `2` on Windows; `spawn`-based workers are expensive |

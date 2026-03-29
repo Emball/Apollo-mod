@@ -221,6 +221,9 @@ class Apollo(BaseModel):
         self.feature_dim = feature_dim
         self.eps = torch.finfo(torch.float32).eps
 
+        # Pre-register hann window as a buffer so it's not recreated every forward pass
+        self.register_buffer("hann_win", torch.hann_window(int(sr * win // 1000)))
+
         # 80 bands
         bandwidth = int(self.win / 160)
         self.band_width = [bandwidth]*79
@@ -251,8 +254,11 @@ class Apollo(BaseModel):
 
         B, nch, nsample = input.shape
 
-        spec = torch.stft(input.view(B*nch, nsample), n_fft=self.win, hop_length=self.stride, 
-                          window=torch.hann_window(self.win).to(input.device), return_complex=True)
+        # cuFFT doesn't support half precision for non-power-of-two sizes,
+        # so we cast to float32 for the STFT and back afterward.
+        input_f32 = input.float()
+        spec = torch.stft(input_f32.view(B*nch, nsample), n_fft=self.win, hop_length=self.stride,
+                          window=self.hann_win, return_complex=True)
 
         subband_spec = []
         subband_spec_norm = []
@@ -293,8 +299,8 @@ class Apollo(BaseModel):
             this_RI = self.output[i](feature[:,i]).view(B*nch, 2, self.band_width[i], -1)
             est_spec.append(torch.complex(this_RI[:,0], this_RI[:,1]))
         est_spec = torch.cat(est_spec, 1)
-        output = torch.istft(est_spec, n_fft=self.win, hop_length=self.stride, 
-                             window=torch.hann_window(self.win).to(input.device), length=nsample).view(B, nch, -1)
+        output = torch.istft(est_spec.to(torch.complex64), n_fft=self.win, hop_length=self.stride,
+                             window=self.hann_win, length=nsample).view(B, nch, -1).to(input.dtype)
         
         return output
     

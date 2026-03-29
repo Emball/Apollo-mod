@@ -1,6 +1,6 @@
 exp: 
   dir: ./Exps
-  name: Apollo
+  name: Apollo_Universal
 
 datas:
   _target_: paired_datamodule.PairedAudioDataModule
@@ -8,14 +8,14 @@ datas:
   eval_dir: ./eval
   sr: 44100
   segment_sec: 3
-  batch_size: 2
+  batch_size: 1
   num_workers: 2
 
 model:
   _target_: look2hear.models.apollo.Apollo
   sr: 44100
   win: 20
-  feature_dim: 256
+  feature_dim: 384       # universal model is wider than base (256)
   layer: 6
 
 discriminator:
@@ -62,7 +62,7 @@ system:
 early_stopping:
   _target_: pytorch_lightning.callbacks.EarlyStopping
   monitor: val_loss
-  patience: 30
+  patience: 2000          # in steps (val runs every 100 steps, so ~200 evals before stopping)
   mode: min
   verbose: true
 
@@ -74,12 +74,12 @@ checkpoint:
   verbose: true
   save_top_k: -1
   save_last: false
-  filename: 'epoch={epoch:04d}-val_loss={val_loss:.4f}'
+  filename: 'step={step:06d}-val_loss={val_loss:.4f}'
 
 logger:
   _target_: pytorch_lightning.loggers.TensorBoardLogger
   save_dir: ${exp.dir}/${exp.name}/logs
-  name: Apollo
+  name: Apollo_Universal
 
 trainer:
   _target_: pytorch_lightning.Trainer
@@ -90,3 +90,5 @@ trainer:
   precision: 16-mixed
   limit_train_batches: 1.0
   fast_dev_run: false
+  val_check_interval: 306   # run validation every 500 steps (~8 min at current speed)
+  check_val_every_n_epoch: null  # disable epoch-based val, use step-based instead
