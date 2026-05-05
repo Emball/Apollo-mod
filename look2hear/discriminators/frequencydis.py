@@ -1,3 +1,5 @@
+# @claude last-modified: 2026-05-05T06:34:39Z
+# @claude last-commit: feat: major update — TUI, augmentation system, gradient checkpointing, optimization bootstrap
 ###
 # Modified from original Apollo frequencydis.py
 # Changes:
@@ -66,7 +68,8 @@ class MultiFrequencyDiscriminator(nn.Module):
                 est_RI[:, :, :valid_enc].contiguous()
             )
 
-            # Scale output by window weight so small windows contribute more
+            # Scale output by window weight — applied to every forward pass (real
+            # AND fake) so the weight is consistent across both sides of the D loss.
             weight = self.window_weights[i]
             est_outputs.append(est_out * weight)
             est_feature_maps.append(est_feat_map)

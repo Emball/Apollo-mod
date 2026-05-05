@@ -1,15 +1,81 @@
-exp: 
+exp:
   dir: ./Exps
   name: Apollo
 
+optimizations:
+  tf32: true
+  cudnn_benchmark: true
+  expandable_segments: true
+  triton_cache: true
+training:
+  n_layers_to_freeze: 4
+  hf_boost: 1.5
+  val_save_interval: 2
+  val_audio_pairs: 5
+  grad_accum_steps: 1
+
 datas:
   _target_: paired_datamodule.PairedAudioDataModule
-  train_dir: ./chunks
-  eval_dir: ./eval
+  train_dir: ./chunks/train
+  eval_dir: ./chunks/val
   sr: 44100
-  segment_sec: 3
+  segment_sec: 4
   batch_size: 2
-  num_workers: 2
+  num_workers: 8
+  pin_memory: true
+  val_bootstrap_chunks: 15
+  augmentation:
+    live:
+      enabled: true
+      mono_channel:
+        enabled: false
+        prob: 1.0
+      gain:
+        enabled: true
+        prob: 0.5
+        db_max: 1.5
+      polarity:
+        enabled: true
+        prob: 0.5
+      pitch_shift:
+        enabled: true
+        prob: 0.5
+        semitones_max: 1.5
+      noise:
+        enabled: true
+        prob: 0.5
+        sigma: 0.002
+      mp3_degradation:
+        enabled: true
+        prob: 0.5
+        kbps_min: 64
+        kbps_max: 256
+    cached:
+      enabled: false
+      cached_variants: 1
+      mono_channel:
+        enabled: true
+        fraction: 1.0
+      gain:
+        enabled: false
+        fraction: 0.5
+        db_max: 1.5
+      polarity:
+        enabled: false
+        fraction: 0.5
+      pitch_shift:
+        enabled: false
+        fraction: 0.5
+        semitones_max: 1.5
+      noise:
+        enabled: false
+        fraction: 0.5
+        sigma: 0.002
+      mp3_degradation:
+        enabled: false
+        fraction: 0.5
+        kbps_min: 64
+        kbps_max: 256
 
 model:
   _target_: look2hear.models.apollo.Apollo
@@ -23,16 +89,13 @@ discriminator:
   nch: 2
   window: [32, 64, 128, 256, 512, 1024, 2048]
 
-optimizer_g:
-  _target_: torch.optim.AdamW
-  lr: 0.00001
+optimizer:
+  type: adamw_8bit
+  lr_g: 0.00001
+  lr_d: 0.000001
   weight_decay: 0.01
-
-optimizer_d:
-  _target_: torch.optim.AdamW
-  lr: 0.000001
-  weight_decay: 0.01
-  betas: [0.5, 0.99]
+  betas_g: [0.9, 0.999]
+  betas_d: [0.5, 0.99]
 
 scheduler_g:
   _target_: torch.optim.lr_scheduler.StepLR
@@ -58,11 +121,13 @@ metrics:
 
 system:
   _target_: look2hear.system.audio_litmodule.AudioLightningModule
+  gradient_checkpointing: true
+  grad_accum_steps: ${training.grad_accum_steps}
 
 early_stopping:
   _target_: pytorch_lightning.callbacks.EarlyStopping
   monitor: val_loss
-  patience: 30
+  patience: 2000
   mode: min
   verbose: true
 
@@ -74,7 +139,7 @@ checkpoint:
   verbose: true
   save_top_k: -1
   save_last: false
-  filename: 'epoch={epoch:04d}-val_loss={val_loss:.4f}'
+  filename: 'step={step:06d}-val_loss={val_loss:.4f}'
 
 logger:
   _target_: pytorch_lightning.loggers.TensorBoardLogger
@@ -90,3 +155,5 @@ trainer:
   precision: 16-mixed
   limit_train_batches: 1.0
   fast_dev_run: false
+  val_check_interval: 306
+  check_val_every_n_epoch: null

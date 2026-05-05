@@ -1,3 +1,5 @@
+# @claude last-modified: 2026-05-05T06:34:39Z
+# @claude last-commit: feat: major update — TUI, augmentation system, gradient checkpointing, optimization bootstrap
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -279,9 +281,14 @@ class Apollo(BaseModel):
         subband_spec_norm, subband_power = self.spec_band_split(input)
         
         # normalization and bottleneck
+        # .real and .imag on complex tensors return non-contiguous views;
+        # make them contiguous before torch.cat / compiled kernels to avoid
+        # inductor stride assertion errors.
         subband_feature = []
         for i in range(self.nband):
-            concat_spec = torch.cat([subband_spec_norm[i].real, subband_spec_norm[i].imag, torch.log(subband_power[:,i].unsqueeze(1))], 1)
+            real = subband_spec_norm[i].real.contiguous()
+            imag = subband_spec_norm[i].imag.contiguous()
+            concat_spec = torch.cat([real, imag, torch.log(subband_power[:,i].unsqueeze(1))], 1)
             subband_feature.append(self.BN[i](concat_spec))
         subband_feature = torch.stack(subband_feature, 1)  # B, nband, N, T
 

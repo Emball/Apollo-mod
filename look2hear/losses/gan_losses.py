@@ -1,24 +1,18 @@
+# @claude last-modified: 2026-05-05T06:34:39Z
+# @claude last-commit: feat: major update — TUI, augmentation system, gradient checkpointing, optimization bootstrap
 ###
 # Modified from original Apollo gan_losses.py
 # Changes:
 #   - freq_MAE now applies perceptual weighting that penalizes
 #     high frequency errors more heavily, since the high end has
 #     less energy and contributes less to unweighted MAE
-#   - HF_BOOST controls how much extra weight the upper bands get
-#     relative to low/mid — 1.0 = no boost, 3.0 = triple penalty
+#   - hf_boost is now a constructor arg (configurable via yaml)
+#     1.0 = flat (original behavior), 2.0 = double penalty on top band
+#   - hf_threshold_ratio is also configurable
 ###
 
 import torch
 from torch.nn.modules.loss import _Loss
-
-# How much extra weight to apply to frequencies above HF_THRESHOLD_RATIO
-# of the Nyquist frequency. 1.0 = flat (original behavior).
-# 3.0 means errors in the top band cost 3x as much as low/mid errors.
-HF_BOOST = 3.0
-HF_THRESHOLD_RATIO = 0.5  # above 50% of Nyquist (~11kHz at 44100Hz)
-
-
-
 
 
 class MultiFrequencyDisLoss(_Loss):
@@ -35,7 +29,7 @@ class MultiFrequencyDisLoss(_Loss):
 
 
 class MultiFrequencyGenLoss(_Loss):
-    def __init__(self, eps=1e-8):
+    def __init__(self, eps=1e-8, hf_boost=1.0, hf_threshold_ratio=0.5):
         super(MultiFrequencyGenLoss, self).__init__()
         self.eps = eps
         self.all_win = [32, 64, 128, 256, 512, 1024, 2048]
@@ -45,9 +39,9 @@ class MultiFrequencyGenLoss(_Loss):
         for win in self.all_win:
             self.register_buffer(f"hann_{win}", torch.hann_window(win))
             n_bins = win // 2 + 1
-            hf_cutoff = int(n_bins * HF_THRESHOLD_RATIO)
+            hf_cutoff = int(n_bins * hf_threshold_ratio)
             w = torch.ones(1, n_bins, 1)
-            w[0, hf_cutoff:, 0] = HF_BOOST
+            w[0, hf_cutoff:, 0] = hf_boost
             self.register_buffer(f"weights_{win}", w)
 
     def _freq_MAE(self, output, target):

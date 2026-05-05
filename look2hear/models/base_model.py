@@ -1,3 +1,5 @@
+# @claude last-modified: 2026-05-05T06:34:39Z
+# @claude last-commit: feat: major update — TUI, augmentation system, gradient checkpointing, optimization bootstrap
 ###
 # Author: Kai Li
 # Date: 2021-06-17 23:08:32
@@ -34,7 +36,7 @@ def pad_to_appropriate_length(x, lcm):
     return x
 
 
-class BaseModel(nn.Module, PyTorchModelHubMixin, repo_url="https://github.com/JusperLee/Apollo", pipeline_tag="audio-to-audio"):
+class BaseModel(nn.Module, PyTorchModelHubMixin):
     def __init__(self, sample_rate, in_chan=1):
         super().__init__()
         self._sample_rate = sample_rate

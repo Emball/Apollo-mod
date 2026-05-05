@@ -1,15 +1,19 @@
+# @claude last-modified: 2026-05-05T06:34:39Z
+# @claude last-commit: feat: major update — TUI, augmentation system, gradient checkpointing, optimization bootstrap
 ###
 # Modified from original Apollo audio_litmodule.py
 # Changes:
 #   - Removed sync_dist=True from all log calls (causes hangs on single GPU)
 #   - Removed all_gather in validation (multi-GPU only)
 #   - Removed WandB-specific logger calls
-#   - Kept everything else identical
+#   - val_save_interval / val_audio_dir: save restored audio from val dataloader
+#     every N epochs so what you hear == what the loss measures
 ###
 import os
 import torchaudio
 from omegaconf import OmegaConf
 import torch
+import torch.utils.checkpoint as torch_checkpoint
 import pytorch_lightning as pl
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from collections.abc import MutableMapping
@@ -36,6 +40,11 @@ class AudioLightningModule(pl.LightningModule):
         loss_func=None,
         metrics=None,
         scheduler=None,
+        val_save_interval=5,
+        val_audio_dir=None,
+        val_audio_pairs=10,
+        gradient_checkpointing=False,
+        grad_accum_steps=1,
     ):
         super().__init__()
         self.audio_model = model
@@ -44,12 +53,62 @@ class AudioLightningModule(pl.LightningModule):
         self.loss_func = loss_func
         self.metrics = metrics
         self.scheduler = list(scheduler)
+        self.val_save_interval = val_save_interval
+        self.val_audio_dir = val_audio_dir
+        self.val_audio_pairs = val_audio_pairs
+        self._val_audio_indices = None
+        self.gradient_checkpointing = gradient_checkpointing
+        self.grad_accum_steps = max(1, grad_accum_steps)
+        self._accum_loss_g = None
+        self._accum_loss_d = None
+        self._accum_step   = 0
+
+        if gradient_checkpointing:
+            self._enable_gradient_checkpointing()
 
         self.default_monitor = "val_loss"
         self.validation_step_outputs = []
         self.test_step_outputs = []
         self.automatic_optimization = False
-        self.sample_output_dir = None  # set by train.py after instantiation
+
+    def _enable_gradient_checkpointing(self):
+        """
+        Wrap BSNet layers and FrequencyDiscriminator sub-networks with
+        torch.utils.checkpoint so intermediate activations are recomputed
+        during backward instead of stored — trades ~30% compute for large
+        VRAM savings.
+        """
+        import look2hear.models.apollo as _apollo_mod
+        import look2hear.discriminators.frequencydis as _dis_mod
+
+        original_bsnet_forward = _apollo_mod.BSNet.forward
+
+        def checkpointed_bsnet_forward(self_bsnet, input):
+            if not torch.is_grad_enabled():
+                return original_bsnet_forward(self_bsnet, input)
+            return torch_checkpoint.checkpoint(
+                original_bsnet_forward, self_bsnet, input, use_reentrant=False
+            )
+
+        _apollo_mod.BSNet.forward = checkpointed_bsnet_forward
+
+        original_freqdis_forward = _dis_mod.FrequencyDiscriminator.forward
+
+        def checkpointed_freqdis_forward(self_dis, x):
+            if not torch.is_grad_enabled():
+                return original_freqdis_forward(self_dis, x)
+
+            def _inner(x_):
+                out, _ = original_freqdis_forward(self_dis, x_)
+                return out
+
+            out = torch_checkpoint.checkpoint(_inner, x, use_reentrant=False)
+            with torch.no_grad():
+                _, hiddens = original_freqdis_forward(self_dis, x.detach())
+            return out, hiddens
+
+        _dis_mod.FrequencyDiscriminator.forward = checkpointed_freqdis_forward
+        print("[gradient_checkpointing] Enabled for BSNet layers and FrequencyDiscriminator.")
 
     def forward(self, wav):
         return self.audio_model(wav)
@@ -59,50 +118,77 @@ class AudioLightningModule(pl.LightningModule):
         optimizer_g, optimizer_d = self.optimizers()
         scheduler_g, scheduler_d = self.lr_schedulers()
 
-        # Generator forward pass (shared between both discriminator and generator updates)
-        optimizer_g.zero_grad()
-        output = self(codec_data)
+        is_last_accum = ((self._accum_step + 1) % self.grad_accum_steps == 0)
+
+        # Zero grads at the start of each new accumulation window
+        if self._accum_step % self.grad_accum_steps == 0:
+            optimizer_g.zero_grad()
+            optimizer_d.zero_grad()
+
+        # ── Mixed precision context ───────────────────────────────────────────
+        # Explicit autocast ensures every sub-op (STFT, conv, attention) runs
+        # in fp16 rather than relying on implicit casting from Lightning alone.
+        amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16)
+
+        with amp_ctx:
+            output = self(codec_data)
 
         # ── Discriminator update ──────────────────────────────────────────────
-        # Run discriminator on both generated and real audio.
-        # Cache target_outputs and targets_feature_maps here — we reuse them
-        # in the generator update below to avoid a redundant forward pass.
-        optimizer_d.zero_grad()
         for p in self.discriminator.parameters():
             p.requires_grad_(True)
 
-        est_outputs_d, _ = self.discriminator(output.detach(), sample_rate=44100)
-        target_outputs, targets_feature_maps = self.discriminator(ori_data, sample_rate=44100)
+        with amp_ctx:
+            est_outputs_d, _ = self.discriminator(output.detach(), sample_rate=44100)
+            target_outputs, targets_feature_maps = self.discriminator(ori_data, sample_rate=44100)
+            loss_d = self.loss_func["d"](target_outputs, est_outputs_d) / self.grad_accum_steps
 
-        loss_d = self.loss_func["d"](target_outputs, est_outputs_d)
+        self._accum_loss_d = (self._accum_loss_d or 0.0) + loss_d.detach()
         self.manual_backward(loss_d)
-        self.clip_gradients(optimizer_d, gradient_clip_val=5, gradient_clip_algorithm="norm")
-        optimizer_d.step()
+
+        # Detach targets_feature_maps — fixed reference for feature matching;
+        # dropping the D graph here is the primary VRAM saving.
+        targets_feature_maps = [
+            [f.detach() for f in fmap] for fmap in targets_feature_maps
+        ]
+        del est_outputs_d, target_outputs
+        torch.cuda.empty_cache()
 
         # ── Generator update ──────────────────────────────────────────────────
-        # Freeze discriminator weights — we only need gradients w.r.t. generator.
-        # Reuse cached target_outputs/targets_feature_maps from above (saves one
-        # full discriminator forward pass per training step).
         for p in self.discriminator.parameters():
             p.requires_grad_(False)
 
-        est_outputs, est_feature_maps = self.discriminator(output, sample_rate=44100)
+        with amp_ctx:
+            est_outputs, est_feature_maps = self.discriminator(output, sample_rate=44100)
+            loss_g = self.loss_func["g"](
+                est_outputs, est_feature_maps, targets_feature_maps, output, ori_data
+            ) / self.grad_accum_steps
 
-        loss_g = self.loss_func["g"](est_outputs, est_feature_maps, targets_feature_maps, output, ori_data)
+        self._accum_loss_g = (self._accum_loss_g or 0.0) + loss_g.detach()
         self.manual_backward(loss_g)
-        self.clip_gradients(optimizer_g, gradient_clip_val=5, gradient_clip_algorithm="norm")
-        optimizer_g.step()
 
-        # Unfreeze discriminator for next step
         for p in self.discriminator.parameters():
             p.requires_grad_(True)
+
+        # ── Optimizer step — only after accumulating grad_accum_steps batches ─
+        if is_last_accum:
+            self.clip_gradients(optimizer_d, gradient_clip_val=5, gradient_clip_algorithm="norm")
+            optimizer_d.step()
+
+            self.clip_gradients(optimizer_g, gradient_clip_val=5, gradient_clip_algorithm="norm")
+            optimizer_g.step()
+
+            self.log("train_loss_d", self._accum_loss_d, on_epoch=True, prog_bar=True, logger=True)
+            self.log("train_loss_g", self._accum_loss_g, on_epoch=True, prog_bar=True, logger=True)
+            self._accum_loss_g = None
+            self._accum_loss_d = None
+
+        self._accum_step += 1
 
         if self.trainer.is_last_batch:
             scheduler_g.step()
             scheduler_d.step()
 
-        self.log("train_loss_d", loss_d, on_epoch=True, prog_bar=True, logger=True)
-        self.log("train_loss_g", loss_g, on_epoch=True, prog_bar=True, logger=True)
+
 
     def validation_step(self, batch, batch_nb):
         ori_data, codec_data = batch
@@ -112,25 +198,90 @@ class AudioLightningModule(pl.LightningModule):
         self.log("val_loss", loss, on_epoch=True, prog_bar=True, logger=True)
         self.validation_step_outputs.append(loss)
 
-        # Save restored audio samples at each validation run (keyed by global step)
-        if self.sample_output_dir is not None:
-            step = self.global_step
-            sample_dir = os.path.join(self.sample_output_dir, f"step_{step:06d}")
-            os.makedirs(sample_dir, exist_ok=True)
-            restored = est_sources[0].float().cpu()
-            lq       = codec_data[0].float().cpu()
-            hq       = ori_data[0].float().cpu()
-            sr = 44100
-            torchaudio.save(os.path.join(sample_dir, f"sample_{batch_nb:03d}_restored.wav"), restored, sr)
-            torchaudio.save(os.path.join(sample_dir, f"sample_{batch_nb:03d}_lq.wav"),       lq,       sr)
-            torchaudio.save(os.path.join(sample_dir, f"sample_{batch_nb:03d}_hq.wav"),       hq,       sr)
+        # Save restored audio every val_save_interval epochs so the rendered
+        # audio and the loss number are always from the same computation.
+        # Only saves for the fixed subset of pairs chosen at first val run.
+
+        # Build a batch_nb -> song_key map on the first real val epoch so
+        # on_validation_epoch_end can select diverse indices.
+        # Skip during the sanity check — it only sees 2 batches and would
+        # lock in a useless index before real validation runs.
+        if self._val_audio_indices is None and not self.trainer.sanity_checking:
+            if not hasattr(self, '_val_batch_index'):
+                self._val_batch_index = {}
+            # Derive song key from batch_nb via the val dataset's index table
+            try:
+                val_dataset = self.trainer.datamodule.data_val
+                pair_idx, _ = val_dataset.index[batch_nb]
+                lq_path = val_dataset.pairs[pair_idx][0]
+                fname = os.path.basename(lq_path)
+                parts = fname.rsplit("_", 1)
+                song_key = parts[0] if len(parts) == 2 and parts[1].replace(".wav", "").isdigit() else fname
+            except Exception:
+                song_key = str(batch_nb)
+            self._val_batch_index[batch_nb] = song_key
+
+        if (
+            self.val_audio_dir is not None
+            and self.current_epoch % self.val_save_interval == 0
+        ):
+            # On first val epoch, _val_audio_indices is None — we can't compute
+            # evenly spaced indices until on_validation_epoch_end knows the total.
+            # So we save all batches on epoch 0 and let on_validation_epoch_end
+            # prune to the evenly spaced set. On subsequent epochs the set is fixed.
+            if self._val_audio_indices is None:
+                save_this = True
+            else:
+                save_this = batch_nb in self._val_audio_indices
+
+            if save_this:
+                epoch_dir = os.path.join(
+                    self.val_audio_dir, f"epoch_{self.current_epoch:04d}"
+                )
+                os.makedirs(epoch_dir, exist_ok=True)
+                sr = 44100
+
+                out = est_sources
+                if out.ndim == 3:
+                    out = out[0]
+                elif out.ndim == 1:
+                    out = out.unsqueeze(0)
+                out = out.float().cpu().clamp(-1.0, 1.0)
+                torchaudio.save(
+                    os.path.join(epoch_dir, f"restored_{batch_nb:04d}.wav"),
+                    out, sr,
+                )
 
         return {"val_loss": loss}
 
     def on_validation_epoch_end(self):
-        avg_loss = torch.stack(self.validation_step_outputs).mean()
         self.log("lr", self.optimizer[0].param_groups[0]["lr"], on_epoch=True, prog_bar=True)
         self.validation_step_outputs.clear()
+
+        # After the first val epoch we know the full dataset size — randomly
+        # pick val_audio_pairs indices with at least 1 from each song, then
+        # lock them in for all future epochs.
+        if self._val_audio_indices is None and hasattr(self, '_val_batch_index') and not self.trainer.sanity_checking:
+            import random
+            from collections import defaultdict
+
+            # _val_batch_index maps batch_nb -> filename stem so we can group by song
+            song_batches = defaultdict(list)
+            for batch_nb, song_key in self._val_batch_index.items():
+                song_batches[song_key].append(batch_nb)
+
+            songs = list(song_batches.keys())
+            n = min(self.val_audio_pairs, sum(len(v) for v in song_batches.values()))
+
+            # Guarantee 1 random batch per song, then fill remainder from the full pool
+            selected = [random.choice(song_batches[s]) for s in songs]
+            already = set(selected)
+            remainder = [nb for nb in self._val_batch_index if nb not in already]
+            still_needed = max(0, n - len(selected))
+            selected += random.sample(remainder, min(still_needed, len(remainder)))
+
+            self._val_audio_indices = set(selected)
+            print(f"[val audio] Locked indices ({len(self._val_audio_indices)} randomly sampled across {len(songs)} songs): {sorted(self._val_audio_indices)}")
 
     def test_step(self, batch, batch_nb):
         mixtures, targets = batch
@@ -141,7 +292,6 @@ class AudioLightningModule(pl.LightningModule):
         return {"test_loss": loss}
 
     def on_test_epoch_end(self):
-        avg_loss = torch.stack(self.test_step_outputs).mean()
         self.log("lr", self.optimizer[0].param_groups[0]["lr"], on_epoch=True, prog_bar=True)
         self.test_step_outputs.clear()
 

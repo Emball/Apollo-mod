@@ -35,3 +35,13 @@ fast-bss-eval==0.1.4
 # Misc
 sympy==1.12
 packaging==23.2
+setuptools
+bitsandbytes
+
+# Augmentation
+ffmpeg-python
+
+# Web UI
+flask==3.0.3
+flask-socketio==5.3.6
+python-socketio==5.11.2
