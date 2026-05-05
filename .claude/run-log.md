@@ -8,4 +8,6 @@
 
 [[[2026-05-05T06:34:45Z: Ingested massively updated upload. New: tui.py (1340-line curses TUI), install.sh/bat, start.sh/bat, test_augmentations.py, configs/README.txt. Major changes: augmentation dataclasses in paired_datamodule, apply_optimizations() in train.py, gradient checkpointing + grad accumulation in audio_litmodule, chunked inference in inference.py, WAV-only enforcement for training data. All files committed.]]]
 
-[[[2026-05-05T06:37:00Z: Session resumed. Verified prior run committed successfully. Awaiting user direction.
+[[[2026-05-05T06:37:00Z: Session resumed. Verified prior run committed successfully. Awaiting user direction.]]]
+
+[[[2026-05-05T06:40:00Z: Removed web UI. Deleted flask/flask-socketio from requirements.txt, rewrote start.sh and start.bat to launch tui.py instead.

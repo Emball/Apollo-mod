@@ -19,3 +19,6 @@ BSNet.forward and FrequencyDiscriminator.forward are wrapped with torch.utils.ch
 
 ### [setup] 2026-05-05 — TUI entry point
 tui.py is a 1340-line curses TUI with Train, Inference, Config editor, Pretrain model browser, and Log viewer screens. Launched via start.sh / start.bat. Note: start.sh references webui.py which does not exist — likely a stale reference or planned future file.
+
+### [decision] 2026-05-05 — Web UI removed
+webui.py was a failed experiment. flask and flask-socketio removed from requirements.txt. start.sh/start.bat now launch tui.py directly.
