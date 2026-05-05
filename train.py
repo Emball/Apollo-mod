@@ -1,3 +1,5 @@
+# @claude last-modified: 2026-05-05T06:50:00Z
+# @claude last-commit: feat: add torch.compile support via --compile flag
 import json
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -301,9 +303,30 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # on an 11 GB card without a severe throughput hit.
     freeze_early_layers(model, n_layers_to_freeze=4)
 
+    # torch.compile — Triton-backed kernel fusion. Applied after weight loading
+    # and layer freezing so compiled graph reflects the final trainable subgraph.
+    # Use --compile to enable. First forward pass triggers compilation (~60s).
+    if cfg.get("compile", False):
+        if not hasattr(torch, "compile"):
+            print_only("WARNING: torch.compile not available (requires PyTorch >= 2.0). Skipping.")
+        else:
+            print_only("torch.compile enabled — compiling model...")
+            try:
+                model = torch.compile(model, mode="reduce-overhead", dynamic=True)
+                print_only("  ✓ model compiled")
+            except Exception as e:
+                print_only(f"  ✗ model compile failed ({e}) — falling back to eager")
+
     # Instantiate discriminator fresh — learns your artifact type from scratch
     print_only(f"Instantiating Discriminator <{cfg.discriminator._target_}>")
     discriminator = hydra.utils.instantiate(cfg.discriminator)
+
+    if cfg.get("compile", False) and hasattr(torch, "compile"):
+        try:
+            discriminator = torch.compile(discriminator, mode="reduce-overhead", dynamic=True)
+            print_only("  ✓ discriminator compiled")
+        except Exception as e:
+            print_only(f"  ✗ discriminator compile failed ({e}) — falling back to eager")
 
     # Instantiate optimizers
     print_only(f"Instantiating optimizers")
@@ -583,6 +606,12 @@ if __name__ == "__main__":
         help="Path to folder containing LQ audio files to process each validation epoch. "
              "Outputs saved to <exp_dir>/test_outputs/epoch_NNNN/<filename>.wav",
     )
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="Enable torch.compile on model and discriminator (requires PyTorch >= 2.0 and Triton). "
+             "First step will be slow (~60s) while kernels are compiled. Subsequent steps are faster.",
+    )
     args = parser.parse_args()
     cfg = OmegaConf.load(args.conf_dir)
     if args.weights_path:
@@ -591,6 +620,8 @@ if __name__ == "__main__":
         cfg.resume = True
     if args.test_dir:
         cfg.test_dir = args.test_dir
+    if args.compile:
+        cfg.compile = True
 
     os.makedirs(os.path.join(cfg.exp.dir, cfg.exp.name), exist_ok=True)
     OmegaConf.save(cfg, os.path.join(cfg.exp.dir, cfg.exp.name, "config.yaml"))
