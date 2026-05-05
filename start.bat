@@ -1,6 +1,7 @@
 @echo off
+:: @claude last-modified: 2026-05-05T06:40:00Z
+:: @claude last-commit: chore: remove web UI, start scripts launch TUI
 setlocal
-:: start.bat — Launch the Apollo Web UI (Windows)
 
 set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
@@ -12,10 +13,5 @@ if not exist "%PYTHON%" (
     pause & exit /b 1
 )
 
-echo.
-echo   Apollo Web UI -- starting
-echo   Open http://127.0.0.1:5000 in your browser
-echo.
-
-"%PYTHON%" "%SCRIPT_DIR%\webui.py"
+"%PYTHON%" "%SCRIPT_DIR%\tui.py"
 endlocal
