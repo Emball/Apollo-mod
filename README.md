@@ -241,7 +241,7 @@ Live uses `prob` (per-sample probability); cached uses `fraction` (fraction of c
 
 | Augmentation | Description |
 |---|---|
-| `mono_channel` | Picks L or R randomly instead of feeding both near-identical stereo channels as unique data. |
+| `mono_channel` | Alternates L/R by sample index (even=L, odd=R) instead of feeding both near-identical stereo channels as unique data. Guarantees a clean 50/50 split every epoch regardless of shuffle order. |
 | `pitch_shift` | Transparent pitch shift. `semitones_max` sets the max shift in either direction. |
 | `noise` | Matched Gaussian noise added to both LQ and HQ. `sigma: 0.002` is very subtle. |
 | `mp3_degradation` | Random CBR MP3 re-encode on LQ only. `kbps_min`/`kbps_max` set the bitrate range. |
