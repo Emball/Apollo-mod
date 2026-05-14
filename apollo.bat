@@ -46,17 +46,16 @@ echo [apollo] Dependencies up to date
 
 :: 4. If arguments given, treat first as the script name and run it
 if not "%*"=="" (
-    set "CMD=%1"
-    shift
+    for /f "tokens=1,* delims= " %%a in ("%*") do set "CMD=%%a" & set "REST=%%b"
     if /i "!CMD!"=="train"     set "SCRIPT=train.py"
     if /i "!CMD!"=="inference" set "SCRIPT=inference.py"
     if /i "!CMD!"=="test"      set "SCRIPT=test.py"
     if defined SCRIPT (
-        "%VENV_DIR%\Scripts\python.exe" "%SCRIPT_DIR%\%SCRIPT%" %*
+        "%VENV_DIR%\Scripts\python.exe" "%SCRIPT_DIR%\!SCRIPT!" !REST!
     ) else if /i "!CMD!"=="python" (
-        "%VENV_DIR%\Scripts\python.exe" %*
+        "%VENV_DIR%\Scripts\python.exe" !REST!
     ) else (
-        "%VENV_DIR%\Scripts\python.exe" "%SCRIPT_DIR%\%CMD%" %*
+        "%VENV_DIR%\Scripts\python.exe" "%SCRIPT_DIR%\!CMD!" !REST!
     )
     exit /b %errorlevel%
 )
