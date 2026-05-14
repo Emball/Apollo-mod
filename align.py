@@ -132,11 +132,10 @@ def _correct_start(lq, hq, sr, max_off=None):
 
 def _correct_speed(lq_wav, hq_mono, sr, max_off=None):
     """Stage 2: measure end drift after start fix, resample LQ to match speed."""
-    if max_off is None:
-        max_off = int(0.5 * sr)
     lq_mono = lq_wav.mean(dim=0)
-    win = int(min(2.0 * sr, lq_mono.shape[0], hq_mono.shape[0]))
-    off = _env_xcorr_peak(lq_mono[-win:], hq_mono[-win:], max_off, sr).item()
+    n = min(lq_mono.shape[0], hq_mono.shape[0])
+    win = int(min(5.0 * sr, n))
+    off = _env_xcorr_peak(lq_mono[-win:], hq_mono[-win:], win // 2, sr).item()
     if abs(off) < int(0.001 * sr):
         return lq_wav, 0
     drift = off
