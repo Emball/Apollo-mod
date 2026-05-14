@@ -428,6 +428,8 @@ class PairedAudioDataModule(LightningDataModule):
         pin_memory: bool = True,
         augmentation: Optional[dict] = None,
         val_bootstrap_chunks: int = 50,
+        chunk_align: bool = False,
+        chunk_align_max_shift_ms: int = 100,
     ):
         super().__init__()
         self.train_dir            = train_dir
