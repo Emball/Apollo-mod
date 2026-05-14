@@ -47,9 +47,14 @@ def _xcorr_peak(a, b, max_shift):
     return peak - center
 
 
+def _normalize(x):
+    """Remove DC and normalize to unit variance."""
+    return (x - x.mean()) / (x.std() + 1e-10)
+
+
 def _env_xcorr_peak(a, b, max_shift, sr=44100, frame_ms=10):
-    """Cross-correlate RMS envelopes instead of raw waveform.
-       More robust for heavily compressed audio."""
+    """Cross-correlate AC-coupled envelopes instead of raw waveform.
+       Much more robust for heavily compressed audio."""
     frame = int(frame_ms / 1000 * sr)
     if frame < 2:
         frame = 2
@@ -61,17 +66,15 @@ def _env_xcorr_peak(a, b, max_shift, sr=44100, frame_ms=10):
         b.abs().unsqueeze(0), kernel_size=frame, stride=1,
         padding=frame // 2
     ).squeeze(0)
-    off = _xcorr_peak(a_env, b_env, max_shift)
+    off = _xcorr_peak(_normalize(a_env), _normalize(b_env), max_shift)
     return off
 
 
 def _full_env_offset(a, b, sr, max_off=None):
-    """Global offset via full-file envelope cross-correlation.
-       Far more robust than window-based methods for degraded audio.
-       Uses decimated envelope for efficiency."""
+    """Global offset via full-file AC-coupled envelope cross-correlation.
+       Uses decimated envelope for efficiency on long files."""
     if max_off is None:
         max_off = int(0.5 * sr)
-    # Decimate to ~1.5 kHz for efficient full-file correlation
     hop = int(sr / 1500)
     a_env = torch.nn.functional.avg_pool1d(
         a.abs().unsqueeze(0), kernel_size=hop, stride=hop
@@ -79,19 +82,18 @@ def _full_env_offset(a, b, sr, max_off=None):
     b_env = torch.nn.functional.avg_pool1d(
         b.abs().unsqueeze(0), kernel_size=hop, stride=hop
     ).squeeze(0)
-    # Full cross-correlation via FFT
+    a_env = _normalize(a_env)
+    b_env = _normalize(b_env)
     n = a_env.shape[0] + b_env.shape[0] - 1
     n_fft = 1 << (n - 1).bit_length()
     A = torch.fft.rfft(a_env, n_fft)
     B = torch.fft.rfft(b_env, n_fft)
     corr = torch.fft.irfft(A * B.conj(), n_fft)
-    # Peak within search range (in decimated samples)
     center = b_env.shape[0] - 1
     max_off_dec = max_off // hop + 1
     lo = max(0, center - max_off_dec)
     hi = min(n_fft, center + max_off_dec + 1)
     peak = lo + torch.argmax(corr[lo:hi])
-    # Refine with parabolic interpolation around peak for sub-sample accuracy
     idx = int(peak.item())
     if 1 < idx < n_fft - 2:
         y0, y1, y2 = corr[idx-1], corr[idx], corr[idx+1]
