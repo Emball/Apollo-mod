@@ -155,8 +155,23 @@ def _correct_speed(lq_wav, hq_mono, sr, max_off=None):
     return lq_wav, drift
 
 
+def _onset_env(x, sr):
+    """Onset strength envelope: half-wave rectified difference of smoothed envelope.
+       Produces sharp peaks at transients — ideal for aligning percussive audio."""
+    env = x.abs()
+    smooth = int(0.003 * sr)
+    if smooth > 1:
+        env = torch.nn.functional.avg_pool1d(
+            env.unsqueeze(0), kernel_size=smooth, stride=1, padding=smooth // 2
+        ).squeeze(0)
+    onset = torch.nn.functional.relu(env[1:] - env[:-1])
+    onset = torch.nn.functional.pad(onset, (1, 0))
+    return onset
+
+
 def _align_chunks(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=200):
-    """Stage 3: cut-and-crossfade chunk alignment for residual local drift."""
+    """Stage 3: cut-and-crossfade chunk alignment for residual local drift.
+       Uses onset-envelope correlation to avoid beat ambiguity with drums."""
     lq = lq_wav.mean(dim=0)
     hq = hq_wav.mean(dim=0)
     n = min(lq.shape[0], hq.shape[0])
@@ -167,10 +182,13 @@ def _align_chunks(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=200)
     hop = int(chunk * (1 - overlap))
     max_shift = int(search_ms / 1000 * sr)
 
+    lq_onset = _onset_env(lq, sr)
+    hq_onset = _onset_env(hq, sr)
+
     offsets = []
     for start in range(0, n - chunk + 1, hop):
-        a = lq[start:start + chunk]
-        b = hq[start:start + chunk]
+        a = lq_onset[start:start + chunk]
+        b = hq_onset[start:start + chunk]
         off = _xcorr_peak(a, b, max_shift)
         offsets.append(off.item())
 
