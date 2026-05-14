@@ -104,13 +104,29 @@ def _full_env_offset(a, b, sr, max_off=None):
     return off_dec * hop
 
 
+def _first_onset(x, sr, frame_ms=100):
+    """Find first non-silent sample using adaptive energy threshold.
+       Uses 100ms frames, threshold at 10% of peak energy (immune to noise floor)."""
+    frame = int(frame_ms / 1000 * sr)
+    energy = x.unfold(0, frame, frame // 4).pow(2).mean(dim=1)
+    thresh = energy.max() * 0.08
+    hits = torch.where(energy > thresh)[0]
+    if len(hits) == 0:
+        return 0
+    first = int(hits[0].item() * (frame // 4))
+    return max(0, first - frame // 2)
+
+
 def _correct_start(lq, hq, sr, max_off=None):
-    """Stage 1: find global start offset and pad/trim LQ."""
+    """Stage 1: find and correct start offset using onset alignment.
+       Onset-based matching is robust for files with silent pre-roll."""
     if max_off is None:
         max_off = int(0.5 * sr)
-    off = int(round(_full_env_offset(lq, hq, sr, max_off).item()))
+    lo = _first_onset(lq, sr)
+    ho = _first_onset(hq, sr)
+    off = lo - ho
     if abs(off) > int(0.001 * sr):
-        print(f"    Stage 1: start offset {off:+d} samples", flush=True)
+        print(f"    Stage 1: start offset {off:+d} samples (LQ onset at {lo}, HQ at {ho})", flush=True)
     return off
 
 
