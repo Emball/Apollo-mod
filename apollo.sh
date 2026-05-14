@@ -65,14 +65,21 @@ if [ $# -gt 0 ]; then
     exec "$VENV_DIR/bin/python" "$SCRIPT_DIR/$SCRIPT" "$@"
 fi
 
-# 5. No arguments — drop into an activated shell
+# 5. No arguments — drop into an activated shell with command aliases
+RC=$(mktemp)
+cat > "$RC" <<- EOF
+alias train='python "$SCRIPT_DIR/train.py"'
+alias inference='python "$SCRIPT_DIR/inference.py"'
+alias test='python "$SCRIPT_DIR/test.py"'
+EOF
+
 echo
 echo -e "${GRN}  Apollo ready.${RST} Type 'exit' to leave."
-echo -e "  Example: ${CYN}python inference.py --in_wav input.wav --out_wav out.wav${RST}"
+echo -e "  Commands: ${CYN}train, inference, test${RST} (or python directly)"
 echo
 
 export VIRTUAL_ENV="$VENV_DIR"
 export PATH="$VENV_DIR/bin:$PATH"
 unset PYTHONHOME
 
-exec "${SHELL:-bash}" --norc --noprofile -i
+exec "${SHELL:-bash}" --rcfile "$RC" --noprofile -i
