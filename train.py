@@ -527,6 +527,24 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # Auto-preprocess raw data and bootstrap eval if needed
     prepare_data(cfg)
 
+    # Verify chunks exist — if data/ was empty, provide a clear error
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    train_lq   = os.path.join(script_dir, cfg.datas.train_dir, "LQ")
+    if not os.path.isdir(train_lq) or not any(f.endswith(".wav") for f in os.listdir(train_lq)):
+        print_only("")
+        print_only("ERROR: No training chunks found.")
+        print_only("")
+        print_only("  Populate data/train/ and data/val/ with paired WAV files:")
+        print_only("    data/train/LQ/   ← degraded audio (MP3, noisy, etc.)")
+        print_only("    data/train/HQ/   ← clean reference (same filenames)")
+        print_only("    data/val/LQ/")
+        print_only("    data/val/HQ/")
+        print_only("")
+        print_only("  Then run train again. Existing data directories with different")
+        print_only("  layouts (e.g. song_LQ/song_HQ) are auto-normalized on first run.")
+        print_only("")
+        raise SystemExit(1)
+
     # Instantiate datamodule
     print_only(f"Instantiating datamodule <{cfg.datas._target_}>")
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.datas)
