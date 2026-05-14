@@ -43,18 +43,43 @@ else
     ok "venv exists"
 fi
 
-# 3. Install / sync dependencies
-info "Installing PyTorch (CUDA 12.1)..."
-"$UV_BIN" pip install \
-    --python "$VENV_DIR/bin/python" \
-    --index-url https://download.pytorch.org/whl/cu121 \
-    torch==2.1.2+cu121 torchaudio==2.1.2+cu121
-ok "PyTorch installed"
+# 3. Install / sync dependencies — platform-aware
+# ---------------------------------------------------------------------------
+# Linux   → CUDA PyTorch from pytorch.org index + bitsandbytes
+# macOS   → standard PyTorch from PyPI (MPS on Apple Silicon, CPU on Intel),
+#            no bitsandbytes (unsupported on macOS)
+# Windows → handled by apollo.bat (CUDA PyTorch + bitsandbytes)
+# ---------------------------------------------------------------------------
+OS="$(uname -s)"
+case "$OS" in
+    Linux*)
+        info "Detected Linux — installing CUDA PyTorch 2.1.2..."
+        "$UV_BIN" pip install \
+            --python "$VENV_DIR/bin/python" \
+            --index-url https://download.pytorch.org/whl/cu121 \
+            torch==2.1.2+cu121 torchaudio==2.1.2+cu121
+        ok "PyTorch installed"
+        ;;
+    Darwin*)
+        info "Detected macOS — installing PyTorch 2.1.2 (MPS/CPU)..."
+        "$UV_BIN" pip install \
+            --python "$VENV_DIR/bin/python" \
+            torch==2.1.2 torchaudio==2.1.2
+        ok "PyTorch installed"
+        ;;
+    *)
+        die "Unsupported OS: $OS (only Linux, macOS, and Windows are supported)"
+        ;;
+esac
 
 info "Syncing remaining dependencies..."
+EXTRAS="setuptools<71 pyyaml"
+if [ "$OS" = "Linux" ]; then
+    EXTRAS="$EXTRAS bitsandbytes>=0.43.0"
+fi
 "$UV_BIN" pip install \
     --python "$VENV_DIR/bin/python" \
-    "setuptools<71" pyyaml \
+    $EXTRAS \
     -r "$SCRIPT_DIR/requirements.txt"
 ok "dependencies up to date"
 

@@ -34,7 +34,8 @@ fast-bss-eval==0.1.4
 sympy==1.12
 packaging==23.2
 setuptools
-bitsandbytes>=0.43.0
+# bitsandbytes is installed separately by apollo.sh / apollo.bat
+# Only available on Linux (CUDA) and Windows (>=0.43.0).
 
 # Augmentation
 ffmpeg-python
