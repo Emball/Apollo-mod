@@ -35,11 +35,18 @@ if exist "%VENV_DIR%\Scripts\python.exe" (
 )
 
 :: 3. Install / sync dependencies
-echo [apollo] Syncing dependencies...
+echo [apollo] Installing PyTorch (CUDA 12.1^)...
 "%UV_BIN%" pip install ^
     --python "%VENV_DIR%\Scripts\python.exe" ^
-    --extra-index-url https://download.pytorch.org/whl/cu121 ^
-    --index-strategy unsafe-best-match ^
+    --index-url https://download.pytorch.org/whl/cu121 ^
+    torch==2.1.2+cu121 torchaudio==2.1.2+cu121 ^
+    --quiet
+if %errorlevel% neq 0 ( echo [apollo] ERROR: PyTorch install failed. & pause & exit /b 1 )
+echo [apollo] PyTorch installed
+
+echo [apollo] Syncing remaining dependencies...
+"%UV_BIN%" pip install ^
+    --python "%VENV_DIR%\Scripts\python.exe" ^
     "setuptools<71" pyyaml ^
     -r "%SCRIPT_DIR%\requirements.txt" ^
     --quiet

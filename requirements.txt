@@ -1,6 +1,4 @@
 # Core
-torch==2.1.2+cu121
-torchaudio==2.1.2+cu121
 pytorch-lightning==2.1.4
 
 # Config / hydra

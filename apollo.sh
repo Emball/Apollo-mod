@@ -44,11 +44,17 @@ else
 fi
 
 # 3. Install / sync dependencies
-info "Syncing dependencies..."
+info "Installing PyTorch (CUDA 12.1)..."
 "$UV_BIN" pip install \
     --python "$VENV_DIR/bin/python" \
-    --extra-index-url https://download.pytorch.org/whl/cu121 \
-    --index-strategy unsafe-best-match \
+    --index-url https://download.pytorch.org/whl/cu121 \
+    torch==2.1.2+cu121 torchaudio==2.1.2+cu121 \
+    --quiet
+ok "PyTorch installed"
+
+info "Syncing remaining dependencies..."
+"$UV_BIN" pip install \
+    --python "$VENV_DIR/bin/python" \
     "setuptools<71" pyyaml \
     -r "$SCRIPT_DIR/requirements.txt" \
     --quiet
