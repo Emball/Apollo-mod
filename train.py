@@ -171,21 +171,36 @@ def _global_speed_align(lq_wav: "torch.Tensor", hq_wav: "torch.Tensor", sr: int)
     env_hq_end = _envelope(hq_mono[n - anchor:n], frame)
     off_end = _xcorr_offset(env_lq_end, env_hq_end, max_shift_frames) * frame
 
-    # Drift = how many extra LQ samples have accumulated by the end
+    # off_start: fixed absolute offset between LQ and HQ at the start of the file
+    # drift: additional offset accumulated by the end (constant speed difference)
     drift = off_end - off_start
-    if abs(drift) < int(0.001 * sr):
-        # Less than 1 ms drift — not worth resampling
-        return lq_wav[:, :n]
 
-    new_len = max(1, n - drift)
-    chans = []
-    for ch in range(lq_wav.shape[0]):
-        x = lq_wav[ch:ch+1, :n].unsqueeze(0).float()
-        y = torch.nn.functional.interpolate(x, size=new_len, mode='linear', align_corners=False)
-        chans.append(y.squeeze(0))
-    lq_corrected = torch.cat(chans, dim=0)
-    print_only(f"    [align] global speed: drift={drift:+d} samples over {n/sr:.1f}s → resampled LQ {n}→{new_len}")
-    return lq_corrected
+    print_only(f"    [align] start_offset={off_start:+d} samples ({off_start/sr*1000:.1f}ms)  "
+               f"drift={drift:+d} samples ({drift/sr*1000:.1f}ms) over {n/sr:.1f}s")
+
+    # Step 1: correct speed (drift) via resample
+    if abs(drift) >= int(0.001 * sr):
+        new_len = max(1, n - drift)
+        chans = []
+        for ch in range(lq_wav.shape[0]):
+            x = lq_wav[ch:ch+1, :n].unsqueeze(0).float()
+            y = torch.nn.functional.interpolate(x, size=new_len, mode='linear', align_corners=False)
+            chans.append(y.squeeze(0))
+        lq_wav = torch.cat(chans, dim=0)
+        print_only(f"    [align] resampled LQ {n}->{new_len} to correct speed")
+        n = lq_wav.shape[1]
+
+    # Step 2: correct absolute start offset by shifting LQ
+    # Positive off_start means LQ leads HQ — drop samples from the front.
+    # Negative off_start means LQ lags HQ — pad the front with silence.
+    if abs(off_start) >= int(0.001 * sr):
+        if off_start > 0:
+            lq_wav = lq_wav[:, off_start:]
+        else:
+            lq_wav = torch.nn.functional.pad(lq_wav, (-off_start, 0))
+        print_only(f"    [align] shifted LQ by {off_start:+d} samples to correct start offset")
+
+    return lq_wav
 
 
 def _chunk_align_offset(lq_mono, hq_mono, chunk_start, chunk_len, sr, max_shift):
