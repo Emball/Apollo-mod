@@ -19,7 +19,6 @@ import torchaudio
 import argparse
 import os
 import sys
-import math
 import numpy as np
 import scipy.ndimage
 
@@ -69,49 +68,36 @@ def align_pair(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=80):
     max_shift = int(search_ms / 1000 * sr)
 
     offsets = []
-    positions = []
-
     for start in range(0, n - chunk + 1, hop):
         a = lq[start:start + chunk]
         b = hq[start:start + chunk]
         off = _xcorr_peak(a, b, max_shift)
         offsets.append(off.item())
-        positions.append(start + chunk // 2)
 
     if not offsets:
         return lq_wav[:, :n]
 
-    p = torch.tensor(positions, dtype=torch.float)
     o = torch.tensor(offsets, dtype=torch.float)
-
     if len(o) > 3:
-        o = torch.tensor(
-            scipy.ndimage.median_filter(o.numpy(), size=3)
-        )
+        o = torch.tensor(scipy.ndimage.median_filter(o.numpy(), size=3))
+    o = o.round().long()
 
-    all_pos = torch.arange(n, dtype=torch.float)
-    if len(o) > 1:
-        off_np = np.interp(all_pos.numpy(), p.numpy(), o.numpy())
-        sample_off = torch.clamp(
-            torch.from_numpy(off_np),
-            -max_shift, max_shift
-        )
-    else:
-        sample_off = torch.full((n,), o[0].item())
+    nch = lq_wav.shape[0]
+    out = torch.zeros((nch, n), device=lq_wav.device)
+    weight = torch.zeros(n, device=lq_wav.device)
+    win = torch.hann_window(chunk, device=lq_wav.device)
 
-    sample_off[:int(p[0])] = o[0]
-    sample_off[int(p[-1]):] = o[-1]
+    for i, start in enumerate(range(0, n - chunk + 1, hop)):
+        src_start = start + int(o[i])
+        if src_start < 0 or src_start + chunk > n:
+            continue
+        for ch in range(nch):
+            out[ch, start:start + chunk] += lq_wav[ch, src_start:src_start + chunk] * win
+        weight[start:start + chunk] += win
 
-    out = torch.zeros_like(lq_wav[:, :n])
-    src = torch.arange(n, dtype=torch.float) + sample_off
-    src = src.clamp(0, n - 2)
-
-    for ch in range(lq_wav.shape[0]):
-        idx = src.long()
-        frac = src - idx.float()
-        w = lq_wav[ch, :n]
-        out[ch] = w[idx] * (1 - frac) + w[idx + 1] * frac
-
+    weight = weight.clamp_min(1e-10)
+    for ch in range(nch):
+        out[ch] /= weight
     return out
 
 
