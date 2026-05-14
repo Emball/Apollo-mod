@@ -47,7 +47,6 @@ echo [apollo] Syncing remaining dependencies...
 "%UV_BIN%" pip install ^
     --python "%VENV_DIR%\Scripts\python.exe" ^
     "setuptools<71" pyyaml ^
-    "bitsandbytes>=0.43.0" ^
     -r "%SCRIPT_DIR%\requirements.txt"
 if %errorlevel% neq 0 ( echo [apollo] ERROR: Dependency install failed. & pause & exit /b 1 )
 echo [apollo] Dependencies up to date

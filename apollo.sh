@@ -73,13 +73,9 @@ case "$OS" in
 esac
 
 info "Syncing remaining dependencies..."
-EXTRAS="setuptools<71 pyyaml"
-if [ "$OS" = "Linux" ]; then
-    EXTRAS="$EXTRAS bitsandbytes>=0.43.0"
-fi
 "$UV_BIN" pip install \
     --python "$VENV_DIR/bin/python" \
-    $EXTRAS \
+    "setuptools<71" pyyaml \
     -r "$SCRIPT_DIR/requirements.txt"
 ok "dependencies up to date"
 
