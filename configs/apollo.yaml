@@ -30,7 +30,7 @@ datas:
   # LQ chunk window independently by its xcorr offset against the HQ chunk.
   # Enable when LQ/HQ pairs have drifting alignment that global correction can't fix.
   chunk_align: true
-  chunk_align_max_shift_ms: 80  # search window ±ms around each chunk
+  chunk_align_max_shift_ms: 25  # search window ±ms around each chunk
   augmentation:
     live:
       enabled: true
