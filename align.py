@@ -47,7 +47,39 @@ def _xcorr_peak(a, b, max_shift):
     return peak - center
 
 
-def align_pair(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=200):
+def _correct_start(lq, hq, sr, max_off=int(0.5 * sr)):
+    """Stage 1: find global start offset and pad/trim LQ."""
+    win = int(min(2.0 * sr, lq.shape[0], hq.shape[0]))
+    off = _xcorr_peak(lq[:win], hq[:win], max_off).item()
+    if abs(off) > int(0.001 * sr):
+        print(f"    Stage 1: start offset {off:+d} samples", flush=True)
+    return off
+
+
+def _correct_speed(lq, hq, sr, max_off=int(0.1 * sr)):
+    """Stage 2: measure end drift after start fix, resample LQ to match speed."""
+    win = int(min(2.0 * sr, lq.shape[0], hq.shape[0]))
+    off = _xcorr_peak(lq[-win:], hq[-win:], max_off).item()
+    if abs(off) < int(0.001 * sr):
+        return lq, 0
+    drift = off
+    print(f"    Stage 2: end drift {drift:+d} samples — correcting speed", flush=True)
+    n = lq.shape[-1]
+    new_len = int(round(n + drift))
+    new_len = max(new_len, 1)
+    chans = []
+    for ch in range(lq.shape[0]):
+        x = lq[ch:ch+1, :n].unsqueeze(0)
+        y = torch.nn.functional.interpolate(
+            x.float(), size=new_len, mode='linear', align_corners=False
+        )
+        chans.append(y.squeeze(0))
+    lq = torch.cat(chans, dim=0)
+    return lq, drift
+
+
+def _align_chunks(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=200):
+    """Stage 3: cut-and-crossfade chunk alignment for residual local drift."""
     lq = lq_wav.mean(dim=0)
     hq = hq_wav.mean(dim=0)
     n = min(lq.shape[0], hq.shape[0])
@@ -90,6 +122,34 @@ def align_pair(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=200):
     for ch in range(nch):
         out[ch] /= weight
     return out
+
+
+def align_pair(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=200):
+    lq = lq_wav.mean(dim=0)
+    hq = hq_wav.mean(dim=0)
+
+    # Stage 1: start offset
+    start_off = _correct_start(lq, hq, sr)
+    n = min(lq.shape[0], hq.shape[0])
+    if start_off > 0:
+        lq_wav = torch.nn.functional.pad(lq_wav, (start_off, 0))[:, :n]
+    elif start_off < 0:
+        lq_wav = torch.nn.functional.pad(lq_wav[:, -start_off:], (0, -start_off))[:, :n]
+    else:
+        lq_wav = lq_wav[:, :n]
+    hq_wav = hq_wav[:, :n]
+    lq = lq_wav.mean(dim=0)
+    hq = hq_wav.mean(dim=0)
+
+    # Stage 2: global speed correction
+    lq_wav, drift = _correct_speed(lq, hq, sr)
+    n = min(lq_wav.shape[1], hq_wav.shape[1])
+    lq_wav = lq_wav[:, :n]
+    hq_wav = hq_wav[:, :n]
+
+    # Stage 3: chunked fine alignment
+    aligned = _align_chunks(lq_wav, hq_wav, sr, chunk_sec, overlap, search_ms)
+    return aligned
 
 
 def process_pair(lq_path, hq_path, out_path=None, chunk_sec=0.5,
