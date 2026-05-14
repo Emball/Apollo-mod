@@ -206,32 +206,40 @@ def _chunk_align_offset(lq_mono, hq_mono, chunk_start, chunk_len, sr, max_shift)
     """
     Find the integer sample offset that best aligns LQ to HQ at this chunk position.
 
-    Approach: take the HQ chunk as the reference template, then slide it over a
-    window of LQ that spans [chunk_start - max_shift, chunk_start + chunk_len + max_shift].
-    The xcorr peak position directly gives the offset — no envelope framing, no
-    padding asymmetry bugs.  Raw waveform xcorr is fine at chunk scale (~3 s) and
-    is more accurate than envelope xcorr for sub-10ms precision.
+    Uses RMS envelope xcorr at a 5ms frame rate. Envelope comparison is robust to
+    codec/compression differences between LQ and HQ where raw waveform xcorr fails.
+    The search window should be kept tight (e.g. +-30ms) to avoid false peaks —
+    the per-chunk jitter we're correcting is small, not hundreds of ms.
 
-    Returns an integer offset in samples.  Positive = LQ content for this chunk
-    starts that many samples after chunk_start (LQ is late).  Clamped to keep the
-    extraction window in-bounds.
+    Returns an integer offset in samples (rounded to nearest envelope frame).
+    Positive = LQ starts later than HQ grid position. Clamped to keep in-bounds.
     """
-    # Search region in LQ: chunk_start +/- max_shift, clamped to valid range
+    frame = max(1, sr // 200)  # 5ms envelope frames
+
+    # Extract envelope of the HQ chunk as reference
+    hq_chunk = hq_mono[chunk_start:chunk_start + chunk_len]
+    hq_env = _envelope(hq_chunk, frame)
+    if hq_env.shape[0] < 2:
+        return 0
+
+    # Extract envelope of the LQ search region (chunk +/- max_shift)
     lq_lo = max(0, chunk_start - max_shift)
     lq_hi = min(lq_mono.shape[0], chunk_start + chunk_len + max_shift)
-    lq_search = lq_mono[lq_lo:lq_hi]
+    lq_env = _envelope(lq_mono[lq_lo:lq_hi], frame)
 
-    # HQ reference: exactly the chunk
-    hq_ref = hq_mono[chunk_start:chunk_start + chunk_len]
+    # How many envelope frames does max_shift correspond to?
+    max_shift_frames = max(1, max_shift // frame)
+    # How many frames does lq_lo offset correspond to?
+    lq_lo_frames = (chunk_start - lq_lo) // frame
 
-    # xcorr: find where hq_ref sits inside lq_search
-    actual_max_shift = lq_search.shape[0] - chunk_len
-    if actual_max_shift <= 0:
+    # xcorr: find where hq_env sits inside lq_env
+    actual_max_frames = lq_env.shape[0] - hq_env.shape[0]
+    if actual_max_frames <= 0:
         return 0
-    peak_in_search = _xcorr_offset(lq_search, hq_ref, actual_max_shift)
-    # absolute LQ start = lq_lo + peak_in_search
-    # offset relative to chunk_start = (lq_lo + peak_in_search) - chunk_start
-    offset = (lq_lo + peak_in_search) - chunk_start
+    peak_frames = _xcorr_offset(lq_env, hq_env, min(max_shift_frames, actual_max_frames))
+
+    # peak_frames is relative to lq_env start; convert to sample offset from chunk_start
+    offset = (peak_frames - lq_lo_frames) * frame
 
     # Clamp so extraction window stays in-bounds
     offset = max(offset, -chunk_start)
