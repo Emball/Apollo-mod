@@ -70,7 +70,7 @@ class BaseModel(nn.Module, PyTorchModelHubMixin):
         model_class = get(conf["model_name"])
         # model_class = get("Conv_TasNet")
         model = model_class(*args, **kwargs)
-        model.load_state_dict(conf["state_dict"])
+        model.load_state_dict(conf["state_dict"], strict=False)
         return model
 
     def serialize(self):
