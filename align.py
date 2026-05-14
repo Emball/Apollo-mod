@@ -24,7 +24,20 @@ import scipy.ndimage
 
 
 def _load(path, sr=44100):
-    wav, rsr = torchaudio.load(path)
+    try:
+        wav, rsr = torchaudio.load(path)
+    except Exception:
+        try:
+            import librosa
+            data, rsr = librosa.load(path, sr=None, mono=False)
+            if data.ndim == 1:
+                wav = torch.from_numpy(data).unsqueeze(0).float()
+            else:
+                wav = torch.from_numpy(data).float()
+        except Exception as e:
+            raise RuntimeError(
+                f"Cannot load {path}. Try converting to WAV first."
+            ) from e
     if rsr != sr:
         wav = torchaudio.functional.resample(wav, rsr, sr)
     return wav, sr
