@@ -229,17 +229,18 @@ def _chunk_align_offset(lq_mono, hq_mono, chunk_start, chunk_len, sr, max_shift)
 
     # How many envelope frames does max_shift correspond to?
     max_shift_frames = max(1, max_shift // frame)
-    # How many frames does lq_lo offset correspond to?
-    lq_lo_frames = (chunk_start - lq_lo) // frame
 
-    # xcorr: find where hq_env sits inside lq_env
+    # xcorr: find lag between lq_env and hq_env, clamped to max_shift_frames
     actual_max_frames = lq_env.shape[0] - hq_env.shape[0]
     if actual_max_frames <= 0:
         return 0
+    # _xcorr_offset returns how many frames lq_env leads hq_env
+    # i.e. lq_env[peak] aligns with hq_env[0]
+    # so peak_frames = position in lq_env where hq starts
+    # lq sample at that position = lq_lo + peak_frames * frame
+    # offset from chunk_start = (lq_lo + peak_frames * frame) - chunk_start
     peak_frames = _xcorr_offset(lq_env, hq_env, min(max_shift_frames, actual_max_frames))
-
-    # peak_frames is relative to lq_env start; convert to sample offset from chunk_start
-    offset = (peak_frames - lq_lo_frames) * frame
+    offset = (lq_lo + peak_frames * frame) - chunk_start
 
     # Clamp so extraction window stays in-bounds
     offset = max(offset, -chunk_start)
