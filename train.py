@@ -551,34 +551,38 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     print_only(f"Instantiating datamodule <{cfg.datas._target_}>")
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.datas)
 
+    # ── Resolve resume checkpoint early ────────────────────────────────────
+    # Do this before pretrain loading so we can skip it when resuming.
+    # Lightning's trainer.fit(ckpt_path=...) fully restores model weights,
+    # optimizer state, epoch, and step — pretrain weights would just be
+    # overwritten and are a waste of time and memory.
+    ckpt_path = None
+    if cfg.get("resume", False):
+        ckpt_dir = os.path.join(cfg.exp.dir, cfg.exp.name, "checkpoints")
+        if os.path.isdir(ckpt_dir):
+            candidates = [
+                os.path.join(ckpt_dir, f)
+                for f in os.listdir(ckpt_dir)
+                if f.endswith(".ckpt") and f != "last.ckpt"
+            ]
+            if candidates:
+                ckpt_path = max(candidates, key=os.path.getmtime)
+                print_only(f"[resume] Found checkpoint: {ckpt_path}")
+                print_only("[resume] Skipping pretrain weight loading — checkpoint takes precedence.")
+            else:
+                print_only(f"[resume] No checkpoints found in {ckpt_dir}, starting from scratch.")
+        else:
+            print_only(f"[resume] Checkpoint directory not found: {ckpt_dir}, starting from scratch.")
+
     # ── Pretrained weights resolution ──────────────────────────────────────
     # Priority:
     #   1. Explicit --weights_path / cfg.weights_path
     #   2. Auto-scan ./models/ for known filenames (first match wins)
     #   3. Auto-download if a URL is configured in _PRETRAINED_MODELS
     #   4. Fall back to HuggingFace hub (legacy behaviour)
+    # Skipped entirely when resuming from a checkpoint (ckpt_path is set above).
     # -----------------------------------------------------------------------
     feature_dim = cfg.model.get("feature_dim", 256)
-    local_path = cfg.get("weights_path", None)
-
-    if not local_path:
-        # Auto-scan ./models/
-        os.makedirs(_MODELS_DIR, exist_ok=True)
-        for fname, url in _PRETRAINED_MODELS.items():
-            candidate = os.path.join(_MODELS_DIR, fname)
-            if os.path.isfile(candidate):
-                print_only(f"[weights] Found pretrained model in models/: {fname}")
-                local_path = candidate
-                break
-            elif url is not None:
-                # Download to models/ automatically
-                print_only(f"[weights] Downloading {fname} from configured URL...")
-                import urllib.request
-                os.makedirs(_MODELS_DIR, exist_ok=True)
-                urllib.request.urlretrieve(url, candidate)
-                print_only(f"[weights] Saved to {candidate}")
-                local_path = candidate
-                break
 
     def _load_weights(path: str, feature_dim: int):
         """Load a .pth or .ckpt file and return an Apollo model with weights applied."""
@@ -607,25 +611,55 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             )
         return m
 
-    if local_path:
-        print_only(f"[weights] Loading from: {local_path}")
-        model = _load_weights(local_path, feature_dim)
-        print_only("[weights] Weights loaded.")
+    if ckpt_path is not None:
+        # Resuming — Lightning will restore all weights from the checkpoint.
+        # Just instantiate a bare model so the system can be constructed;
+        # the state dict will be overwritten by trainer.fit(ckpt_path=...).
+        print_only("[weights] Resume mode — skipping pretrain load, instantiating bare model.")
+        model = look2hear.models.apollo.Apollo(
+            sr=44100, win=20, feature_dim=feature_dim, layer=6
+        )
     else:
-        # Final fallback — HuggingFace hub
-        print_only("[weights] No local model found in models/ — downloading from HuggingFace...")
-        from huggingface_hub import hf_hub_download
-        weights_path = hf_hub_download(
-            repo_id="JusperLee/Apollo",
-            filename="pytorch_model.bin",
-        )
-        print_only(f"[weights] Cached at: {weights_path}")
-        model = look2hear.models.BaseModel.from_pretrain(
-            weights_path, sr=44100, win=20, feature_dim=feature_dim, layer=6
-        )
-        print_only("[weights] Pretrained weights loaded.")
+        local_path = cfg.get("weights_path", None)
+
+        if not local_path:
+            # Auto-scan ./models/
+            os.makedirs(_MODELS_DIR, exist_ok=True)
+            for fname, url in _PRETRAINED_MODELS.items():
+                candidate = os.path.join(_MODELS_DIR, fname)
+                if os.path.isfile(candidate):
+                    print_only(f"[weights] Found pretrained model in models/: {fname}")
+                    local_path = candidate
+                    break
+                elif url is not None:
+                    print_only(f"[weights] Downloading {fname} from configured URL...")
+                    import urllib.request
+                    os.makedirs(_MODELS_DIR, exist_ok=True)
+                    urllib.request.urlretrieve(url, candidate)
+                    print_only(f"[weights] Saved to {candidate}")
+                    local_path = candidate
+                    break
+
+        if local_path:
+            print_only(f"[weights] Loading from: {local_path}")
+            model = _load_weights(local_path, feature_dim)
+            print_only("[weights] Weights loaded.")
+        else:
+            # Final fallback — HuggingFace hub
+            print_only("[weights] No local model found in models/ — downloading from HuggingFace...")
+            from huggingface_hub import hf_hub_download
+            weights_path = hf_hub_download(
+                repo_id="JusperLee/Apollo",
+                filename="pytorch_model.bin",
+            )
+            print_only(f"[weights] Cached at: {weights_path}")
+            model = look2hear.models.BaseModel.from_pretrain(
+                weights_path, sr=44100, win=20, feature_dim=feature_dim, layer=6
+            )
+            print_only("[weights] Pretrained weights loaded.")
 
     # Freeze early layers for fine-tuning — count driven by config
+    # (no-op when resuming since frozen params are restored by the checkpoint too)
     freeze_early_layers(model, n_layers_to_freeze=cfg.training.n_layers_to_freeze)
 
     # Instantiate discriminator fresh — learns your artifact type from scratch
@@ -734,25 +768,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         callbacks=callbacks,
         logger=logger,
     )
-
-    # Resume from last checkpoint if requested
-    ckpt_path = None
-    if cfg.get("resume", False):
-        ckpt_dir = os.path.join(cfg.exp.dir, cfg.exp.name, "checkpoints")
-        if os.path.isdir(ckpt_dir):
-            # Find the most recently written real checkpoint — skip last.ckpt (symlink/alias)
-            candidates = [
-                os.path.join(ckpt_dir, f)
-                for f in os.listdir(ckpt_dir)
-                if f.endswith(".ckpt") and f != "last.ckpt"
-            ]
-            if candidates:
-                ckpt_path = max(candidates, key=os.path.getmtime)
-                print_only(f"Resuming from checkpoint: {ckpt_path}")
-            else:
-                print_only(f"No checkpoints found in {ckpt_dir}, starting from scratch.")
-        else:
-            print_only(f"Checkpoint directory not found: {ckpt_dir}, starting from scratch.")
 
     trainer.fit(system, datamodule=datamodule, ckpt_path=ckpt_path)
     print_only("Training finished!")
