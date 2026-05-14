@@ -1,14 +1,10 @@
 @echo off
 setlocal EnableDelayedExpansion
-:: apollo.bat — install (if needed) and drop into an activated Apollo shell
+:: apollo.bat — install (if needed) then run an Apollo command or drop into a shell
 
 set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 set "VENV_DIR=%SCRIPT_DIR%\.venv"
-
-echo.
-echo   Apollo
-echo.
 
 :: 1. Locate or install uv
 set "UV_BIN="
@@ -48,7 +44,24 @@ echo [apollo] Syncing dependencies...
 if %errorlevel% neq 0 ( echo [apollo] ERROR: Dependency install failed. & pause & exit /b 1 )
 echo [apollo] Dependencies up to date
 
-:: 4. Drop into an activated cmd session
+:: 4. If arguments given, treat first as the script name and run it
+if not "%*"=="" (
+    set "CMD=%1"
+    shift
+    if /i "!CMD!"=="train"     set "SCRIPT=train.py"
+    if /i "!CMD!"=="inference" set "SCRIPT=inference.py"
+    if /i "!CMD!"=="test"      set "SCRIPT=test.py"
+    if defined SCRIPT (
+        "%VENV_DIR%\Scripts\python.exe" "%SCRIPT_DIR%\%SCRIPT%" %*
+    ) else if /i "!CMD!"=="python" (
+        "%VENV_DIR%\Scripts\python.exe" %*
+    ) else (
+        "%VENV_DIR%\Scripts\python.exe" "%SCRIPT_DIR%\%CMD%" %*
+    )
+    exit /b %errorlevel%
+)
+
+:: 5. No arguments — drop into an activated cmd session
 echo.
 echo   Apollo ready. Type 'exit' to leave.
 echo   Example: python inference.py --in_wav input.wav --out_wav out.wav

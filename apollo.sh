@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# apollo.sh — install (if needed) and drop into an activated Apollo shell
+# apollo.sh — install (if needed) then run an Apollo command or drop into a shell
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,7 +52,20 @@ info "Syncing dependencies..."
     --quiet
 ok "dependencies up to date"
 
-# 4. Drop into an activated shell
+# 4. If arguments given, treat first as the script name and run it
+if [ $# -gt 0 ]; then
+    CMD="$1"; shift
+    case "$CMD" in
+        train)     SCRIPT="train.py" ;;
+        inference) SCRIPT="inference.py" ;;
+        test)      SCRIPT="test.py" ;;
+        python)    exec "$VENV_DIR/bin/python" "$@" ;;
+        *)         exec "$VENV_DIR/bin/python" "$CMD" "$@" ;;
+    esac
+    exec "$VENV_DIR/bin/python" "$SCRIPT_DIR/$SCRIPT" "$@"
+fi
+
+# 5. No arguments — drop into an activated shell
 echo
 echo -e "${GRN}  Apollo ready.${RST} Type 'exit' to leave."
 echo -e "  Example: ${CYN}python inference.py --in_wav input.wav --out_wav out.wav${RST}"
