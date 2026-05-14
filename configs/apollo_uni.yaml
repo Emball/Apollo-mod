@@ -29,7 +29,7 @@ datas:
   # Does a single global speed-correction resample first, then shifts each
   # LQ chunk window independently by its xcorr offset against the HQ chunk.
   # Enable when LQ/HQ pairs have drifting alignment that global correction can't fix.
-  chunk_align: false
+  chunk_align: true
   chunk_align_max_shift_ms: 80  # search window ±ms around each chunk
   augmentation:
     live:
