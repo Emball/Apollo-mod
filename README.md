@@ -20,7 +20,6 @@ This fork reworks Apollo for **single-GPU fine-tuning on your own audio pairs** 
 
 - Fine-tune Apollo on **any paired LQ/HQ WAV dataset** you provide (e.g. your own MP3 → FLAC pairs)
 - Run on a **single consumer GPU** (tested down to ~11 GB VRAM)
-- Provide a guided, keyboard-driven TUI so you don't have to hand-edit YAML or memorize CLI flags
 - Make checkpoints portable: load HuggingFace weights, `.pth`/`.bin` serialized models, or Lightning `.ckpt` files interchangeably
 
 ---
