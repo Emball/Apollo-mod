@@ -70,7 +70,7 @@ def _correct_speed(lq_wav, hq_mono, sr, max_off=None):
     drift = off
     print(f"    Stage 2: end drift {drift:+d} samples — correcting speed", flush=True)
     n = lq_wav.shape[-1]
-    new_len = int(round(n + drift))
+    new_len = int(round(n - drift))
     new_len = max(new_len, 1)
     chans = []
     for ch in range(lq_wav.shape[0]):
