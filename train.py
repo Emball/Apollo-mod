@@ -102,22 +102,166 @@ def _save_chunk_16bit(tensor, path: str):
     pcm = tensor.float().clamp(-1.0, 1.0)
     torchaudio.save(path, pcm, _SR, encoding="PCM_S", bits_per_sample=16)
 
+# ---------------------------------------------------------------------------
+# Chunk-level alignment helpers
+# ---------------------------------------------------------------------------
+
+def _envelope(mono: "torch.Tensor", frame: int) -> "torch.Tensor":
+    """RMS envelope via unfold. mono is 1-D, frame is window size.
+    Returns a shorter 1-D tensor of per-frame RMS values."""
+    # Trim to exact multiple so unfold is clean
+    n = (mono.shape[0] // frame) * frame
+    frames = mono[:n].reshape(-1, frame)
+    env = frames.pow(2).mean(dim=1).sqrt()
+    # Mean-centre so DC (silence level) doesn't bias the xcorr
+    env = env - env.mean()
+    return env
+
+
+def _xcorr_offset(a: "torch.Tensor", b: "torch.Tensor", max_shift: int) -> int:
+    """Return integer lag that maximises xcorr of 1-D tensors a and b.
+    Positive return means a leads b (b needs to shift right, or a shift left).
+    max_shift is in samples of the *input* vectors (not the original audio)."""
+    n = a.shape[0] + b.shape[0] - 1
+    n_fft = 1 << (n - 1).bit_length()
+    A = torch.fft.rfft(a.float(), n_fft)
+    B = torch.fft.rfft(b.float(), n_fft)
+    corr = torch.fft.irfft(A * B.conj(), n_fft)
+    center = b.shape[0] - 1
+    lo = max(0, center - max_shift)
+    hi = min(n_fft, center + max_shift + 1)
+    peak = int(torch.argmax(corr[lo:hi]).item()) + lo
+    return peak - center
+
+
+def _global_speed_align(lq_wav: "torch.Tensor", hq_wav: "torch.Tensor", sr: int) -> "torch.Tensor":
+    """
+    Resample LQ so its total length matches HQ, correcting for a constant
+    speed/pitch difference between the two recordings.
+
+    Strategy: compare envelope xcorr at the START and END of the file using
+    short (~2 s) anchor windows.  The difference in the two offsets tells us
+    how much the LQ has drifted relative to HQ over the full duration — i.e.
+    the speed ratio.  We then do a single linear resample to correct it.
+
+    This is intentionally simple: one pass, no chunking, no crossfading.
+    It only fixes a *constant* rate difference; random per-chunk jitter is
+    handled later in _slice_and_save when chunk_align=True.
+    """
+    lq_mono = lq_wav.mean(0)
+    hq_mono = hq_wav.mean(0)
+    n = min(lq_mono.shape[0], hq_mono.shape[0])
+
+    # Envelope frame: ~10 ms
+    frame = max(1, sr // 100)
+    # Anchor window: up to 2 s, but no more than 20 % of the file
+    anchor = min(int(2.0 * sr), n // 5)
+    anchor = (anchor // frame) * frame  # round down to frame boundary
+    if anchor < frame * 10:
+        # File too short to be worth correcting
+        return lq_wav[:, :n]
+
+    max_shift_frames = int(0.5 * sr) // frame  # search up to ±0.5 s
+
+    env_lq_start = _envelope(lq_mono[:anchor], frame)
+    env_hq_start = _envelope(hq_mono[:anchor], frame)
+    off_start = _xcorr_offset(env_lq_start, env_hq_start, max_shift_frames) * frame
+
+    env_lq_end = _envelope(lq_mono[n - anchor:n], frame)
+    env_hq_end = _envelope(hq_mono[n - anchor:n], frame)
+    off_end = _xcorr_offset(env_lq_end, env_hq_end, max_shift_frames) * frame
+
+    # Drift = how many extra LQ samples have accumulated by the end
+    drift = off_end - off_start
+    if abs(drift) < int(0.001 * sr):
+        # Less than 1 ms drift — not worth resampling
+        return lq_wav[:, :n]
+
+    new_len = max(1, n - drift)
+    chans = []
+    for ch in range(lq_wav.shape[0]):
+        x = lq_wav[ch:ch+1, :n].unsqueeze(0).float()
+        y = torch.nn.functional.interpolate(x, size=new_len, mode='linear', align_corners=False)
+        chans.append(y.squeeze(0))
+    lq_corrected = torch.cat(chans, dim=0)
+    print_only(f"    [align] global speed: drift={drift:+d} samples over {n/sr:.1f}s → resampled LQ {n}→{new_len}")
+    return lq_corrected
+
+
+def _chunk_align_offset(lq_mono: "torch.Tensor", hq_mono: "torch.Tensor",
+                        chunk_start: int, chunk_len: int,
+                        sr: int, max_shift: int) -> int:
+    """
+    Find the sample offset that best aligns lq_mono to hq_mono around chunk_start.
+    We xcorr the *envelopes* of a slightly padded window so the search is robust
+    to heavy compression artefacts.  Returns an integer sample offset (positive
+    means LQ content starts that many samples later than the HQ grid position).
+    The offset is clamped so the resulting extraction window stays in-bounds.
+    """
+    # Pad the search window by max_shift on each side so the xcorr sees context
+    pad = max_shift
+    lq_lo = max(0, chunk_start - pad)
+    lq_hi = min(lq_mono.shape[0], chunk_start + chunk_len + pad)
+    hq_lo = max(0, chunk_start - pad)
+    hq_hi = min(hq_mono.shape[0], chunk_start + chunk_len + pad)
+
+    frame = max(1, sr // 1000)  # 1 ms envelope frame — fine enough for sample-accurate result
+    env_lq = _envelope(lq_mono[lq_lo:lq_hi], frame)
+    env_hq = _envelope(hq_mono[hq_lo:hq_hi], frame)
+
+    max_shift_frames = max(1, max_shift // frame)
+    raw_offset_frames = _xcorr_offset(env_lq, env_hq, max_shift_frames)
+    offset = raw_offset_frames * frame  # back to samples
+
+    # Clamp so the extraction window [chunk_start+offset : chunk_start+offset+chunk_len]
+    # stays fully within lq_mono
+    offset = max(offset, -chunk_start)
+    offset = min(offset, lq_mono.shape[0] - chunk_start - chunk_len)
+    return int(offset)
+
+
 def _slice_and_save(
     lq_wav, hq_wav, stem: str, lq_out: str, hq_out: str,
     cached_aug_fn=None, variants: int = 1,
+    chunk_align: bool = False, chunk_align_max_shift_ms: int = 100,
 ) -> list:
     """Slice a pair into overlapping chunks, optionally apply cached augmentations,
-    save all variants as 16-bit PCM WAV. Returns list of written filenames."""
+    save all variants as 16-bit PCM WAV. Returns list of written filenames.
+
+    If chunk_align=True:
+      1. A global speed correction resamples LQ once to match HQ length.
+      2. For each chunk the LQ extraction window is shifted by the per-chunk
+         xcorr offset so it is as sample-accurate as possible relative to HQ.
+         The HQ window is *never* touched — only which LQ samples we extract
+         changes.  No crossfading, no interpolation at this stage.
+    """
     min_len = min(lq_wav.shape[-1], hq_wav.shape[-1])
     lq_wav  = lq_wav[:, :min_len]
     hq_wav  = hq_wav[:, :min_len]
+
+    if chunk_align:
+        lq_wav = _global_speed_align(lq_wav, hq_wav, _SR)
+        min_len = min(lq_wav.shape[-1], hq_wav.shape[-1])
+        lq_wav  = lq_wav[:, :min_len]
+        hq_wav  = hq_wav[:, :min_len]
+        lq_mono = lq_wav.mean(0)
+        hq_mono = hq_wav.mean(0)
+        max_shift = int(chunk_align_max_shift_ms / 1000 * _SR)
 
     saved = []
     start = 0
     idx   = 0
     while start + _CHUNK_SAMPLES <= min_len:
-        lq_chunk = lq_wav[:, start:start + _CHUNK_SAMPLES]
         hq_chunk = hq_wav[:, start:start + _CHUNK_SAMPLES]
+
+        if chunk_align:
+            offset = _chunk_align_offset(lq_mono, hq_mono, start, _CHUNK_SAMPLES, _SR, max_shift)
+            lq_start = start + offset
+            # Bounds are guaranteed by _chunk_align_offset clamping, but be safe
+            lq_start = max(0, min(lq_start, min_len - _CHUNK_SAMPLES))
+            lq_chunk = lq_wav[:, lq_start:lq_start + _CHUNK_SAMPLES]
+        else:
+            lq_chunk = lq_wav[:, start:start + _CHUNK_SAMPLES]
 
         # Variant 0 is always the clean (unaugmented) chunk
         fname = f"{stem}_{idx:04d}.wav"
@@ -333,7 +477,8 @@ def _build_cached_aug_fn(cfg: "DictConfig"):
 
     return _apply
 
-def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=None, variants: int = 1) -> int:
+def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=None, variants: int = 1,
+                 chunk_align: bool = False, chunk_align_max_shift_ms: int = 100) -> int:
     """
     Normalize src_root into LQ/ + HQ/ layout (if not already), then chunk all
     matched pairs into dst_root/LQ and dst_root/HQ.
@@ -343,6 +488,10 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         A)  src_root/<song>_LQ/  <song>_HQ/     — subdirectory pairs
         B)  src_root/<song>_LQ.wav  <song>_HQ.wav  — flat postfix files
         C)  src_root/LQ/  src_root/HQ/           — already normalized
+
+    If chunk_align=True, a global speed correction is applied to each pair
+    before chunking, then each chunk's LQ extraction window is independently
+    shifted by a per-chunk xcorr offset so it is sample-accurate relative to HQ.
     """
     lq_out = os.path.join(dst_root, "LQ")
     hq_out = os.path.join(dst_root, "HQ")
@@ -391,7 +540,10 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     for stem in matched:
         lq_wav = _load_wav_stereo(os.path.join(lq_src, lq_files[stem]))
         hq_wav = _load_wav_stereo(os.path.join(hq_src, hq_files[stem]))
-        saved  = _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out, cached_aug_fn=cached_aug_fn, variants=variants)
+        saved  = _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out,
+                                  cached_aug_fn=cached_aug_fn, variants=variants,
+                                  chunk_align=chunk_align,
+                                  chunk_align_max_shift_ms=chunk_align_max_shift_ms)
         print_only(f"[data/{split_name}]   {stem}: {len(saved)} chunks")
         total += len(saved)
 
@@ -431,8 +583,18 @@ def prepare_data(cfg: DictConfig) -> None:
     variants      = int(getattr(getattr(cfg.datas, "augmentation", {}), "cached_variants", 1)
                         if hasattr(getattr(cfg.datas, "augmentation", None) or {}, "cached_variants")
                         else 1)
-    _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, variants=variants)
-    _chunk_split(data_val,   val_chunks,   "val",   cached_aug_fn=None,          variants=1)
+
+    # Chunk-level alignment option — reads datas.chunk_align (default: false)
+    # and datas.chunk_align_max_shift_ms (default: 100)
+    chunk_align = bool(cfg.datas.get("chunk_align", False))
+    chunk_align_max_shift_ms = int(cfg.datas.get("chunk_align_max_shift_ms", 100))
+    if chunk_align:
+        print_only(f"[data] chunk_align=True — per-chunk xcorr alignment enabled (±{chunk_align_max_shift_ms} ms search)")
+
+    _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, variants=variants,
+                 chunk_align=chunk_align, chunk_align_max_shift_ms=chunk_align_max_shift_ms)
+    _chunk_split(data_val,   val_chunks,   "val",   cached_aug_fn=None,          variants=1,
+                 chunk_align=chunk_align, chunk_align_max_shift_ms=chunk_align_max_shift_ms)
 
     # Val bootstrap from train chunks
     # If val is still empty after chunking (no data/val source exists),
