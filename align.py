@@ -47,8 +47,10 @@ def _xcorr_peak(a, b, max_shift):
     return peak - center
 
 
-def _correct_start(lq, hq, sr, max_off=int(0.5 * sr)):
+def _correct_start(lq, hq, sr, max_off=None):
     """Stage 1: find global start offset and pad/trim LQ."""
+    if max_off is None:
+        max_off = int(0.5 * sr)
     win = int(min(2.0 * sr, lq.shape[0], hq.shape[0]))
     off = _xcorr_peak(lq[:win], hq[:win], max_off).item()
     if abs(off) > int(0.001 * sr):
@@ -56,8 +58,10 @@ def _correct_start(lq, hq, sr, max_off=int(0.5 * sr)):
     return off
 
 
-def _correct_speed(lq, hq, sr, max_off=int(0.1 * sr)):
+def _correct_speed(lq, hq, sr, max_off=None):
     """Stage 2: measure end drift after start fix, resample LQ to match speed."""
+    if max_off is None:
+        max_off = int(0.1 * sr)
     win = int(min(2.0 * sr, lq.shape[0], hq.shape[0]))
     off = _xcorr_peak(lq[-win:], hq[-win:], max_off).item()
     if abs(off) < int(0.001 * sr):
