@@ -58,28 +58,29 @@ def _correct_start(lq, hq, sr, max_off=None):
     return off
 
 
-def _correct_speed(lq, hq, sr, max_off=None):
+def _correct_speed(lq_wav, hq_mono, sr, max_off=None):
     """Stage 2: measure end drift after start fix, resample LQ to match speed."""
     if max_off is None:
         max_off = int(0.1 * sr)
-    win = int(min(2.0 * sr, lq.shape[0], hq.shape[0]))
-    off = _xcorr_peak(lq[-win:], hq[-win:], max_off).item()
+    lq_mono = lq_wav.mean(dim=0)
+    win = int(min(2.0 * sr, lq_mono.shape[0], hq_mono.shape[0]))
+    off = _xcorr_peak(lq_mono[-win:], hq_mono[-win:], max_off).item()
     if abs(off) < int(0.001 * sr):
-        return lq, 0
+        return lq_wav, 0
     drift = off
     print(f"    Stage 2: end drift {drift:+d} samples — correcting speed", flush=True)
-    n = lq.shape[-1]
+    n = lq_wav.shape[-1]
     new_len = int(round(n + drift))
     new_len = max(new_len, 1)
     chans = []
-    for ch in range(lq.shape[0]):
-        x = lq[ch:ch+1, :n].unsqueeze(0)
+    for ch in range(lq_wav.shape[0]):
+        x = lq_wav[ch:ch+1, :n].unsqueeze(0)
         y = torch.nn.functional.interpolate(
             x.float(), size=new_len, mode='linear', align_corners=False
         )
         chans.append(y.squeeze(0))
-    lq = torch.cat(chans, dim=0)
-    return lq, drift
+    lq_wav = torch.cat(chans, dim=0)
+    return lq_wav, drift
 
 
 def _align_chunks(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=200):
@@ -145,8 +146,8 @@ def align_pair(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=200):
     lq = lq_wav.mean(dim=0)
     hq = hq_wav.mean(dim=0)
 
-    # Stage 2: global speed correction
-    lq_wav, drift = _correct_speed(lq, hq, sr)
+    # Stage 2: global speed correction (pass full multichannel, use mono internally)
+    lq_wav, drift = _correct_speed(lq_wav, hq, sr)
     n = min(lq_wav.shape[1], hq_wav.shape[1])
     lq_wav = lq_wav[:, :n]
     hq_wav = hq_wav[:, :n]
