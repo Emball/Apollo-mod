@@ -47,6 +47,7 @@ fi
 info "Syncing dependencies..."
 "$UV_BIN" pip install \
     --python "$VENV_DIR/bin/python" \
+    --extra-index-url https://download.pytorch.org/whl/cu121 \
     "setuptools<71" pyyaml \
     -r "$SCRIPT_DIR/requirements.txt" \
     --quiet
