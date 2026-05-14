@@ -48,16 +48,14 @@ info "Installing PyTorch (CUDA 12.1)..."
 "$UV_BIN" pip install \
     --python "$VENV_DIR/bin/python" \
     --index-url https://download.pytorch.org/whl/cu121 \
-    torch==2.1.2+cu121 torchaudio==2.1.2+cu121 \
-    --quiet
+    torch==2.1.2+cu121 torchaudio==2.1.2+cu121
 ok "PyTorch installed"
 
 info "Syncing remaining dependencies..."
 "$UV_BIN" pip install \
     --python "$VENV_DIR/bin/python" \
     "setuptools<71" pyyaml \
-    -r "$SCRIPT_DIR/requirements.txt" \
-    --quiet
+    -r "$SCRIPT_DIR/requirements.txt"
 ok "dependencies up to date"
 
 # 4. If arguments given, treat first as the script name and run it
