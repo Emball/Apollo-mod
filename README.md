@@ -1,12 +1,14 @@
 # Apollo-mod
 
-> A community mod of [JusperLee/Apollo](https://github.com/JusperLee/Apollo) — a GAN-based audio restoration model that recovers high-frequency detail lost to MP3 compression, restoring lossy audio toward lossless quality.
+> A community mod of [JusperLee/Apollo](https://github.com/JusperLee/Apollo) — a GAN-based audio restoration model. Codec compression (MP3, AAC, etc.) is the core target, but the architecture generalises to broader restoration tasks: bandwidth extension, noise reduction, and other forms of audio degradation.
 
 ---
 
 ## What is Apollo?
 
-Apollo is a research model from Tsinghua University / Tencent AI Lab. It takes MP3-compressed music as input and predicts the original, uncompressed audio. It works by splitting the signal into explicit frequency bands and modeling the relationships between them — preserving low frequencies while reconstructing degraded mid and high frequencies. The model is trained with a GAN framework (generator + frequency discriminator) and evaluated on MUSDB18-HQ and MoisesDB.
+Apollo is a research model from Tsinghua University / Tencent AI Lab (ICASSP 2025). It takes degraded audio as input and predicts the clean original. It works by splitting the signal into explicit frequency bands and modeling relationships between them — preserving low frequencies while reconstructing degraded mid and high frequencies. The model uses a GAN framework (generator + frequency discriminator) and was originally evaluated on MUSDB18-HQ and MoisesDB with codec compression as the primary degradation type.
+
+The architecture is not codec-specific. The same frequency-band approach applies to any task where degradation is concentrated in mid/high frequencies — codec compression (MP3, AAC, Opus) is the core target, but bandwidth extension, noise reduction, and other restoration tasks are reasonable fine-tuning targets given appropriate paired training data.
 
 The original repo is a research codebase: it assumes multi-GPU clusters, the Weights & Biases logger, MUSDB/MoisesDB dataset pipelines, and HDF5 preprocessing. Running it on a single consumer GPU required significant rework.
 
@@ -18,7 +20,7 @@ This fork reworks Apollo for **single-GPU fine-tuning on your own audio pairs** 
 
 ### Goals
 
-- Fine-tune Apollo on **any paired LQ/HQ WAV dataset** you provide (e.g. your own MP3 → FLAC pairs)
+- Fine-tune Apollo on **any paired LQ/HQ WAV dataset** you provide — codec-degraded pairs are the primary use case but any degradation type works
 - Run on a **single consumer GPU** (tested down to ~11 GB VRAM)
 - Make checkpoints portable: load HuggingFace weights, `.pth`/`.bin` serialized models, or Lightning `.ckpt` files interchangeably
 
@@ -122,8 +124,8 @@ Organize your audio pairs:
 ```
 data/
   train/
-    lq/   ← MP3-degraded or compressed audio (WAV format)
-    hq/   ← Original lossless audio (WAV format, same filenames)
+    lq/   ← Degraded audio (WAV format) — codec-compressed, noisy, bandwidth-limited, etc.
+    hq/   ← Clean reference audio (WAV format, same filenames)
   val/
     lq/
     hq/
