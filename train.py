@@ -241,6 +241,8 @@ def _chunk_align_offset(lq_mono, hq_mono, chunk_start, chunk_len, sr, max_shift)
     # offset from chunk_start = (lq_lo + peak_frames * frame) - chunk_start
     peak_frames = _xcorr_offset(lq_env, hq_env, min(max_shift_frames, actual_max_frames))
     offset = (lq_lo + peak_frames * frame) - chunk_start
+    if chunk_start < 10 * _CHUNK_SAMPLES:
+        print_only(f"      dbg: lq_lo={lq_lo} chunk_start={chunk_start} peak_frames={peak_frames} frame={frame} max_shift_frames={max_shift_frames} lq_env={lq_env.shape[0]} hq_env={hq_env.shape[0]} offset={offset}")
 
     # Clamp so extraction window stays in-bounds
     offset = max(offset, -chunk_start)
