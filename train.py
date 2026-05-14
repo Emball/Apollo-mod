@@ -279,6 +279,8 @@ def _slice_and_save(
             # Bounds are guaranteed by _chunk_align_offset clamping, but be safe
             lq_start = max(0, min(lq_start, min_len - _CHUNK_SAMPLES))
             lq_chunk = lq_wav[:, lq_start:lq_start + _CHUNK_SAMPLES]
+            if idx < 5 or (offset != 0 and idx % 20 == 0):
+                print_only(f"      chunk {idx:04d} @ {start/_SR:.2f}s: offset={offset:+d} smp ({offset/_SR*1000:.1f}ms)")
         else:
             lq_chunk = lq_wav[:, start:start + _CHUNK_SAMPLES]
 
