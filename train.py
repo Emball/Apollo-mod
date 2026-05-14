@@ -188,33 +188,38 @@ def _global_speed_align(lq_wav: "torch.Tensor", hq_wav: "torch.Tensor", sr: int)
     return lq_corrected
 
 
-def _chunk_align_offset(lq_mono: "torch.Tensor", hq_mono: "torch.Tensor",
-                        chunk_start: int, chunk_len: int,
-                        sr: int, max_shift: int) -> int:
+def _chunk_align_offset(lq_mono, hq_mono, chunk_start, chunk_len, sr, max_shift):
     """
-    Find the sample offset that best aligns lq_mono to hq_mono around chunk_start.
-    We xcorr the *envelopes* of a slightly padded window so the search is robust
-    to heavy compression artefacts.  Returns an integer sample offset (positive
-    means LQ content starts that many samples later than the HQ grid position).
-    The offset is clamped so the resulting extraction window stays in-bounds.
+    Find the integer sample offset that best aligns LQ to HQ at this chunk position.
+
+    Approach: take the HQ chunk as the reference template, then slide it over a
+    window of LQ that spans [chunk_start - max_shift, chunk_start + chunk_len + max_shift].
+    The xcorr peak position directly gives the offset — no envelope framing, no
+    padding asymmetry bugs.  Raw waveform xcorr is fine at chunk scale (~3 s) and
+    is more accurate than envelope xcorr for sub-10ms precision.
+
+    Returns an integer offset in samples.  Positive = LQ content for this chunk
+    starts that many samples after chunk_start (LQ is late).  Clamped to keep the
+    extraction window in-bounds.
     """
-    # Pad the search window by max_shift on each side so the xcorr sees context
-    pad = max_shift
-    lq_lo = max(0, chunk_start - pad)
-    lq_hi = min(lq_mono.shape[0], chunk_start + chunk_len + pad)
-    hq_lo = max(0, chunk_start - pad)
-    hq_hi = min(hq_mono.shape[0], chunk_start + chunk_len + pad)
+    # Search region in LQ: chunk_start +/- max_shift, clamped to valid range
+    lq_lo = max(0, chunk_start - max_shift)
+    lq_hi = min(lq_mono.shape[0], chunk_start + chunk_len + max_shift)
+    lq_search = lq_mono[lq_lo:lq_hi]
 
-    frame = max(1, sr // 1000)  # 1 ms envelope frame — fine enough for sample-accurate result
-    env_lq = _envelope(lq_mono[lq_lo:lq_hi], frame)
-    env_hq = _envelope(hq_mono[hq_lo:hq_hi], frame)
+    # HQ reference: exactly the chunk
+    hq_ref = hq_mono[chunk_start:chunk_start + chunk_len]
 
-    max_shift_frames = max(1, max_shift // frame)
-    raw_offset_frames = _xcorr_offset(env_lq, env_hq, max_shift_frames)
-    offset = raw_offset_frames * frame  # back to samples
+    # xcorr: find where hq_ref sits inside lq_search
+    actual_max_shift = lq_search.shape[0] - chunk_len
+    if actual_max_shift <= 0:
+        return 0
+    peak_in_search = _xcorr_offset(lq_search, hq_ref, actual_max_shift)
+    # absolute LQ start = lq_lo + peak_in_search
+    # offset relative to chunk_start = (lq_lo + peak_in_search) - chunk_start
+    offset = (lq_lo + peak_in_search) - chunk_start
 
-    # Clamp so the extraction window [chunk_start+offset : chunk_start+offset+chunk_len]
-    # stays fully within lq_mono
+    # Clamp so extraction window stays in-bounds
     offset = max(offset, -chunk_start)
     offset = min(offset, lq_mono.shape[0] - chunk_start - chunk_len)
     return int(offset)
