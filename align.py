@@ -47,12 +47,31 @@ def _xcorr_peak(a, b, max_shift):
     return peak - center
 
 
+def _env_xcorr_peak(a, b, max_shift, sr=44100, frame_ms=10):
+    """Cross-correlate RMS envelopes instead of raw waveform.
+       Far more robust for heavily compressed audio."""
+    frame = int(frame_ms / 1000 * sr)
+    if frame < 2:
+        frame = 2
+    a_env = torch.nn.functional.avg_pool1d(
+        a.abs().unsqueeze(0), kernel_size=frame, stride=1,
+        padding=frame // 2
+    ).squeeze(0)
+    b_env = torch.nn.functional.avg_pool1d(
+        b.abs().unsqueeze(0), kernel_size=frame, stride=1,
+        padding=frame // 2
+    ).squeeze(0)
+    max_shift_frames = max_shift
+    off = _xcorr_peak(a_env, b_env, max_shift_frames)
+    return off
+
+
 def _correct_start(lq, hq, sr, max_off=None):
     """Stage 1: find global start offset and pad/trim LQ."""
     if max_off is None:
         max_off = int(0.5 * sr)
     win = int(min(2.0 * sr, lq.shape[0], hq.shape[0]))
-    off = _xcorr_peak(lq[:win], hq[:win], max_off).item()
+    off = _env_xcorr_peak(lq[:win], hq[:win], max_off, sr).item()
     if abs(off) > int(0.001 * sr):
         print(f"    Stage 1: start offset {off:+d} samples", flush=True)
     return off
@@ -64,7 +83,7 @@ def _correct_speed(lq_wav, hq_mono, sr, max_off=None):
         max_off = int(0.1 * sr)
     lq_mono = lq_wav.mean(dim=0)
     win = int(min(2.0 * sr, lq_mono.shape[0], hq_mono.shape[0]))
-    off = _xcorr_peak(lq_mono[-win:], hq_mono[-win:], max_off).item()
+    off = _env_xcorr_peak(lq_mono[-win:], hq_mono[-win:], max_off, sr).item()
     if abs(off) < int(0.001 * sr):
         return lq_wav, 0
     drift = off
