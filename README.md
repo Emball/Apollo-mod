@@ -33,7 +33,7 @@ This fork reworks Apollo for **single-GPU fine-tuning on your own audio pairs** 
 | `paired_datamodule.py` | Drop-in replacement datamodule that loads your own LQ/HQ WAV pairs instead of MUSDB/MoisesDB + HDF5 |
 | `install.sh` / `install.bat` | One-command installer using `uv` — creates a `.venv`, installs all pinned dependencies, no conda required |
 | `requirements.txt` | Pinned dependency list for reproducible installs |
-| `configs/README.txt` | Human-readable reference for every config key, what it does, and when to change it |
+| `configs/apollo_uni.yaml` | Config variant for the larger "universal" model (`feature_dim=384`) |
 | `configs/apollo_uni.yaml` | Config variant for the larger "universal" model (`feature_dim=384`) |
 
 ### Modified Files
@@ -187,6 +187,122 @@ Long files are automatically processed in 30-second overlapping chunks with cros
 | Universal model (`feature_dim=384`), `batch_size=1` | ~10–12 GB |
 
 Enable `gradient_checkpointing: true` and `precision: 16-mixed` in the config to reduce VRAM at the cost of ~30% longer training steps.
+
+---
+
+## Config Reference
+
+Two configs are provided: `configs/apollo.yaml` (base model, `feature_dim=256`, recommended for most fine-tuning) and `configs/apollo_uni.yaml` (universal model, `feature_dim=384`, larger, needs more VRAM).
+
+### `exp`
+
+| Key | Description |
+|---|---|
+| `dir` | Root folder for all experiment outputs (checkpoints, logs, val audio). |
+| `name` | Subfolder name for this run. Change this to avoid overwriting a previous run. |
+
+### `optimizations`
+
+| Key | Description |
+|---|---|
+| `tf32` | Enable TF32 matmuls on Ampere+ GPUs (3000/4000 series). Negligible quality loss, meaningful speed boost. Leave `true` unless you need full float32 precision. |
+| `cudnn_benchmark` | Let cuDNN benchmark conv algorithms on the first batch and pick the fastest one. Leave `true` for fixed input shapes. Turn off if input sizes vary wildly between runs. |
+| `expandable_segments` | Reduces CUDA allocator fragmentation, helps avoid OOMs mid-run. Leave `true`. |
+| `triton_cache` | Cache compiled Triton kernels to disk so they don't recompile every run. Cache lives in `.triton_cache/`. Leave `true`. |
+
+### `training`
+
+| Key | Description |
+|---|---|
+| `n_layers_to_freeze` | Number of BSNet layers to freeze (BN front-end is always frozen). Higher = less VRAM, faster steps, less catastrophic forgetting, less adaptability. Recommended: 4 for base on 11 GB VRAM, 3 for universal. |
+| `hf_boost` | Extra loss weight on high frequencies. `1.0` = flat. ~`1.5` pushes the model toward treble detail. Don't go above `2.0` or it will over-sharpen. |
+| `val_save_interval` | Save rendered validation audio to disk every N epochs. The same fixed set of chunks is used every time so you can track improvement by ear. |
+| `val_audio_pairs` | How many val chunks to render per save interval. Picked on the first val run and locked in. |
+| `grad_accum_steps` | Accumulate gradients over N batches before stepping. Simulates a larger effective batch size without extra VRAM. `grad_accum_steps: 2` + `batch_size: 2` = effective batch of 4. |
+
+### `datas`
+
+| Key | Description |
+|---|---|
+| `train_dir` | Where chunked training pairs are stored. Auto-generated from `data/train/` on first run. Delete to force re-chunking (e.g. after changing `segment_sec`). |
+| `eval_dir` | Same as above for validation data. |
+| `sr` | Sample rate. Apollo expects `44100`. Don't change this. |
+| `segment_sec` | Length of audio chunks in seconds. Longer = more context, more VRAM. Changing this requires deleting `chunks/` and re-chunking. |
+| `batch_size` | Chunks per training step. With `segment_sec: 4` on an 11 GB card, `batch_size: 2` is about the limit. |
+| `num_workers` | CPU workers prefetching data. Set to number of free CPU cores, max ~8. |
+| `pin_memory` | Allocate DataLoader batches in page-locked RAM for faster CPU→GPU transfers. Leave `true` unless RAM-constrained. |
+| `val_bootstrap_chunks` | If no `data/val/` folder exists, this many chunks are copied from the training set for validation, picked round-robin across songs. |
+
+**Augmentation** — two categories: `live` (applied each epoch by the dataloader, cheap ops) and `cached` (baked into chunk files at chunking time, amortizes expensive ops like pitch shift). All augmentations are applied identically to both LQ and HQ so the model never sees a mismatch.
+
+`cached.cached_variants` — number of augmented variants written per chunk in addition to the clean original. e.g. `variants: 2` produces 3 files per chunk: original + 2 augmented copies.
+
+Live uses `prob` (per-sample probability); cached uses `fraction` (fraction of chunks that receive the augmentation across the dataset).
+
+| Augmentation | Description |
+|---|---|
+| `mono_channel` | Picks L or R randomly instead of feeding both near-identical stereo channels as unique data. |
+| `pitch_shift` | Transparent pitch shift. `semitones_max` sets the max shift in either direction. |
+| `noise` | Matched Gaussian noise added to both LQ and HQ. `sigma: 0.002` is very subtle. |
+| `mp3_degradation` | Random CBR MP3 re-encode on LQ only. `kbps_min`/`kbps_max` set the bitrate range. |
+| `gain` | Random gain shift ±`db_max` dB. Output clamped to `[-1, 1]`. |
+| `polarity` | Polarity flip (multiply by −1). Essentially free. |
+
+> **Note:** Chunks are always saved as 16-bit PCM WAV. Only WAV files are accepted in `data/` — MP3/FLAC/etc will be rejected.
+
+### `model`
+
+| Key | Description |
+|---|---|
+| `feature_dim` | Model width. `256` = base, `384` = universal. Must match pretrained weights. |
+| `layer` | Number of BSNet layers. Always `6` for pretrained Apollo weights. |
+| `win` | STFT window size in ms. Always `20` for pretrained Apollo weights. |
+
+### `optimizer`
+
+| Key | Description |
+|---|---|
+| `type` | `adamw` (standard 32-bit, no extra deps), `adamw_8bit` (8-bit via bitsandbytes, cuts optimizer VRAM ~75%, requires `bitsandbytes`), or `cpu_offload` (momentum states in CPU RAM, saves ~200–400 MB VRAM). |
+| `lr_g` | Learning rate for the generator. |
+| `lr_d` | Learning rate for the discriminator. |
+| `weight_decay` | Applied to both optimizers. |
+| `betas_g` | Adam β1, β2 for the generator. |
+| `betas_d` | Adam β1, β2 for the discriminator. Lower β1 (0.5) is standard for GAN discriminators. |
+
+### `scheduler_g` / `scheduler_d`
+
+| Key | Description |
+|---|---|
+| `step_size` | Decay the LR every N epochs. |
+| `gamma` | Multiply LR by this value each step. `0.98` = 2% reduction per step. |
+
+### `system`
+
+| Key | Description |
+|---|---|
+| `gradient_checkpointing` | Recompute activations during backward instead of storing them. Saves 30–40% VRAM at the cost of ~30% more compute. Useful for pushing `segment_sec` or `batch_size` higher. |
+
+### `early_stopping`
+
+| Key | Description |
+|---|---|
+| `patience` | Stop if `val_loss` doesn't improve for this many val checks. Set very high in the default configs to effectively disable it — lower it if you want it to trigger. |
+
+### `checkpoint`
+
+| Key | Description |
+|---|---|
+| `save_top_k` | How many checkpoints to keep. `-1` = keep all. Set to e.g. `5` to keep only the best 5 by `val_loss`. |
+
+### `trainer`
+
+| Key | Description |
+|---|---|
+| `devices` | Which GPU index to use. `[0]` = first GPU. |
+| `max_epochs` | Hard cap on training epochs. |
+| `precision` | `16-mixed` = fp16 mixed precision (recommended). Use `32` for debugging. |
+| `fast_dev_run` | Set `true` to run 1 train + 1 val batch then exit. Good for sanity-checking a new setup. |
+| `val_check_interval` | (`apollo_uni` only) Run validation every N steps instead of every epoch. Useful when epochs are very long. |
 
 ---
 
