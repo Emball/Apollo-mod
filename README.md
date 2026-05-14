@@ -33,7 +33,7 @@ This fork reworks Apollo for **single-GPU fine-tuning on your own audio pairs** 
 | File | Purpose |
 |---|---|
 | `paired_datamodule.py` | Drop-in replacement datamodule that loads your own LQ/HQ WAV pairs instead of MUSDB/MoisesDB + HDF5 |
-| `install.sh` / `install.bat` | One-command installer using `uv` — creates a `.venv`, installs all pinned dependencies, no conda required |
+| `apollo.sh` / `apollo.bat` | Install (if needed) and drop into an activated Apollo shell — run once to set up, then daily as your entry point |
 | `requirements.txt` | Pinned dependency list for reproducible installs |
 | `configs/apollo_uni.yaml` | Config variant for the larger "universal" model (`feature_dim=384`) |
 | `configs/apollo_uni.yaml` | Config variant for the larger "universal" model (`feature_dim=384`) |
@@ -107,13 +107,13 @@ git clone https://github.com/Emball/Apollo-mod.git
 cd Apollo-mod
 
 # Linux / macOS
-chmod +x install.sh && ./install.sh
+chmod +x apollo.sh && ./apollo.sh
 
 # Windows
-install.bat
+apollo.bat
 ```
 
-The installer uses `uv` (installed automatically if absent) to create a `.venv` with Python 3.11 and all pinned dependencies.
+On first run this installs `uv` if needed, creates a `.venv` with Python 3.11, and installs all dependencies. On subsequent runs it skips straight to syncing deps and drops you into an activated shell where `python`, `train.py`, and `inference.py` are all ready to use.
 
 ---
 
@@ -139,9 +139,6 @@ Filenames must match between `lq/` and `hq/`. Files must be WAV. On the first tr
 
 ```bash
 # Activate the venv
-source .venv/bin/activate        # Linux / macOS
-.venv\Scripts\activate.bat       # Windows
-
 python train.py --conf_dir=configs/apollo.yaml
 ```
 
