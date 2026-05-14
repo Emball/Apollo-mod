@@ -72,5 +72,5 @@ ok "All dependencies installed"
 
 echo
 echo -e "${GRN}  ✓ Installation complete!${RST}"
-echo -e "  Run ${CYN}./start.sh${RST} to launch the Apollo Web UI"
+echo -e "  Activate: source .venv/bin/activate  then train: python train.py --conf_dir=configs/apollo.yaml"
 echo

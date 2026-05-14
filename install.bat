@@ -57,7 +57,7 @@ echo [install] All dependencies installed
 
 echo.
 echo   Installation complete!
-echo   Run start.bat to launch the Apollo Web UI
+echo   Activate: .venv\Scripts\activate.bat  then train: python train.py --conf_dir=configs/apollo.yaml
 echo.
 pause
 endlocal

@@ -41,5 +41,3 @@ bitsandbytes
 # Augmentation
 ffmpeg-python
 
-# Web UI
-python-socketio==5.11.2
