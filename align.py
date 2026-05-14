@@ -20,24 +20,12 @@ import argparse
 import os
 import sys
 import math
+import numpy as np
 import scipy.ndimage
 
 
 def _load(path, sr=44100):
-    try:
-        wav, rsr = torchaudio.load(path)
-    except Exception:
-        try:
-            import librosa
-            data, rsr = librosa.load(path, sr=None, mono=False)
-            if data.ndim == 1:
-                wav = torch.from_numpy(data).unsqueeze(0).float()
-            else:
-                wav = torch.from_numpy(data).float()
-        except Exception as e:
-            raise RuntimeError(
-                f"Cannot load {path}. Try converting to WAV first."
-            ) from e
+    wav, rsr = torchaudio.load(path)
     if rsr != sr:
         wav = torchaudio.functional.resample(wav, rsr, sr)
     return wav, sr
@@ -103,8 +91,9 @@ def align_pair(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=80):
 
     all_pos = torch.arange(n, dtype=torch.float)
     if len(o) > 1:
+        off_np = np.interp(all_pos.numpy(), p.numpy(), o.numpy())
         sample_off = torch.clamp(
-            torch.interp(all_pos, p, o),
+            torch.from_numpy(off_np),
             -max_shift, max_shift
         )
     else:
