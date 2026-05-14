@@ -158,7 +158,7 @@ def _global_speed_align(lq_wav: "torch.Tensor", hq_wav: "torch.Tensor", sr: int)
     anchor = min(int(2.0 * sr), n // 5)
     anchor = (anchor // frame) * frame  # round down to frame boundary
     if anchor < frame * 10:
-        # File too short to be worth correcting
+        print_only(f"    [align] file too short for speed correction ({n/sr:.1f}s), skipping")
         return lq_wav[:, :n]
 
     max_shift_frames = int(0.5 * sr) // frame  # search up to ±0.5 s
@@ -175,8 +175,7 @@ def _global_speed_align(lq_wav: "torch.Tensor", hq_wav: "torch.Tensor", sr: int)
     # drift: additional offset accumulated by the end (constant speed difference)
     drift = off_end - off_start
 
-    print_only(f"    [align] start_offset={off_start:+d} samples ({off_start/sr*1000:.1f}ms)  "
-               f"drift={drift:+d} samples ({drift/sr*1000:.1f}ms) over {n/sr:.1f}s")
+    print_only(f"    [align] file={n/sr:.1f}s  start_offset={off_start:+d} smp ({off_start/sr*1000:.1f}ms)  drift={drift:+d} smp ({drift/sr*1000:.1f}ms)")
 
     # Step 1: correct speed (drift) via resample
     if abs(drift) >= int(0.001 * sr):
