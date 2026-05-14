@@ -133,7 +133,7 @@ def _correct_start(lq, hq, sr, max_off=None):
 def _correct_speed(lq_wav, hq_mono, sr, max_off=None):
     """Stage 2: measure end drift after start fix, resample LQ to match speed."""
     if max_off is None:
-        max_off = int(0.1 * sr)
+        max_off = int(0.5 * sr)
     lq_mono = lq_wav.mean(dim=0)
     win = int(min(2.0 * sr, lq_mono.shape[0], hq_mono.shape[0]))
     off = _env_xcorr_peak(lq_mono[-win:], hq_mono[-win:], max_off, sr).item()
@@ -155,23 +155,8 @@ def _correct_speed(lq_wav, hq_mono, sr, max_off=None):
     return lq_wav, drift
 
 
-def _onset_env(x, sr):
-    """Onset strength envelope: half-wave rectified difference of smoothed envelope.
-       Produces sharp peaks at transients — ideal for aligning percussive audio."""
-    env = x.abs()
-    smooth = int(0.003 * sr)
-    if smooth > 1:
-        env = torch.nn.functional.avg_pool1d(
-            env.unsqueeze(0), kernel_size=smooth, stride=1, padding=smooth // 2
-        ).squeeze(0)
-    onset = torch.nn.functional.relu(env[1:] - env[:-1])
-    onset = torch.nn.functional.pad(onset, (1, 0))
-    return onset
-
-
-def _align_chunks(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=200):
-    """Stage 3: cut-and-crossfade chunk alignment for residual local drift.
-       Uses onset-envelope correlation to avoid beat ambiguity with drums."""
+def _align_chunks(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=80):
+    """Stage 3: cut-and-crossfade chunk alignment for residual local drift."""
     lq = lq_wav.mean(dim=0)
     hq = hq_wav.mean(dim=0)
     n = min(lq.shape[0], hq.shape[0])
@@ -182,13 +167,10 @@ def _align_chunks(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=200)
     hop = int(chunk * (1 - overlap))
     max_shift = int(search_ms / 1000 * sr)
 
-    lq_onset = _onset_env(lq, sr)
-    hq_onset = _onset_env(hq, sr)
-
     offsets = []
     for start in range(0, n - chunk + 1, hop):
-        a = lq_onset[start:start + chunk]
-        b = hq_onset[start:start + chunk]
+        a = lq[start:start + chunk]
+        b = hq[start:start + chunk]
         off = _xcorr_peak(a, b, max_shift)
         offsets.append(off.item())
 
@@ -219,7 +201,7 @@ def _align_chunks(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=200)
     return out
 
 
-def align_pair(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=200):
+def align_pair(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=80):
     lq = lq_wav.mean(dim=0)
     hq = hq_wav.mean(dim=0)
 
@@ -248,7 +230,7 @@ def align_pair(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=200):
 
 
 def process_pair(lq_path, hq_path, out_path=None, chunk_sec=0.5,
-                 overlap=0.5, search_ms=200, sr=44100, in_place=False):
+                 overlap=0.5, search_ms=80, sr=44100, in_place=False):
     print(f"  Loading {os.path.basename(lq_path)}", flush=True)
     lq, sr = _load(lq_path, sr)
     hq, _ = _load(hq_path, sr)
@@ -305,8 +287,8 @@ def main():
                    help="Analysis chunk length in seconds (default: 0.5)")
     g.add_argument("--overlap", type=float, default=0.5,
                    help="Overlap fraction between chunks (default: 0.5)")
-    g.add_argument("--search-ms", type=int, default=200,
-                   help="Max offset search range in ms (default: 200)")
+    g.add_argument("--search-ms", type=int, default=80,
+                   help="Max offset search range in ms (default: 80)")
     g.add_argument("--sr", type=int, default=44100,
                    help="Target sample rate (default: 44100)")
 
