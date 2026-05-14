@@ -243,6 +243,7 @@ def augment_pair(
     hq: torch.Tensor,
     cfg: AugmentationCfg,
     sr: int = 44100,
+    idx: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Apply random augmentations to an LQ/HQ pair. Shape: (2, samples).
@@ -271,10 +272,11 @@ def augment_pair(
         return lq, hq
 
     # ── mono_channel ─────────────────────────────────────────────────────────
-    # Pick one channel per chunk. Reduces redundancy from near-identical L/R.
+    # Alternate L/R deterministically by sample index so every epoch covers
+    # both channels evenly rather than randomly clumping on one side.
     # Applied first so all subsequent augmentations work on the selected channel.
     if cfg.mono_channel.enabled and random.random() < cfg.mono_channel.prob:
-        ch = random.randint(0, lq.shape[0] - 1)
+        ch = (idx % 2) if idx is not None else random.randint(0, lq.shape[0] - 1)
         lq = lq[ch:ch+1]
         hq = hq[ch:ch+1]
 
@@ -394,7 +396,7 @@ class ChunkedPairDataset(Dataset):
         lq = load_wav(lq_path, self.sr)
         hq = load_wav(hq_path, self.sr)
         lq, hq = normalize_pair(lq, hq)
-        lq, hq = augment_pair(lq, hq, self.aug_cfg, sr=self.sr)
+        lq, hq = augment_pair(lq, hq, self.aug_cfg, sr=self.sr, idx=idx)
         return hq, lq
 
 
