@@ -154,25 +154,33 @@ tensorboard --logdir ./experiments
 ### 4. Run Inference
 
 ```bash
-# From HuggingFace (no local weights needed)
+# Default model (apollo — downloads pytorch_model.bin on first run)
 python inference.py --in_wav input.mp3 --out_wav output.wav
 
-# From a Lightning checkpoint saved during fine-tuning
+# Lew vocal enhancer v2 (auto-downloads on first run)
+python inference.py --in_wav input.mp3 --out_wav output.wav --weights lew_v2
+
+# Lew universal model (feature_dim set automatically)
+python inference.py --in_wav input.mp3 --out_wav output.wav --weights lew_uni
+
+# Local fine-tune checkpoint
 python inference.py \
   --in_wav  input.mp3 \
   --out_wav output.wav \
   --weights experiments/my_run/step=001200-val_loss=0.0312.ckpt
 
-# Universal model (feature_dim=384)
-python inference.py \
-  --in_wav  input.mp3 \
-  --out_wav output.wav \
-  --weights models/apollo_model_uni.ckpt \
-  --feature_dim 384
-
 # CPU-only machine
 python inference.py --in_wav input.mp3 --out_wav output.wav --device cpu
 ```
+
+Available shortnames (all auto-download into `models/` and are reused on subsequent runs):
+
+| Shortname | File | `feature_dim` |
+|---|---|---|
+| `apollo` | `pytorch_model.bin` — official base model | 256 |
+| `lew` | `apollo_model.ckpt` — Lew vocal enhancer v1 | 256 |
+| `lew_v2` | `apollo_model_v2.ckpt` — Lew vocal enhancer v2 | 256 |
+| `lew_uni` | `apollo_model_uni.ckpt` — Lew universal model | 384 |
 
 Long files are automatically processed in 30-second overlapping chunks with crossfade stitching.
 

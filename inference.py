@@ -2,15 +2,22 @@
 # @claude last-commit: feat: major update — TUI, augmentation system, gradient checkpointing, optimization bootstrap
 """
 inference.py — Apollo audio enhancement script
-Supports HuggingFace weights, local .pth/.bin (from_pretrain format),
-and local .ckpt (Lightning checkpoint format).
+
+Model selection (--weights):
+  apollo      Official Apollo base model (default, auto-downloads pytorch_model.bin)
+  lew         Lew vocal enhancer v1 (auto-downloads apollo_model.ckpt)
+  lew_v2      Lew vocal enhancer v2 (auto-downloads apollo_model_v2.ckpt)
+  lew_uni     Lew universal model, feature_dim=384 (auto-downloads apollo_model_uni.ckpt)
+  <path>      Local .pth / .bin / .ckpt file
+
+All shortnames download into models/ and are reused on subsequent runs.
 
 Usage:
     python inference.py --in_wav input.wav --out_wav output.wav
+    python inference.py --in_wav input.wav --out_wav output.wav --weights lew_v2
+    python inference.py --in_wav input.wav --out_wav output.wav --weights lew_uni
     python inference.py --in_wav input.wav --out_wav output.wav \
-        --weights models/apollo_model.ckpt --feature_dim 256
-    python inference.py --in_wav input.wav --out_wav output.wav \
-        --weights models/apollo_model_uni.ckpt --feature_dim 384
+        --weights models/my_finetune.ckpt --feature_dim 256
 """
 
 import argparse
@@ -22,6 +29,65 @@ import look2hear.models
 import look2hear.models.apollo
 
 _SR = 44100   # Apollo's native sample rate
+
+_MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model registry — shortnames that auto-download into models/
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Each entry: shortname -> (filename, url, feature_dim)
+# feature_dim is returned alongside the path so the caller can set it
+# automatically when the user hasn't specified one explicitly.
+KNOWN_MODELS = {
+    "apollo": (
+        "pytorch_model.bin",
+        "https://huggingface.co/JusperLee/Apollo/resolve/main/pytorch_model.bin",
+        256,
+    ),
+    "lew": (
+        "apollo_model.ckpt",
+        "https://huggingface.co/jarredou/lew_apollo_vocal_enhancer/resolve/main/apollo_model.ckpt",
+        256,
+    ),
+    "lew_v2": (
+        "apollo_model_v2.ckpt",
+        "https://huggingface.co/jarredou/lew_apollo_vocal_enhancer/resolve/main/apollo_model_v2.ckpt",
+        256,
+    ),
+    "lew_uni": (
+        "apollo_model_uni.ckpt",
+        "https://github.com/deton24/Lew-s-vocal-enhancer-for-Apollo-by-JusperLee/releases/download/uni/apollo_model_uni.ckpt",
+        384,
+    ),
+}
+
+
+def ensure_model(shortname: str) -> tuple:
+    """
+    Given a shortname from KNOWN_MODELS, return (local_path, feature_dim).
+    Downloads the file into models/ if it isn't already there.
+    """
+    if shortname not in KNOWN_MODELS:
+        raise ValueError(
+            f"Unknown model '{shortname}'. Known models: {list(KNOWN_MODELS)}"
+        )
+    filename, url, feature_dim = KNOWN_MODELS[shortname]
+    os.makedirs(_MODELS_DIR, exist_ok=True)
+    dest = os.path.join(_MODELS_DIR, filename)
+    if not os.path.exists(dest):
+        print(f"[inference] Downloading {shortname} -> models/{filename}")
+        import urllib.request
+        def _progress(count, block, total):
+            if total > 0:
+                pct = min(100, count * block * 100 // total)
+                print(f"\r[inference] {pct:3d}%", end="", flush=True)
+        urllib.request.urlretrieve(url, dest, reporthook=_progress)
+        print()  # newline after progress
+        print(f"[inference] Saved -> {dest}")
+    else:
+        print(f"[inference] Found cached model: models/{filename}")
+    return dest, feature_dim
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -92,10 +158,22 @@ def _load_ckpt(path: str, feature_dim: int, sr: int, win: int, layer: int):
 def load_model(weights, sr, win, feature_dim, layer):
     """
     Load Apollo model from:
-      * None / "JusperLee/Apollo"  -> HuggingFace hub
+      * None or shortname (apollo/lew/lew_v2/lew_uni) -> auto-download to models/
       * path ending in .ckpt       -> Lightning checkpoint
       * path ending in .pth / .bin -> from_pretrain (serialized) format
+      * "JusperLee/Apollo"         -> HuggingFace hub (no local cache)
+
+    When a shortname is used and feature_dim is still at the default (256),
+    the registry value overrides it automatically.
     """
+    # Resolve shortnames first
+    if weights and weights.strip().lower() in KNOWN_MODELS:
+        local_path, registry_dim = ensure_model(weights.strip().lower())
+        if feature_dim == 256 and registry_dim != 256:
+            print(f"[inference] Auto-setting feature_dim={registry_dim} for {weights}")
+            feature_dim = registry_dim
+        weights = local_path
+
     if not weights or weights.strip().lower() in ("", "jusperlee/apollo"):
         print("[inference] Loading from HuggingFace hub: JusperLee/Apollo")
         model = look2hear.models.BaseModel.from_pretrain(
@@ -216,8 +294,9 @@ if __name__ == "__main__":
     parser.add_argument("--out_wav",     type=str, required=True,
                         help="Path to save enhanced output")
     parser.add_argument("--weights",     type=str, default=None,
-                        help="Local .pth/.bin/.ckpt path, or 'JusperLee/Apollo' "
-                             "for HuggingFace (default: HuggingFace)")
+                        help="Model to use. Shortnames: apollo, lew, lew_v2, lew_uni "
+                             "(auto-downloaded to models/). Or a local .pth/.bin/.ckpt path. "
+                             "Default: apollo (downloads pytorch_model.bin from HuggingFace)")
     parser.add_argument("--sr",          type=int, default=_SR,
                         help=f"Sample rate (default: {_SR})")
     parser.add_argument("--win",         type=int, default=20,
