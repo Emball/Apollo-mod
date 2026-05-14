@@ -134,8 +134,9 @@ def _correct_speed(lq_wav, hq_mono, sr, max_off=None):
     """Stage 2: measure end drift after start fix, resample LQ to match speed."""
     lq_mono = lq_wav.mean(dim=0)
     n = min(lq_mono.shape[0], hq_mono.shape[0])
-    win = int(min(5.0 * sr, n))
-    off = _env_xcorr_peak(lq_mono[-win:], hq_mono[-win:], win // 2, sr).item()
+    limit = int(0.2 * sr) if max_off is None else max_off
+    win = int(min(3.0 * sr, n // 2))
+    off = _env_xcorr_peak(lq_mono[-win:], hq_mono[-win:], limit, sr).item()
     if abs(off) < int(0.001 * sr):
         return lq_wav, 0
     drift = off
@@ -154,7 +155,7 @@ def _correct_speed(lq_wav, hq_mono, sr, max_off=None):
     return lq_wav, drift
 
 
-def _align_chunks(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=80):
+def _align_chunks(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=120):
     """Stage 3: cut-and-crossfade chunk alignment for residual local drift."""
     lq = lq_wav.mean(dim=0)
     hq = hq_wav.mean(dim=0)
@@ -200,7 +201,7 @@ def _align_chunks(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=80):
     return out
 
 
-def align_pair(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=80):
+def align_pair(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=120):
     lq = lq_wav.mean(dim=0)
     hq = hq_wav.mean(dim=0)
 
@@ -229,7 +230,7 @@ def align_pair(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=80):
 
 
 def process_pair(lq_path, hq_path, out_path=None, chunk_sec=0.5,
-                 overlap=0.5, search_ms=80, sr=44100, in_place=False):
+                 overlap=0.5, search_ms=120, sr=44100, in_place=False):
     print(f"  Loading {os.path.basename(lq_path)}", flush=True)
     lq, sr = _load(lq_path, sr)
     hq, _ = _load(hq_path, sr)
@@ -286,8 +287,8 @@ def main():
                    help="Analysis chunk length in seconds (default: 0.5)")
     g.add_argument("--overlap", type=float, default=0.5,
                    help="Overlap fraction between chunks (default: 0.5)")
-    g.add_argument("--search-ms", type=int, default=80,
-                   help="Max offset search range in ms (default: 80)")
+    g.add_argument("--search-ms", type=int, default=120,
+                   help="Max offset search range in ms (default: 120)")
     g.add_argument("--sr", type=int, default=44100,
                    help="Target sample rate (default: 44100)")
 
