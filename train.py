@@ -214,7 +214,7 @@ def _chunk_align_offset(lq_mono, hq_mono, chunk_start, chunk_len, sr, max_shift)
     Returns an integer offset in samples (rounded to nearest envelope frame).
     Positive = LQ starts later than HQ grid position. Clamped to keep in-bounds.
     """
-    frame = max(1, sr // 200)  # 5ms envelope frames
+    frame = max(1, sr // 1000)  # 1ms envelope frames
 
     # Extract envelope of the HQ chunk as reference
     hq_chunk = hq_mono[chunk_start:chunk_start + chunk_len]
