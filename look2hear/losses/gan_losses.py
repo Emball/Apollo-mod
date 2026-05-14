@@ -14,7 +14,6 @@
 import torch
 from torch.nn.modules.loss import _Loss
 
-
 class MultiFrequencyDisLoss(_Loss):
     def __init__(self, eps=1e-8):
         super(MultiFrequencyDisLoss, self).__init__()
@@ -26,7 +25,6 @@ class MultiFrequencyDisLoss(_Loss):
             D_real = D_real + (target_outputs[i] - 1).pow(2).mean() / len(target_outputs)
             D_fake = D_fake + (est_outputs[i]).pow(2).mean() / len(est_outputs)
         return D_real + D_fake
-
 
 class MultiFrequencyGenLoss(_Loss):
     def __init__(self, eps=1e-8, hf_boost=1.0, hf_threshold_ratio=0.5):

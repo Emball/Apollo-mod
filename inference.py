@@ -32,9 +32,7 @@ _SR = 44100   # Apollo's native sample rate
 
 _MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Model registry — shortnames that auto-download into models/
-# ─────────────────────────────────────────────────────────────────────────────
 
 # Each entry: shortname -> (filename, url, feature_dim)
 # feature_dim is returned alongside the path so the caller can set it
@@ -62,7 +60,6 @@ KNOWN_MODELS = {
     ),
 }
 
-
 def ensure_model(shortname: str) -> tuple:
     """
     Given a shortname from KNOWN_MODELS, return (local_path, feature_dim).
@@ -89,10 +86,7 @@ def ensure_model(shortname: str) -> tuple:
         print(f"[inference] Found cached model: models/{filename}")
     return dest, feature_dim
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Audio I/O helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
 def load_audio(file_path: str, target_sr: int = _SR) -> torch.Tensor:
     """
@@ -114,7 +108,6 @@ def load_audio(file_path: str, target_sr: int = _SR) -> torch.Tensor:
 
     return audio.unsqueeze(0)   # [1, 2, T]
 
-
 def save_audio(file_path: str, audio: torch.Tensor, sr: int = _SR) -> None:
     """Save [1, C, T] or [C, T] tensor to file."""
     if audio.ndim == 3:
@@ -124,10 +117,7 @@ def save_audio(file_path: str, audio: torch.Tensor, sr: int = _SR) -> None:
     torchaudio.save(file_path, audio, sr)
     print(f"[inference] Saved -> {file_path}")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Model loading
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _load_ckpt(path: str, feature_dim: int, sr: int, win: int, layer: int):
     """Load a PyTorch Lightning .ckpt file (audio_model.* prefix)."""
@@ -153,7 +143,6 @@ def _load_ckpt(path: str, feature_dim: int, sr: int, win: int, layer: int):
     if not missing:
         print("[inference] All keys loaded successfully")
     return model
-
 
 def load_model(weights, sr, win, feature_dim, layer):
     """
@@ -191,14 +180,10 @@ def load_model(weights, sr, win, feature_dim, layer):
 
     return model
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Chunked inference (handles long files without OOM)
-# ─────────────────────────────────────────────────────────────────────────────
 
 _CHUNK_SEC   = 30     # seconds per processing chunk
 _OVERLAP_SEC = 0.5    # crossfade overlap at boundaries
-
 
 def _run_chunked(model, audio, device, sr):
     """
@@ -241,10 +226,7 @@ def _run_chunked(model, audio, device, sr):
 
     return output
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Main
-# ─────────────────────────────────────────────────────────────────────────────
 
 def main(
     input_wav,
@@ -285,7 +267,6 @@ def main(
 
     # Save output
     save_audio(output_wav, enhanced, sr=sr)
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Apollo audio enhancement")

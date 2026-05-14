@@ -41,9 +41,7 @@ import torchaudio
 from torch.utils.data import Dataset, DataLoader
 from pytorch_lightning import LightningDataModule
 
-# ---------------------------------------------------------------------------
 # Augmentation config dataclasses
-# ---------------------------------------------------------------------------
 
 @dataclass
 class GainAugCfg:
@@ -85,13 +83,11 @@ class AugmentationCfg:
     mp3_degradation: Mp3AugCfg   = field(default_factory=Mp3AugCfg)
     mono_channel: SimpleAugCfg   = field(default_factory=SimpleAugCfg)
 
-
 def _get(d, key, default):
     try:
         return d[key]
     except (KeyError, TypeError):
         return default
-
 
 def _parse_aug_cfg(raw) -> AugmentationCfg:
     """Build AugmentationCfg from an OmegaConf DictConfig, plain dict, or None.
@@ -144,13 +140,7 @@ def _parse_aug_cfg(raw) -> AugmentationCfg:
         ),
     )
 
-
-# ---------------------------------------------------------------------------
 # Individual augmentation implementations
-# ---------------------------------------------------------------------------
-
-
-
 
 _ffmpeg_available: Optional[bool] = None
 
@@ -166,7 +156,6 @@ def _check_ffmpeg() -> bool:
             _ffmpeg_available = False
     return _ffmpeg_available
 
-
 def _pitch_shift_tensor(wav: torch.Tensor, semitones: float, sr: int) -> torch.Tensor:
     """Pitch shift via resampling. No external deps, exact same shape guaranteed."""
     original_length = wav.shape[-1]
@@ -179,7 +168,6 @@ def _pitch_shift_tensor(wav: torch.Tensor, semitones: float, sr: int) -> torch.T
     else:
         wav = torch.nn.functional.pad(wav, (0, original_length - wav.shape[-1]))
     return wav.float()
-
 
 def _mp3_degrade_tensor(wav: torch.Tensor, kbps: int, sr: int) -> torch.Tensor:
     """Encode wav to MP3 at kbps then decode back, with encoder delay compensation.
@@ -271,7 +259,7 @@ def augment_pair(
     if not cfg.enabled:
         return lq, hq
 
-    # ── mono_channel ─────────────────────────────────────────────────────────
+    # mono_channel
     # Alternate L/R deterministically by sample index so every epoch covers
     # both channels evenly rather than randomly clumping on one side.
     # Applied first so all subsequent augmentations work on the selected channel.
@@ -280,32 +268,32 @@ def augment_pair(
         lq = lq[ch:ch+1]
         hq = hq[ch:ch+1]
 
-    # ── Pitch shift ───────────────────────────────────────────────────────────
+    # Pitch shift
     if cfg.pitch_shift.enabled and random.random() < cfg.pitch_shift.prob:
         semitones = random.uniform(-cfg.pitch_shift.semitones_max, cfg.pitch_shift.semitones_max)
         lq = _pitch_shift_tensor(lq, semitones, sr)
         hq = _pitch_shift_tensor(hq, semitones, sr)
 
-    # ── Gain ──────────────────────────────────────────────────────────────────
+    # Gain
     if cfg.gain.enabled and random.random() < cfg.gain.prob:
         db    = random.uniform(-cfg.gain.db_max, cfg.gain.db_max)
         scale = 10 ** (db / 20.0)
         lq    = (lq * scale).clamp(-1.0, 1.0)
         hq    = (hq * scale).clamp(-1.0, 1.0)
 
-    # ── Polarity inversion ────────────────────────────────────────────────────
+    # Polarity inversion
     if cfg.polarity.enabled and random.random() < cfg.polarity.prob:
         lq = -lq
         hq = -hq
 
-    # ── Gaussian noise ────────────────────────────────────────────────────────
+    # Gaussian noise
     # Same noise tensor added to both — preserves the pair relationship.
     if cfg.noise.enabled and random.random() < cfg.noise.prob:
         noise = torch.randn_like(lq) * cfg.noise.sigma
         lq = (lq + noise).clamp(-1.0, 1.0)
         hq = (hq + noise).clamp(-1.0, 1.0)
 
-    # ── MP3 degradation (LQ only) ─────────────────────────────────────────────
+    # MP3 degradation (LQ only)
     if cfg.mp3_degradation.enabled and random.random() < cfg.mp3_degradation.prob:
         if _check_ffmpeg():
             kbps = random.randint(cfg.mp3_degradation.kbps_min, cfg.mp3_degradation.kbps_max)
@@ -313,13 +301,9 @@ def augment_pair(
 
     return lq, hq
 
-
-# ---------------------------------------------------------------------------
 # Shared helpers
-# ---------------------------------------------------------------------------
 
 SR = 44100
-
 
 def load_wav(path: str, target_sr: int = SR) -> torch.Tensor:
     wav, sr = torchaudio.load(path)
@@ -331,14 +315,12 @@ def load_wav(path: str, target_sr: int = SR) -> torch.Tensor:
         wav = wav[:2]
     return wav
 
-
 def normalize_pair(lq: torch.Tensor, hq: torch.Tensor):
     scale = max(lq.abs().max(), hq.abs().max())
     if scale > 0:
         lq = lq / scale
         hq = hq / scale
     return lq, hq
-
 
 def get_matched_pairs(lq_dir: str, hq_dir: str) -> List[Tuple[str, str]]:
     lq_files = {
@@ -362,10 +344,7 @@ def get_matched_pairs(lq_dir: str, hq_dir: str) -> List[Tuple[str, str]]:
 
     return [(lq_files[s], hq_files[s]) for s in matched]
 
-
-# ---------------------------------------------------------------------------
 # Training dataset — loads pre-chunked files
-# ---------------------------------------------------------------------------
 
 class ChunkedPairDataset(Dataset):
     def __init__(self, chunks_dir: str, sr: int = SR, aug_cfg: AugmentationCfg = None):
@@ -399,10 +378,7 @@ class ChunkedPairDataset(Dataset):
         lq, hq = augment_pair(lq, hq, self.aug_cfg, sr=self.sr, idx=idx)
         return hq, lq
 
-
-# ---------------------------------------------------------------------------
 # Validation dataset — full-length files sliced at runtime
-# ---------------------------------------------------------------------------
 
 class FullLengthPairDataset(Dataset):
     def __init__(self, eval_dir: str, sr: int = SR, segment_sec: float = 2.0):
@@ -438,10 +414,7 @@ class FullLengthPairDataset(Dataset):
         lq_chunk, hq_chunk = normalize_pair(lq_chunk, hq_chunk)
         return hq_chunk, lq_chunk
 
-
-# ---------------------------------------------------------------------------
 # DataModule
-# ---------------------------------------------------------------------------
 
 class PairedAudioDataModule(LightningDataModule):
     def __init__(

@@ -11,45 +11,40 @@ import hydra
 from pytorch_lightning import Callback, LightningDataModule, LightningModule, Trainer
 from omegaconf import DictConfig
 
-
-# ---------------------------------------------------------------------------
 # Optimisation bootstrap — reads cfg.optimizations and applies everything
 # in one place, before any model or trainer code runs.
-# ---------------------------------------------------------------------------
 
 def apply_optimizations(cfg: DictConfig) -> None:
     """Apply hardware/compiler optimisations declared in cfg.optimizations."""
     opt = cfg.get("optimizations", {})
 
-    # ── TF32 matmuls (Ampere+, negligible quality loss) ─────────────────────
+    # TF32 matmuls (Ampere+, negligible quality loss)
     tf32 = opt.get("tf32", True)
     torch.set_float32_matmul_precision("high" if tf32 else "highest")
     if tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
-    # ── cuDNN benchmark (fastest conv algo for fixed input shapes) ──────────
+    # cuDNN benchmark (fastest conv algo for fixed input shapes)
     cudnn_benchmark = opt.get("cudnn_benchmark", True)
     torch.backends.cudnn.benchmark = cudnn_benchmark
 
-    # ── CUDA allocator: expandable segments (reduces fragmentation) ─────────
+    # CUDA allocator: expandable segments (reduces fragmentation)
     alloc_conf_parts = []
     if opt.get("expandable_segments", True):
         alloc_conf_parts.append("expandable_segments:True")
     if alloc_conf_parts:
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = ",".join(alloc_conf_parts)
 
-
-    # ── Triton kernel cache (compiled kernels persist between runs) ─────────
+    # Triton kernel cache (compiled kernels persist between runs)
     triton_cache = opt.get("triton_cache", True)
     if triton_cache:
         cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".triton_cache")
         os.makedirs(cache_dir, exist_ok=True)
         os.environ["TRITON_CACHE_DIR"] = cache_dir
 
-    # ── Misc env flags ──────────────────────────────────────────────────────
+    # Misc env flags
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
 
 import look2hear.system
 import look2hear.datas
@@ -60,15 +55,13 @@ from look2hear.utils import RankedLogger, instantiate, print_only
 import warnings
 warnings.filterwarnings("ignore")
 
-
-# ── Constants mirrored from preprocess_pairs.py ───────────────────────────────
+# Constants mirrored from preprocess_pairs.py
 _SR           = 44100
 _CHUNK_SEC    = 3
 _OVERLAP      = 0.5
 _CHUNK_SAMPLES = int(_CHUNK_SEC * _SR)
 _HOP_SAMPLES   = int(_CHUNK_SAMPLES * (1 - _OVERLAP))
 _SUPPORTED_EXTS = {".wav"}  # WAV only — other formats introduce delays or encoder overhead
-
 
 # Models directory — pretrained weights are looked up here automatically
 _MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
@@ -81,10 +74,7 @@ _PRETRAINED_MODELS = {
     "pytorch_model.bin":     None,  # HF bin format (feature_dim=256)
 }
 
-
-# ---------------------------------------------------------------------------
 # Data preparation — runs before training, skips gracefully if already done
-# ---------------------------------------------------------------------------
 
 def _load_wav_stereo(path: str):
     """Load a WAV file, resample to _SR if needed, force stereo float32."""
@@ -105,14 +95,12 @@ def _load_wav_stereo(path: str):
         wav = wav[:2]
     return wav
 
-
 def _save_chunk_16bit(tensor, path: str):
     """Save a chunk as 16-bit PCM WAV regardless of input dtype."""
     import torchaudio
     # Clamp to [-1, 1] then convert to int16 range
     pcm = tensor.float().clamp(-1.0, 1.0)
     torchaudio.save(path, pcm, _SR, encoding="PCM_S", bits_per_sample=16)
-
 
 def _slice_and_save(
     lq_wav, hq_wav, stem: str, lq_out: str, hq_out: str,
@@ -150,7 +138,6 @@ def _slice_and_save(
         idx   += 1
     return saved
 
-
 def _has_wav_pairs(lq_dir: str, hq_dir: str) -> bool:
     """Return True if both dirs exist and share at least one matching stem."""
     if not (os.path.isdir(lq_dir) and os.path.isdir(hq_dir)):
@@ -159,14 +146,12 @@ def _has_wav_pairs(lq_dir: str, hq_dir: str) -> bool:
     hq_stems = {os.path.splitext(f)[0] for f in os.listdir(hq_dir) if f.endswith(".wav")}
     return bool(lq_stems & hq_stems)
 
-
 def _count_wav_pairs(lq_dir: str, hq_dir: str) -> int:
     if not (os.path.isdir(lq_dir) and os.path.isdir(hq_dir)):
         return 0
     lq_stems = {os.path.splitext(f)[0] for f in os.listdir(lq_dir) if f.endswith(".wav")}
     hq_stems = {os.path.splitext(f)[0] for f in os.listdir(hq_dir) if f.endswith(".wav")}
     return len(lq_stems & hq_stems)
-
 
 def _normalize_data_dir(src_root: str, split_name: str) -> bool:
     """
@@ -209,13 +194,13 @@ def _normalize_data_dir(src_root: str, split_name: str) -> bool:
 
     entries = os.listdir(src_root)
 
-    # ── Layout A: _LQ / _HQ subdirectories ───────────────────────────────────
+    # Layout A: _LQ / _HQ subdirectories
     subdirs  = {e for e in entries if os.path.isdir(os.path.join(src_root, e))}
     lq_dirs  = {d[:-3]: d for d in subdirs if d.upper().endswith("_LQ")}
     hq_dirs  = {d[:-3]: d for d in subdirs if d.upper().endswith("_HQ")}
     dir_pairs = sorted(set(lq_dirs) & set(hq_dirs))
 
-    # ── Layout B: _LQ / _HQ postfix files ────────────────────────────────────
+    # Layout B: _LQ / _HQ postfix files
     files    = {e for e in entries if os.path.isfile(os.path.join(src_root, e))
                 and os.path.splitext(e)[1].lower() in _SUPPORTED_EXTS}
     lq_files_flat = {}
@@ -269,7 +254,6 @@ def _normalize_data_dir(src_root: str, split_name: str) -> bool:
     total_pairs = len(dir_pairs) + len(file_pairs)
     print_only(f"[data/{split_name}] Normalized {total_pairs} pairs into LQ/ + HQ/")
     return True
-
 
 def _build_cached_aug_fn(cfg: "DictConfig"):
     """
@@ -349,7 +333,6 @@ def _build_cached_aug_fn(cfg: "DictConfig"):
 
     return _apply
 
-
 def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=None, variants: int = 1) -> int:
     """
     Normalize src_root into LQ/ + HQ/ layout (if not already), then chunk all
@@ -415,7 +398,6 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     print_only(f"[data/{split_name}] Done — {total} chunk pairs → {dst_root}\n")
     return total
 
-
 def prepare_data(cfg: DictConfig) -> None:
     """
     Auto-preprocessing pipeline called before training.
@@ -452,7 +434,7 @@ def prepare_data(cfg: DictConfig) -> None:
     _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, variants=variants)
     _chunk_split(data_val,   val_chunks,   "val",   cached_aug_fn=None,          variants=1)
 
-    # ── Val bootstrap from train chunks ──────────────────────────────────────
+    # Val bootstrap from train chunks
     # If val is still empty after chunking (no data/val source exists),
     # copy a random selection of train chunks into val — without removing
     # them from training. Chunks are picked by randomly selecting songs first,
@@ -513,7 +495,6 @@ def prepare_data(cfg: DictConfig) -> None:
 
             print_only(f"[data/val] Bootstrapped {len(selected)} val chunks across {len(songs)} songs (copied, not moved).")
 
-
 def freeze_early_layers(model, n_layers_to_freeze=4):
     """
     Freeze the band-split front-end (BN) and first N BSNet layers.
@@ -536,7 +517,6 @@ def freeze_early_layers(model, n_layers_to_freeze=4):
     total  = sum(p.numel() for p in model.parameters())
     print_only(f"Frozen {frozen:,} / {total:,} parameters ({100*frozen/total:.1f}%)")
 
-
 def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # Apply hardware / compiler optimisations declared in cfg.optimizations
     apply_optimizations(cfg)
@@ -551,7 +531,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     print_only(f"Instantiating datamodule <{cfg.datas._target_}>")
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.datas)
 
-    # ── Resolve resume checkpoint early ────────────────────────────────────
+    # Resolve resume checkpoint early
     # Do this before pretrain loading so we can skip it when resuming.
     # Lightning's trainer.fit(ckpt_path=...) fully restores model weights,
     # optimizer state, epoch, and step — pretrain weights would just be
@@ -574,7 +554,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         else:
             print_only(f"[resume] Checkpoint directory not found: {ckpt_dir}, starting from scratch.")
 
-    # ── Pretrained weights resolution ──────────────────────────────────────
+    # Pretrained weights resolution
     # Priority:
     #   1. Explicit --weights_path / cfg.weights_path
     #   2. Auto-scan ./models/ for known filenames (first match wins)
@@ -671,7 +651,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     opt_cfg = cfg.optimizer
     trainable_params = [p for p in model.parameters() if p.requires_grad]
 
-    # ── Optimizer factory ─────────────────────────────────────────────────────
+    # Optimizer factory
     # Reads cfg.optimizer.type to select the optimizer:
     #   adamw       — standard 32-bit AdamW
     #   adamw_8bit  — 8-bit AdamW via bitsandbytes (pip install bitsandbytes)
@@ -745,7 +725,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         grad_accum_steps=cfg.training.get("grad_accum_steps", 1),
     )
 
-    # ── Callbacks ─────────────────────────────────────────────────────────────
+    # Callbacks
     callbacks: List[Callback] = []
 
     if cfg.get("early_stopping"):
@@ -782,7 +762,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     to_save = system.audio_model.serialize()
     torch.save(to_save, os.path.join(cfg.exp.dir, cfg.exp.name, "best_model.pth"))
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

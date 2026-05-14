@@ -19,7 +19,6 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from collections.abc import MutableMapping
 from omegaconf import ListConfig
 
-
 def flatten_dict(d, parent_key="", sep="_"):
     items = []
     for k, v in d.items():
@@ -29,7 +28,6 @@ def flatten_dict(d, parent_key="", sep="_"):
         else:
             items.append((new_key, v))
     return dict(items)
-
 
 class AudioLightningModule(pl.LightningModule):
     def __init__(
@@ -125,7 +123,7 @@ class AudioLightningModule(pl.LightningModule):
             optimizer_g.zero_grad()
             optimizer_d.zero_grad()
 
-        # ── Mixed precision context ───────────────────────────────────────────
+        # Mixed precision context
         # Explicit autocast ensures every sub-op (STFT, conv, attention) runs
         # in fp16 rather than relying on implicit casting from Lightning alone.
         amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16)
@@ -133,7 +131,7 @@ class AudioLightningModule(pl.LightningModule):
         with amp_ctx:
             output = self(codec_data)
 
-        # ── Discriminator update ──────────────────────────────────────────────
+        # Discriminator update
         for p in self.discriminator.parameters():
             p.requires_grad_(True)
 
@@ -153,7 +151,7 @@ class AudioLightningModule(pl.LightningModule):
         del est_outputs_d, target_outputs
         torch.cuda.empty_cache()
 
-        # ── Generator update ──────────────────────────────────────────────────
+        # Generator update
         for p in self.discriminator.parameters():
             p.requires_grad_(False)
 
@@ -169,7 +167,7 @@ class AudioLightningModule(pl.LightningModule):
         for p in self.discriminator.parameters():
             p.requires_grad_(True)
 
-        # ── Optimizer step — only after accumulating grad_accum_steps batches ─
+        # Optimizer step — only after accumulating grad_accum_steps batches
         if is_last_accum:
             self.clip_gradients(optimizer_d, gradient_clip_val=5, gradient_clip_algorithm="norm")
             optimizer_d.step()
@@ -187,8 +185,6 @@ class AudioLightningModule(pl.LightningModule):
         if self.trainer.is_last_batch:
             scheduler_g.step()
             scheduler_d.step()
-
-
 
     def validation_step(self, batch, batch_nb):
         ori_data, codec_data = batch

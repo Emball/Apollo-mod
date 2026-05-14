@@ -14,7 +14,6 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-
 class MultiFrequencyDiscriminator(nn.Module):
     def __init__(self, nch, window):
         super(MultiFrequencyDiscriminator, self).__init__()
@@ -75,7 +74,6 @@ class MultiFrequencyDiscriminator(nn.Module):
             est_feature_maps.append(est_feat_map)
 
         return est_outputs, est_feature_maps
-
 
 class FrequencyDiscriminator(nn.Module):
     def __init__(self, in_channels, hidden_channels=512):
