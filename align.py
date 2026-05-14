@@ -34,15 +34,6 @@ def _save(path, wav, sr):
     torchaudio.save(path, wav.cpu(), sr)
 
 
-def _envelope(x, hop=64):
-    mag = torchaudio.functional.compute_deltas(
-        x.unsqueeze(1).abs(), win_length=5
-    )
-    # Simple RMS envelope
-    frames = x.unfold(0, hop * 2, hop).pow(2).mean(dim=1).sqrt()
-    return frames
-
-
 def _xcorr_peak(a, b, max_shift):
     n = a.shape[0] + b.shape[0] - 1
     n_fft = 1 << (n - 1).bit_length()
@@ -56,11 +47,36 @@ def _xcorr_peak(a, b, max_shift):
     return peak - center
 
 
+def _global_offset(lq, hq, sr):
+    t = int(2.0 * sr)
+    max_off = int(0.5 * sr)
+    off = _xcorr_peak(lq[:t], hq[:t], max_off).item()
+    # also check tail drift
+    te = int(2.0 * sr)
+    off_end = _xcorr_peak(lq[-te:], hq[-te:], max_off).item()
+    return off, off_end
+
+
 def align_pair(lq_wav, hq_wav, sr, chunk_sec=0.5, overlap=0.5, search_ms=80):
     lq = lq_wav.mean(dim=0)
     hq = hq_wav.mean(dim=0)
+
+    global_off, off_end = _global_offset(lq, hq, sr)
+    drift = off_end - global_off
+
+    if abs(global_off) > int(0.001 * sr):
+        print(f"    Global start offset: {global_off} samples", flush=True)
+    if abs(drift) > int(0.01 * sr):
+        print(f"    Warning: {drift} sample drift between start/end — possible speed mismatch", flush=True)
+
     n = min(lq.shape[0], hq.shape[0])
-    lq = lq[:n]
+    if global_off > 0:
+        lq_wav = torch.nn.functional.pad(lq_wav, (global_off, 0))[:, :n]
+    elif global_off < 0:
+        lq_wav = torch.nn.functional.pad(lq_wav[:, -global_off:], (0, -global_off))[:, :n]
+    else:
+        lq_wav = lq_wav[:, :n]
+    lq = lq_wav.mean(dim=0)
     hq = hq[:n]
 
     chunk = int(chunk_sec * sr)
