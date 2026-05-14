@@ -36,7 +36,7 @@ fast-bss-eval==0.1.4
 sympy==1.12
 packaging==23.2
 setuptools
-bitsandbytes>=0.41.0
+bitsandbytes>=0.43.0
 
 # Augmentation
 ffmpeg-python

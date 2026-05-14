@@ -39,6 +39,7 @@ echo [apollo] Syncing dependencies...
 "%UV_BIN%" pip install ^
     --python "%VENV_DIR%\Scripts\python.exe" ^
     --extra-index-url https://download.pytorch.org/whl/cu121 ^
+    --index-strategy unsafe-best-match ^
     "setuptools<71" pyyaml ^
     -r "%SCRIPT_DIR%\requirements.txt" ^
     --quiet
