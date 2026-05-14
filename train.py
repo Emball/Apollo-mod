@@ -259,10 +259,8 @@ def _slice_and_save(
     hq_wav  = hq_wav[:, :min_len]
 
     if chunk_align:
-        lq_wav = _global_speed_align(lq_wav, hq_wav, _SR)
-        min_len = min(lq_wav.shape[-1], hq_wav.shape[-1])
-        lq_wav  = lq_wav[:, :min_len]
-        hq_wav  = hq_wav[:, :min_len]
+        # No global correction — per-chunk xcorr handles all alignment locally.
+        # Global correction was causing false-peak issues on compressed audio.
         lq_mono = lq_wav.mean(0)
         hq_mono = hq_wav.mean(0)
         max_shift = int(chunk_align_max_shift_ms / 1000 * _SR)
