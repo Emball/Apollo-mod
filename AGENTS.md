@@ -11,7 +11,7 @@ Community fork of [JusperLee/Apollo](https://github.com/JusperLee/Apollo) — a 
 - `look2hear/system/audio_litmodule.py` — Lightning module. Handles train/val steps, gradient checkpointing, val audio saving.
 - `look2hear/losses/` — GAN losses + matrix loss.
 - `paired_datamodule.py` — Datamodule. Loads chunked LQ/HQ WAV pairs from `chunks/`. Augmentation pipeline (live + cached) controlled via yaml.
-- `align.py` — Pre-processing utility. Corrects timing drift between LQ and HQ files using per-chunk envelope cross-correlation before chunking.
+
 - `train.py` — Entry point. Calls `prepare_data()` to auto-chunk `data/` into `chunks/` on first run, then trains.
 - `inference.py` — Entry point. Loads weights (HF shortname, `.ckpt`, `.pth`/`.bin`), processes audio in overlapping 30s chunks with crossfade stitching.
 - `configs/apollo.yaml` — Base model config (`feature_dim=256`).
@@ -55,17 +55,9 @@ python train.py --conf_dir=configs/apollo.yaml
 # Inference
 python inference.py --in_wav input.mp3 --out_wav output.wav --weights lew_v2
 
-# Align LQ to HQ before chunking (when timing drift is suspected)
-python align.py --data-dir data
-python align.py --lq voice_lq.wav --hq voice_hq.wav --out voice_aligned.wav
-
 # Monitor training
 tensorboard --logdir ./experiments
 ```
-
-## Alignment System (`align.py`)
-
-Corrects timing drift between LQ and HQ using per-chunk envelope cross-correlation. Run before training if LQ/HQ pairs have any recording-level timing mismatch. Recent work (many commits) has been debugging xcorr offsets — as of last session, debug prints are active (`print raw xcorr values for first few chunks`).
 
 ## Known Constraints
 
@@ -76,4 +68,4 @@ Corrects timing drift between LQ and HQ using per-chunk envelope cross-correlati
 
 ## Version
 
-Current: see latest git tag / commit history.
+Current: 0.1.0.0
