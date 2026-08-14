@@ -1,5 +1,5 @@
-# @claude last-modified: 2026-05-05T06:34:39Z
-# @claude last-commit: feat: major update — TUI, augmentation system, gradient checkpointing, optimization bootstrap
+# @claude last-modified: 2026-08-13T00:00:00Z
+# @claude last-commit: feat: --conf_dir reads model params and chunk size from config
 """
 inference.py — Apollo audio enhancement script
 
@@ -10,14 +10,12 @@ Model selection (--weights):
   lew_uni     Lew universal model, feature_dim=384 (auto-downloads apollo_model_uni.ckpt)
   <path>      Local .pth / .bin / .ckpt file
 
-All shortnames download into models/ and are reused on subsequent runs.
-
 Usage:
-    python inference.py --in_wav input.wav --out_wav output.wav
     python inference.py --in_wav input.wav --out_wav output.wav --weights lew_v2
-    python inference.py --in_wav input.wav --out_wav output.wav --weights lew_uni
-    python inference.py --in_wav input.wav --out_wav output.wav \
-        --weights models/my_finetune.ckpt --feature_dim 256
+    python inference.py --in_wav input.wav --out_wav output.wav \\
+        --weights models/SFTL.ckpt --conf_dir configs/SFTL.yaml
+    python inference.py --in_wav input.wav --out_wav output.wav \\
+        --weights models/my_finetune.ckpt --feature_dim 256 --chunk_sec 4
 """
 
 import argparse
@@ -28,15 +26,12 @@ import torchaudio
 import look2hear.models
 import look2hear.models.apollo
 
-_SR = 44100   # Apollo's native sample rate
+_SR          = 44100  # Apollo's native sample rate
+_CHUNK_SEC   = 4      # default chunk size — matches training segment_sec
+_OVERLAP_SEC = 0.5    # crossfade overlap at chunk boundaries
 
 _MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
-# Model registry — shortnames that auto-download into models/
-
-# Each entry: shortname -> (filename, url, feature_dim)
-# feature_dim is returned alongside the path so the caller can set it
-# automatically when the user hasn't specified one explicitly.
 KNOWN_MODELS = {
     "apollo": (
         "pytorch_model.bin",
@@ -60,15 +55,18 @@ KNOWN_MODELS = {
     ),
 }
 
+
+def load_config(conf_path):
+    """Load a yaml config and return the OmegaConf DictConfig."""
+    from omegaconf import OmegaConf
+    cfg = OmegaConf.load(conf_path)
+    print(f"[inference] Loaded config: {conf_path}")
+    return cfg
+
+
 def ensure_model(shortname: str) -> tuple:
-    """
-    Given a shortname from KNOWN_MODELS, return (local_path, feature_dim).
-    Downloads the file into models/ if it isn't already there.
-    """
     if shortname not in KNOWN_MODELS:
-        raise ValueError(
-            f"Unknown model '{shortname}'. Known models: {list(KNOWN_MODELS)}"
-        )
+        raise ValueError(f"Unknown model '{shortname}'. Known: {list(KNOWN_MODELS)}")
     filename, url, feature_dim = KNOWN_MODELS[shortname]
     os.makedirs(_MODELS_DIR, exist_ok=True)
     dest = os.path.join(_MODELS_DIR, filename)
@@ -80,50 +78,37 @@ def ensure_model(shortname: str) -> tuple:
                 pct = min(100, count * block * 100 // total)
                 print(f"\r[inference] {pct:3d}%", end="", flush=True)
         urllib.request.urlretrieve(url, dest, reporthook=_progress)
-        print()  # newline after progress
+        print()
         print(f"[inference] Saved -> {dest}")
     else:
         print(f"[inference] Found cached model: models/{filename}")
     return dest, feature_dim
 
-# Audio I/O helpers
 
 def load_audio(file_path: str, target_sr: int = _SR) -> torch.Tensor:
-    """
-    Load any supported audio file (WAV/FLAC/MP3/OGG/…) and return a
-    [1, channels, samples] tensor resampled to target_sr.
-    """
-    audio, sr = torchaudio.load(file_path)   # [C, T]
-
-    # Resample if needed
+    audio, sr = torchaudio.load(file_path)
     if sr != target_sr:
         print(f"[inference] Resampling {sr} Hz -> {target_sr} Hz")
         audio = torchaudio.functional.resample(audio, sr, target_sr)
-
-    # Ensure stereo (Apollo expects 2-channel input)
     if audio.shape[0] == 1:
         audio = audio.repeat(2, 1)
     elif audio.shape[0] > 2:
         audio = audio[:2]
+    return audio.unsqueeze(0)  # [1, 2, T]
 
-    return audio.unsqueeze(0)   # [1, 2, T]
 
 def save_audio(file_path: str, audio: torch.Tensor, sr: int = _SR) -> None:
-    """Save [1, C, T] or [C, T] tensor to file."""
     if audio.ndim == 3:
-        audio = audio.squeeze(0)    # [C, T]
+        audio = audio.squeeze(0)
     audio = audio.cpu().clamp(-1.0, 1.0)
     os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
     torchaudio.save(file_path, audio, sr)
     print(f"[inference] Saved -> {file_path}")
 
-# Model loading
 
 def _load_ckpt(path: str, feature_dim: int, sr: int, win: int, layer: int):
-    """Load a PyTorch Lightning .ckpt file (audio_model.* prefix)."""
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     raw = ckpt["state_dict"]
-
     if any(k.startswith("audio_model.") for k in raw):
         state = {k.replace("audio_model.", ""): v
                  for k, v in raw.items() if k.startswith("audio_model.")}
@@ -131,31 +116,20 @@ def _load_ckpt(path: str, feature_dim: int, sr: int, win: int, layer: int):
     else:
         state = raw
         print("[inference] Bare state dict -- no prefix stripping needed")
-
     model = look2hear.models.apollo.Apollo(
         sr=sr, win=win, feature_dim=feature_dim, layer=layer
     )
     missing, unexpected = model.load_state_dict(state, strict=False)
     if missing:
-        print(f"[inference] Missing keys  ({len(missing)}): {missing[:3]}{'...' if len(missing)>3 else ''}")
+        print(f"[inference] Missing keys ({len(missing)}): {missing[:3]}{'...' if len(missing) > 3 else ''}")
     if unexpected:
-        print(f"[inference] Unexpected keys ({len(unexpected)}): {unexpected[:3]}{'...' if len(unexpected)>3 else ''}")
+        print(f"[inference] Unexpected keys ({len(unexpected)}): {unexpected[:3]}{'...' if len(unexpected) > 3 else ''}")
     if not missing:
         print("[inference] All keys loaded successfully")
     return model
 
-def load_model(weights, sr, win, feature_dim, layer):
-    """
-    Load Apollo model from:
-      * None or shortname (apollo/lew/lew_v2/lew_uni) -> auto-download to models/
-      * path ending in .ckpt       -> Lightning checkpoint
-      * path ending in .pth / .bin -> from_pretrain (serialized) format
-      * "JusperLee/Apollo"         -> HuggingFace hub (no local cache)
 
-    When a shortname is used and feature_dim is still at the default (256),
-    the registry value overrides it automatically.
-    """
-    # Resolve shortnames first
+def load_model(weights, sr, win, feature_dim, layer):
     if weights and weights.strip().lower() in KNOWN_MODELS:
         local_path, registry_dim = ensure_model(weights.strip().lower())
         if feature_dim == 256 and registry_dim != 256:
@@ -172,26 +146,16 @@ def load_model(weights, sr, win, feature_dim, layer):
         print(f"[inference] Loading Lightning checkpoint: {weights}")
         model = _load_ckpt(weights, feature_dim=feature_dim, sr=sr, win=win, layer=layer)
     else:
-        # .pth / .bin -- from_pretrain serialized format
         print(f"[inference] Loading serialized model: {weights}")
         model = look2hear.models.BaseModel.from_pretrain(
             weights, sr=sr, win=win, feature_dim=feature_dim, layer=layer
         )
-
     return model
 
-# Chunked inference (handles long files without OOM)
 
-_CHUNK_SEC   = 30     # seconds per processing chunk
-_OVERLAP_SEC = 0.5    # crossfade overlap at boundaries
-
-def _run_chunked(model, audio, device, sr):
-    """
-    Process audio in overlapping chunks and crossfade the boundaries.
-    audio: [1, C, T]  ->  returns [1, C, T]
-    """
-    chunk_samples   = int(_CHUNK_SEC * sr)
-    overlap_samples = int(_OVERLAP_SEC * sr)
+def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec):
+    chunk_samples   = int(chunk_sec * sr)
+    overlap_samples = int(overlap_sec * sr)
     hop_samples     = chunk_samples - overlap_samples
 
     T      = audio.shape[-1]
@@ -204,10 +168,9 @@ def _run_chunked(model, audio, device, sr):
         chunk = audio[..., start:end].to(device)
 
         with torch.no_grad():
-            enhanced = model(chunk)   # [1, C, T_chunk]
+            enhanced = model(chunk)
         enhanced = enhanced.cpu()
 
-        # Crossfade leading overlap with previous chunk output
         if start > 0 and overlap_samples > 0:
             fade_len = min(overlap_samples, end - start, T - start)
             fade_in  = torch.linspace(0.0, 1.0, fade_len)
@@ -226,47 +189,58 @@ def _run_chunked(model, audio, device, sr):
 
     return output
 
-# Main
 
 def main(
     input_wav,
     output_wav,
     weights=None,
+    conf_dir=None,
     sr=_SR,
     win=20,
     feature_dim=256,
     layer=6,
+    chunk_sec=_CHUNK_SEC,
+    overlap_sec=_OVERLAP_SEC,
     device_str="auto",
     chunked=True,
 ):
-    # Device selection
+    # Load config and pull model params + chunk size from it
+    # Explicit CLI args always win over config values
+    if conf_dir is not None:
+        cfg = load_config(conf_dir)
+        m = cfg.get("model", {})
+        d = cfg.get("datas", {})
+        if "sr"          in m: sr          = m.sr
+        if "win"         in m: win         = m.win
+        if "feature_dim" in m: feature_dim = m.feature_dim
+        if "layer"       in m: layer       = m.layer
+        if "segment_sec" in d: chunk_sec   = d.segment_sec
+        print(f"[inference] Config: feature_dim={feature_dim}, sr={sr}, win={win}, "
+              f"layer={layer}, chunk_sec={chunk_sec}")
+
     if device_str == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     else:
         device = torch.device(device_str)
     print(f"[inference] Device: {device}")
 
-    # Load model
     model = load_model(weights=weights, sr=sr, win=win, feature_dim=feature_dim, layer=layer)
     model = model.to(device).eval()
 
-    # Load input
-    audio = load_audio(input_wav, target_sr=sr)   # [1, 2, T]
+    audio = load_audio(input_wav, target_sr=sr)
     duration = audio.shape[-1] / sr
     print(f"[inference] Input: {input_wav}  ({duration:.1f}s, {audio.shape[-2]}ch)")
 
-    # Run enhancement
-    if chunked and audio.shape[-1] > int(_CHUNK_SEC * sr):
-        print(f"[inference] Long file -- using chunked inference ({_CHUNK_SEC}s chunks, {_OVERLAP_SEC}s overlap)")
-        enhanced = _run_chunked(model, audio, device, sr)
+    if chunked and audio.shape[-1] > int(chunk_sec * sr):
+        print(f"[inference] Chunked inference ({chunk_sec}s chunks, {overlap_sec}s overlap)")
+        enhanced = _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec)
     else:
-        audio_d = audio.to(device)
         with torch.no_grad():
-            enhanced = model(audio_d)
+            enhanced = model(audio.to(device))
         enhanced = enhanced.cpu()
 
-    # Save output
     save_audio(output_wav, enhanced, sr=sr)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Apollo audio enhancement")
@@ -275,31 +249,47 @@ if __name__ == "__main__":
     parser.add_argument("--out_wav",     type=str, required=True,
                         help="Path to save enhanced output")
     parser.add_argument("--weights",     type=str, default=None,
-                        help="Model to use. Shortnames: apollo, lew, lew_v2, lew_uni "
-                             "(auto-downloaded to models/). Or a local .pth/.bin/.ckpt path. "
-                             "Default: apollo (downloads pytorch_model.bin from HuggingFace)")
-    parser.add_argument("--sr",          type=int, default=_SR,
-                        help=f"Sample rate (default: {_SR})")
-    parser.add_argument("--win",         type=int, default=20,
-                        help="STFT window size in ms (default: 20)")
-    parser.add_argument("--feature_dim", type=int, default=256,
-                        help="Model feature dim: 256=base, 384=universal (default: 256)")
-    parser.add_argument("--layer",       type=int, default=6,
-                        help="Number of BSNet layers (default: 6)")
+                        help="Model weights: shortname (apollo/lew/lew_v2/lew_uni), "
+                             "or local .pth/.bin/.ckpt path")
+    parser.add_argument("--conf_dir",    type=str, default=None,
+                        help="Path to training yaml config. Reads feature_dim, sr, win, "
+                             "layer, and segment_sec from it. Explicit CLI flags override.")
+    parser.add_argument("--sr",          type=int, default=None,
+                        help=f"Sample rate override (default: from config or {_SR})")
+    parser.add_argument("--win",         type=int, default=None,
+                        help="STFT window size in ms override (default: from config or 20)")
+    parser.add_argument("--feature_dim", type=int, default=None,
+                        help="Feature dim override (default: from config or 256)")
+    parser.add_argument("--layer",       type=int, default=None,
+                        help="BSNet layer count override (default: from config or 6)")
+    parser.add_argument("--chunk_sec",   type=float, default=None,
+                        help=f"Chunk size in seconds override (default: from config segment_sec or {_CHUNK_SEC})")
+    parser.add_argument("--overlap_sec", type=float, default=_OVERLAP_SEC,
+                        help=f"Crossfade overlap in seconds (default: {_OVERLAP_SEC})")
     parser.add_argument("--device",      type=str, default="auto",
                         help="'auto', 'cuda', 'cpu', 'cuda:1', ... (default: auto)")
     parser.add_argument("--no_chunked",  action="store_true",
                         help="Disable chunked inference (may OOM on long files)")
     args = parser.parse_args()
 
+    # Defaults — applied here so config can fill them before CLI overrides
+    sr          = args.sr          if args.sr          is not None else _SR
+    win         = args.win         if args.win         is not None else 20
+    feature_dim = args.feature_dim if args.feature_dim is not None else 256
+    layer       = args.layer       if args.layer       is not None else 6
+    chunk_sec   = args.chunk_sec   if args.chunk_sec   is not None else _CHUNK_SEC
+
     main(
         input_wav=args.in_wav,
         output_wav=args.out_wav,
         weights=args.weights,
-        sr=args.sr,
-        win=args.win,
-        feature_dim=args.feature_dim,
-        layer=args.layer,
+        conf_dir=args.conf_dir,
+        sr=sr,
+        win=win,
+        feature_dim=feature_dim,
+        layer=layer,
+        chunk_sec=chunk_sec,
+        overlap_sec=args.overlap_sec,
         device_str=args.device,
         chunked=not args.no_chunked,
     )
