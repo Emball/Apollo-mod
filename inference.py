@@ -153,41 +153,82 @@ def load_model(weights, sr, win, feature_dim, layer):
     return model
 
 
-def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec):
+def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path):
+    """Process audio in chunks and write each chunk to disk immediately.
+    
+    Writes sequentially so the output WAV can be previewed in Audacity
+    while inference is still running — just drag the file in and hit play.
+    Returns None (output already on disk).
+    """
+    import soundfile as sf
+    import numpy as np
+
     chunk_samples   = int(chunk_sec * sr)
     overlap_samples = int(overlap_sec * sr)
     hop_samples     = chunk_samples - overlap_samples
 
-    T      = audio.shape[-1]
-    output = torch.zeros_like(audio)
+    T         = audio.shape[-1]
+    prev_tail = None  # holds the overlap region from the previous chunk
 
-    start = 0
-    chunk_idx = 0
-    while start < T:
-        end   = min(start + chunk_samples, T)
-        chunk = audio[..., start:end].to(device)
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
 
-        with torch.no_grad():
-            enhanced = model(chunk)
-        enhanced = enhanced.cpu()
+    with sf.SoundFile(out_path, mode="w", samplerate=sr, channels=2,
+                      subtype="PCM_24") as f:
+        start     = 0
+        chunk_idx = 0
+        while start < T:
+            end   = min(start + chunk_samples, T)
+            chunk = audio[..., start:end].to(device)
 
-        if start > 0 and overlap_samples > 0:
-            fade_len = min(overlap_samples, end - start, T - start)
-            fade_in  = torch.linspace(0.0, 1.0, fade_len)
-            fade_out = 1.0 - fade_in
-            output[..., start:start + fade_len] = (
-                output[..., start:start + fade_len] * fade_out
-                + enhanced[..., :fade_len]           * fade_in
-            )
-            output[..., start + fade_len:end] = enhanced[..., fade_len:end - start]
-        else:
-            output[..., start:end] = enhanced[..., :end - start]
+            with torch.no_grad():
+                enhanced = model(chunk)
+            # enhanced: [1, 2, T_chunk]
+            enhanced = enhanced.squeeze(0).cpu().clamp(-1.0, 1.0)  # [2, T_chunk]
 
-        chunk_idx += 1
-        print(f"[inference] Chunk {chunk_idx} done  ({start/sr:.1f}s - {end/sr:.1f}s)")
-        start += hop_samples
+            chunk_len = enhanced.shape[-1]
 
-    return output
+            if prev_tail is not None and overlap_samples > 0:
+                fade_len = min(overlap_samples, chunk_len, prev_tail.shape[-1])
+                fade_in  = torch.linspace(0.0, 1.0, fade_len)
+                fade_out = 1.0 - fade_in
+
+                # crossfade zone — blend previous tail with current head
+                blended = prev_tail[..., :fade_len] * fade_out \
+                        + enhanced[..., :fade_len]  * fade_in
+
+                # write blended overlap
+                f.write(blended.T.numpy())
+                # write remainder of this chunk (excluding the next overlap tail)
+                write_end = chunk_len - overlap_samples
+                if write_end > fade_len:
+                    f.write(enhanced[..., fade_len:write_end].T.numpy())
+            else:
+                # first chunk — write everything except the tail we'll crossfade next time
+                write_end = chunk_len - overlap_samples if (T - end) > 0 else chunk_len
+                write_end = max(write_end, 0)
+                if write_end > 0:
+                    f.write(enhanced[..., :write_end].T.numpy())
+
+            # keep tail for next chunk's crossfade (or flush if last chunk)
+            if end < T:
+                tail_start = max(0, chunk_len - overlap_samples)
+                prev_tail  = enhanced[..., tail_start:]
+            else:
+                # last chunk — flush any remaining tail
+                if prev_tail is not None and overlap_samples > 0:
+                    tail_start = max(0, chunk_len - overlap_samples)
+                    f.write(enhanced[..., tail_start:].T.numpy())
+                elif prev_tail is None:
+                    # single chunk, no overlap
+                    pass
+                prev_tail = None
+
+            chunk_idx += 1
+            print(f"[inference] Chunk {chunk_idx} done  "
+                  f"({start/sr:.1f}s – {end/sr:.1f}s)  -> {out_path}")
+            start += hop_samples
+
+    return None  # output already written
 
 
 def main(
@@ -233,13 +274,14 @@ def main(
 
     if chunked and audio.shape[-1] > int(chunk_sec * sr):
         print(f"[inference] Chunked inference ({chunk_sec}s chunks, {overlap_sec}s overlap)")
-        enhanced = _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec)
+        print(f"[inference] Writing sequentially — you can preview in Audacity now")
+        _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path=output_wav)
+        print(f"[inference] Done -> {output_wav}")
     else:
         with torch.no_grad():
             enhanced = model(audio.to(device))
         enhanced = enhanced.cpu()
-
-    save_audio(output_wav, enhanced, sr=sr)
+        save_audio(output_wav, enhanced, sr=sr)
 
 
 if __name__ == "__main__":
