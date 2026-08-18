@@ -61,7 +61,7 @@ _CHUNK_SEC    = 3
 _OVERLAP      = 0.5
 _CHUNK_SAMPLES = int(_CHUNK_SEC * _SR)
 _HOP_SAMPLES   = int(_CHUNK_SAMPLES * (1 - _OVERLAP))
-_SUPPORTED_EXTS = {".wav"}  # WAV only — other formats introduce delays or encoder overhead
+_SUPPORTED_EXTS = {".wav", ".mp3", ".flac"}
 
 # Models directory — pretrained weights are looked up here automatically
 _MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
@@ -77,16 +77,10 @@ _PRETRAINED_MODELS = {
 # Data preparation — runs before training, skips gracefully if already done
 
 def _load_wav_stereo(path: str):
-    """Load a WAV file, resample to _SR if needed, force stereo float32."""
+    """Load audio (WAV, MP3, FLAC), resample to _SR if needed, force stereo float32."""
     import torchaudio
-    if not path.lower().endswith(".wav"):
-        raise ValueError(
-            f"Only WAV files are accepted for training data. "
-            f"Non-WAV files introduce codec delays or encoder overhead that "
-            f"cannot be accounted for during chunking.\n  File: {path}"
-        )
     wav, sr = torchaudio.load(path)
-    wav = wav.float()  # normalise bit depth — handles 16/24/32-bit PCM and 32-bit float
+    wav = wav.float()
     if sr != _SR:
         wav = torchaudio.functional.resample(wav, sr, _SR)
     if wav.shape[0] == 1:
@@ -94,6 +88,80 @@ def _load_wav_stereo(path: str):
     elif wav.shape[0] > 2:
         wav = wav[:2]
     return wav
+
+
+# Maximum shift to search when aligning pairs (in samples at 44100 Hz).
+# 8820 = 200ms — enough to cover any realistic MP3 encoder delay or
+# manual edit offset, without risking false-peak xcorr matches.
+_ALIGN_MAX_SHIFT = int(0.200 * _SR)
+
+def _align_pair(lq: "torch.Tensor", hq: "torch.Tensor", stem: str) -> tuple:
+    """Xcorr-align an LQ/HQ pair by trimming the leading edge of whichever is ahead.
+
+    Uses envelope cross-correlation on a mono downmix over the first 30s so
+    the search is fast. Trims up to _ALIGN_MAX_SHIFT samples from the start
+    of one signal and the corresponding end of the other to preserve length parity,
+    then truncates both to the shorter post-trim length.
+
+    Only called for non-WAV source pairs where encoder delay is expected.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    # Mono downmix, first 30s only for speed
+    probe_len = min(lq.shape[-1], hq.shape[-1], 30 * _SR)
+    lq_mono = lq[:, :probe_len].mean(0)
+    hq_mono = hq[:, :probe_len].mean(0)
+
+    # Envelope (abs + light smoothing)
+    kernel_size = 441  # 10ms at 44100
+    def envelope(x):
+        x = x.abs().unsqueeze(0).unsqueeze(0)
+        return F.avg_pool1d(x, kernel_size, stride=1, padding=kernel_size // 2).squeeze()
+
+    lq_env = envelope(lq_mono)
+    hq_env = envelope(hq_mono)
+
+    # Trim to equal length for xcorr
+    n = min(lq_env.shape[0], hq_env.shape[0])
+    lq_env = lq_env[:n]
+    hq_env = hq_env[:n]
+
+    # Normalise
+    lq_env = lq_env / (lq_env.std() + 1e-8)
+    hq_env = hq_env / (hq_env.std() + 1e-8)
+
+    # Full xcorr via FFT
+    N = lq_env.shape[0]
+    Lf = lq_env.double()
+    Hf = hq_env.double()
+    xcorr = torch.fft.irfft(torch.fft.rfft(Hf, n=2*N) * torch.fft.rfft(Lf.flip(0), n=2*N), n=2*N)
+
+    # Search window: lags in [-_ALIGN_MAX_SHIFT, +_ALIGN_MAX_SHIFT]
+    # xcorr[0] = lag 0, xcorr[k] = lag k, xcorr[2N-k] = lag -k
+    search = _ALIGN_MAX_SHIFT
+    fwd  = xcorr[1:search + 1]          # LQ leads HQ by 1..search samples
+    bwd  = xcorr[2*N - search:2*N]      # HQ leads LQ by 1..search samples (reversed)
+
+    best_fwd  = float(fwd.max())
+    best_bwd  = float(bwd.max())
+    lag_fwd   = int(fwd.argmax().item()) + 1
+    lag_bwd   = int(bwd.argmax().item()) + 1
+
+    if best_fwd >= best_bwd and best_fwd > float(xcorr[0]):
+        # LQ is ahead by lag_fwd — trim LQ start
+        lq = lq[:, lag_fwd:]
+        print_only(f"[align] {stem}: LQ leads by {lag_fwd} samples ({lag_fwd//_SR*1000:.1f}ms) — trimmed LQ")
+    elif best_bwd > best_fwd and best_bwd > float(xcorr[0]):
+        # HQ is ahead by lag_bwd — trim HQ start
+        hq = hq[:, lag_bwd:]
+        print_only(f"[align] {stem}: HQ leads by {lag_bwd} samples ({lag_bwd//_SR*1000:.1f}ms) — trimmed HQ")
+    else:
+        print_only(f"[align] {stem}: already aligned (lag=0)")
+
+    # Truncate both to shorter post-trim length
+    min_len = min(lq.shape[-1], hq.shape[-1])
+    return lq[:, :min_len], hq[:, :min_len]
 
 def _save_chunk_16bit(tensor, path: str):
     """Save a chunk as 16-bit PCM WAV regardless of input dtype."""
@@ -143,15 +211,15 @@ def _has_wav_pairs(lq_dir: str, hq_dir: str) -> bool:
     """Return True if both dirs exist and share at least one matching stem."""
     if not (os.path.isdir(lq_dir) and os.path.isdir(hq_dir)):
         return False
-    lq_stems = {os.path.splitext(f)[0] for f in os.listdir(lq_dir) if f.endswith(".wav")}
-    hq_stems = {os.path.splitext(f)[0] for f in os.listdir(hq_dir) if f.endswith(".wav")}
+    lq_stems = {os.path.splitext(f)[0] for f in os.listdir(lq_dir) if os.path.splitext(f)[1].lower() in _SUPPORTED_EXTS}
+    hq_stems = {os.path.splitext(f)[0] for f in os.listdir(hq_dir) if os.path.splitext(f)[1].lower() in _SUPPORTED_EXTS}
     return bool(lq_stems & hq_stems)
 
 def _count_wav_pairs(lq_dir: str, hq_dir: str) -> int:
     if not (os.path.isdir(lq_dir) and os.path.isdir(hq_dir)):
         return 0
-    lq_stems = {os.path.splitext(f)[0] for f in os.listdir(lq_dir) if f.endswith(".wav")}
-    hq_stems = {os.path.splitext(f)[0] for f in os.listdir(hq_dir) if f.endswith(".wav")}
+    lq_stems = {os.path.splitext(f)[0] for f in os.listdir(lq_dir) if os.path.splitext(f)[1].lower() in _SUPPORTED_EXTS}
+    hq_stems = {os.path.splitext(f)[0] for f in os.listdir(hq_dir) if os.path.splitext(f)[1].lower() in _SUPPORTED_EXTS}
     return len(lq_stems & hq_stems)
 
 def _normalize_data_dir(src_root: str, split_name: str) -> bool:
@@ -390,8 +458,14 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
 
     total = 0
     for stem in matched:
-        lq_wav = _load_wav_stereo(os.path.join(lq_src, lq_files[stem]))
-        hq_wav = _load_wav_stereo(os.path.join(hq_src, hq_files[stem]))
+        lq_path = os.path.join(lq_src, lq_files[stem])
+        hq_path = os.path.join(hq_src, hq_files[stem])
+        lq_wav = _load_wav_stereo(lq_path)
+        hq_wav = _load_wav_stereo(hq_path)
+        # Align non-WAV pairs (MP3/FLAC encoder delay compensation)
+        if os.path.splitext(lq_files[stem])[1].lower() != ".wav" \
+                or os.path.splitext(hq_files[stem])[1].lower() != ".wav":
+            lq_wav, hq_wav = _align_pair(lq_wav, hq_wav, stem)
         saved  = _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out,
                                   cached_aug_fn=cached_aug_fn, variants=variants)
         print_only(f"[data/{split_name}]   {stem}: {len(saved)} chunks")
