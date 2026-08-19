@@ -1,6 +1,6 @@
 exp:
-  dir: ./Exps
-  name: Apollo
+  dir: ./runs
+  name: null
 
 optimizations:
   tf32: true

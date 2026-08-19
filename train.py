@@ -499,15 +499,12 @@ def prepare_data(cfg: DictConfig) -> None:
     Skips any split that is already chunked.
     """
     # Anchor to the directory train.py lives in, not CWD.
-    # This ensures data/ is always found correctly regardless of where
-    # the script is launched from.
     _script_dir  = os.path.dirname(os.path.abspath(__file__))
-    train_chunks = os.path.join(_script_dir, cfg.datas.train_dir)   # ./chunks/train
-    val_chunks   = os.path.join(_script_dir, cfg.datas.eval_dir)    # ./chunks/val
+    train_chunks = os.path.join(_script_dir, cfg.datas.train_dir)
+    val_chunks   = os.path.join(_script_dir, cfg.datas.eval_dir)
 
-    chunks_root = os.path.dirname(train_chunks)                      # ./chunks
-    data_root   = os.path.join(os.path.dirname(chunks_root), "data") # ./data
-
+    # Data source dirs live under data/<name>/train and data/<name>/val
+    data_root  = os.path.join(_script_dir, "data", cfg.exp.name)
     data_train = os.path.join(data_root, "train")
     data_val   = os.path.join(data_root, "val")
 
@@ -617,17 +614,17 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     script_dir = os.path.dirname(os.path.abspath(__file__))
     train_lq   = os.path.join(script_dir, cfg.datas.train_dir, "LQ")
     if not os.path.isdir(train_lq) or not any(f.endswith(".wav") for f in os.listdir(train_lq)):
+        _name = cfg.exp.name
         print_only("")
         print_only("ERROR: No training chunks found.")
         print_only("")
-        print_only("  Populate data/train/ and data/val/ with paired WAV files:")
-        print_only("    data/train/LQ/   ← degraded audio (MP3, noisy, etc.)")
-        print_only("    data/train/HQ/   ← clean reference (same filenames)")
-        print_only("    data/val/LQ/")
-        print_only("    data/val/HQ/")
+        print_only(f"  Populate data/{_name}/train/ and data/{_name}/val/ with paired audio files:")
+        print_only(f"    data/{_name}/train/LQ/   ← degraded audio (MP3, FLAC, WAV)")
+        print_only(f"    data/{_name}/train/HQ/   ← clean reference (same filenames)")
+        print_only(f"    data/{_name}/val/LQ/")
+        print_only(f"    data/{_name}/val/HQ/")
         print_only("")
-        print_only("  Then run train again. Existing data directories with different")
-        print_only("  layouts (e.g. song_LQ/song_HQ) are auto-normalized on first run.")
+        print_only("  Or drop _LQ/_HQ files directly in data/ and they will be moved automatically.")
         print_only("")
         raise SystemExit(1)
 
@@ -886,6 +883,46 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     cfg = OmegaConf.load(args.conf_dir)
+
+    # --- Autodiscovery ---
+    # Derive exp.name from config filename stem if not explicitly set in config.
+    # e.g. configs/apollo_sftl.yaml → "apollo_sftl"
+    _conf_stem = os.path.splitext(os.path.basename(args.conf_dir))[0]
+    if not cfg.exp.get("name"):
+        cfg.exp.name = _conf_stem
+
+    # Derive data and chunk paths from exp.name if not explicitly set in config.
+    # data/<name>/train, data/<name>/val, chunks/<name>/train, chunks/<name>/val
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    _data_name_root   = os.path.join(_script_dir, "data",   cfg.exp.name)
+    _chunks_name_root = os.path.join(_script_dir, "chunks", cfg.exp.name)
+
+    _default_train_dir = os.path.join("chunks", cfg.exp.name, "train")
+    _default_eval_dir  = os.path.join("chunks", cfg.exp.name, "val")
+    if not cfg.datas.get("train_dir") or cfg.datas.train_dir.startswith("./chunks/train"):
+        cfg.datas.train_dir = _default_train_dir
+    if not cfg.datas.get("eval_dir") or cfg.datas.eval_dir.startswith("./chunks/val"):
+        cfg.datas.eval_dir = _default_eval_dir
+
+    # If loose _LQ/_HQ files exist in data/ root, move them into data/<name>/
+    _data_root = os.path.join(_script_dir, "data")
+    if os.path.isdir(_data_root):
+        import shutil as _shutil
+        _loose = [f for f in os.listdir(_data_root)
+                  if os.path.isfile(os.path.join(_data_root, f))
+                  and (os.path.splitext(f)[0].upper().endswith("_LQ")
+                       or os.path.splitext(f)[0].upper().endswith("_HQ"))
+                  and os.path.splitext(f)[1].lower() in {".wav", ".mp3", ".flac"}]
+        if _loose:
+            os.makedirs(_data_name_root, exist_ok=True)
+            for _f in _loose:
+                _shutil.move(os.path.join(_data_root, _f),
+                             os.path.join(_data_name_root, _f))
+            print(f"[autodiscovery] Moved {len(_loose)} loose file(s) from data/ → data/{cfg.exp.name}/")
+
+    print(f"[autodiscovery] name={cfg.exp.name}  data=data/{cfg.exp.name}  chunks=chunks/{cfg.exp.name}")
+    # --- End autodiscovery ---
+
     if args.weights_path:
         cfg.weights_path = args.weights_path
     if args.resume:
