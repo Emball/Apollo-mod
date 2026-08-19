@@ -211,7 +211,7 @@ class AudioLightningModule(pl.LightningModule):
                 stem = os.path.splitext(os.path.basename(lq_path))[0]
                 # Strip trailing _chunk#### suffix so all chunks of a song group together
                 import re as _re
-                song_key = _re.sub(r'_chunk\d+$', '', stem)
+                song_key = _re.sub(r'_\d{4}$', '', stem)
             except Exception:
                 song_key = str(batch_nb)
             self._val_batch_index[batch_nb] = song_key
@@ -287,7 +287,7 @@ class AudioLightningModule(pl.LightningModule):
                 for sample_idx, (pair_idx, _) in enumerate(val_dataset.index):
                     lq_path  = val_dataset.pairs[pair_idx][0]
                     stem     = os.path.splitext(os.path.basename(lq_path))[0]
-                    song_key = _re.sub(r'_chunk\d+$', '', stem)
+                    song_key = _re.sub(r'_\d{4}$', '', stem)
                     batch_nb = sample_idx // batch_size
                     song_batches[song_key].append(batch_nb)
             except Exception:
