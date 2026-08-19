@@ -6,7 +6,7 @@
 #   - Removed sync_dist=True from all log calls (causes hangs on single GPU)
 #   - Removed all_gather in validation (multi-GPU only)
 #   - Removed WandB-specific logger calls
-#   - val_save_interval / val_audio_dir: save restored audio from val dataloader
+#   - val_audio_dir: save restored audio from val dataloader
 #     every N epochs so what you hear == what the loss measures
 ###
 import os
@@ -38,7 +38,6 @@ class AudioLightningModule(pl.LightningModule):
         loss_func=None,
         metrics=None,
         scheduler=None,
-        val_save_interval=5,
         val_audio_dir=None,
         val_audio_pairs=10,
         gradient_checkpointing=False,
@@ -193,9 +192,7 @@ class AudioLightningModule(pl.LightningModule):
 
         self.log("val_loss", loss, on_epoch=True, prog_bar=True, logger=True)
 
-        # Save restored audio every val_save_interval epochs so the rendered
-        # audio and the loss number are always from the same computation.
-        # Only saves for the fixed subset of pairs chosen at first val run.
+        # Save restored audio every val run for the fixed subset of pairs chosen at first val.
 
         # Build a batch_nb -> song_key map on the first real val epoch so
         # on_validation_epoch_end can select diverse indices.

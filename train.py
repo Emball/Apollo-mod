@@ -877,7 +877,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         metrics=metrics,
         optimizer=[optimizer_g, optimizer_d],
         scheduler=[scheduler_g, scheduler_d],
-        val_save_interval=cfg.training.val_save_interval,
         val_audio_dir=val_audio_dir,
         val_audio_pairs=cfg.training.val_audio_pairs,
         gradient_checkpointing=cfg.system.get("gradient_checkpointing", False),
