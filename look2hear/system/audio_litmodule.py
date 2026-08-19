@@ -208,11 +208,11 @@ class AudioLightningModule(pl.LightningModule):
             # Derive song key from batch_nb via the val dataset's index table
             try:
                 val_dataset = self.trainer.datamodule.data_val
-                pair_idx, _ = val_dataset.index[batch_nb]
+                batch_size = self.trainer.datamodule.batch_size
+                sample_idx = min(batch_nb * batch_size, len(val_dataset.index) - 1)
+                pair_idx, _ = val_dataset.index[sample_idx]
                 lq_path = val_dataset.pairs[pair_idx][0]
-                fname = os.path.basename(lq_path)
-                parts = fname.rsplit("_", 1)
-                song_key = parts[0] if len(parts) == 2 and parts[1].replace(".wav", "").isdigit() else fname
+                song_key = os.path.splitext(os.path.basename(lq_path))[0]
             except Exception:
                 song_key = str(batch_nb)
             self._val_batch_index[batch_nb] = song_key
@@ -220,15 +220,9 @@ class AudioLightningModule(pl.LightningModule):
         if (
             self.val_audio_dir is not None
             and self.current_epoch % self.val_save_interval == 0
+            and self._val_audio_indices is not None
         ):
-            # On first val epoch, _val_audio_indices is None — we can't compute
-            # evenly spaced indices until on_validation_epoch_end knows the total.
-            # So we save all batches on epoch 0 and let on_validation_epoch_end
-            # prune to the evenly spaced set. On subsequent epochs the set is fixed.
-            if self._val_audio_indices is None:
-                save_this = True
-            else:
-                save_this = batch_nb in self._val_audio_indices
+            save_this = batch_nb in self._val_audio_indices
 
             if save_this:
                 epoch_dir = os.path.join(
@@ -240,12 +234,12 @@ class AudioLightningModule(pl.LightningModule):
                 # Derive a human-readable name from the val dataset
                 try:
                     val_dataset = self.trainer.datamodule.data_val
-                    pair_idx, chunk_idx = val_dataset.index[batch_nb]
+                    batch_size = self.trainer.datamodule.batch_size
+                    sample_idx = min(batch_nb * batch_size, len(val_dataset.index) - 1)
+                    pair_idx, start_sample = val_dataset.index[sample_idx]
                     lq_path = val_dataset.pairs[pair_idx][0]
-                    stem = os.path.splitext(os.path.basename(lq_path))[0]
-                    parts = stem.rsplit("_", 1)
-                    song_name = parts[0] if len(parts) == 2 and parts[1].isdigit() else stem
-                    fname_base = f"{song_name}_chunk{chunk_idx:04d}"
+                    song_name = os.path.splitext(os.path.basename(lq_path))[0]
+                    fname_base = f"{song_name}_s{start_sample:06d}"
                 except Exception:
                     fname_base = f"pair_{batch_nb:04d}"
 
