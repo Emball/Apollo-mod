@@ -3,7 +3,7 @@
 import json
 from typing import Any, Dict, List, Optional, Tuple
 import os
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict
 import argparse
 import pytorch_lightning as pl
 import torch
@@ -669,15 +669,31 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     print_only(f"Instantiating datamodule <{cfg.datas._target_}>")
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.datas)
 
-    # Resolve resume checkpoint early
-    # Do this before pretrain loading so we can skip it when resuming.
-    # Lightning's trainer.fit(ckpt_path=...) fully restores model weights,
-    # optimizer state, epoch, and step — pretrain weights would just be
-    # overwritten and are a waste of time and memory.
+    # Resolve run directory — fresh start gets a timestamped subfolder,
+    # resume reuses the most recent existing run folder.
+    from datetime import datetime as _dt
+    _base_dir = os.path.join(cfg.exp.dir, cfg.exp.name)
     ckpt_path = None
+
     if cfg.get("resume", False):
-        ckpt_dir = os.path.join(cfg.exp.dir, cfg.exp.name, "checkpoints")
-        if os.path.isdir(ckpt_dir):
+        # Find the most recently modified run folder that has checkpoints
+        _run_dir = None
+        if os.path.isdir(_base_dir):
+            _subdirs = [
+                os.path.join(_base_dir, d)
+                for d in os.listdir(_base_dir)
+                if os.path.isdir(os.path.join(_base_dir, d, "checkpoints"))
+            ]
+            if _subdirs:
+                _run_dir = max(_subdirs, key=os.path.getmtime)
+        if _run_dir is None:
+            # No existing runs — fresh start
+            _run_id = _dt.now().strftime("%Y%m%d_%H%M%S")
+            _run_dir = os.path.join(_base_dir, _run_id)
+            print_only(f"[resume] No existing runs found — starting fresh run: {_run_id}")
+        else:
+            _run_id = os.path.basename(_run_dir)
+            ckpt_dir = os.path.join(_run_dir, "checkpoints")
             candidates = [
                 os.path.join(ckpt_dir, f)
                 for f in os.listdir(ckpt_dir)
@@ -685,12 +701,17 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             ]
             if candidates:
                 ckpt_path = max(candidates, key=os.path.getmtime)
-                print_only(f"[resume] Found checkpoint: {ckpt_path}")
+                print_only(f"[resume] Resuming run {_run_id}")
+                print_only(f"[resume] Checkpoint: {os.path.basename(ckpt_path)}")
                 print_only("[resume] Skipping pretrain weight loading — checkpoint takes precedence.")
             else:
-                print_only(f"[resume] No checkpoints found in {ckpt_dir}, starting from scratch.")
-        else:
-            print_only(f"[resume] Checkpoint directory not found: {ckpt_dir}, starting from scratch.")
+                print_only(f"[resume] Run folder found but no checkpoints — starting from pretrained weights.")
+    else:
+        _run_id = _dt.now().strftime("%Y%m%d_%H%M%S")
+        _run_dir = os.path.join(_base_dir, _run_id)
+        print_only(f"[run] New run: {_run_id}")
+
+    os.makedirs(_run_dir, exist_ok=True)
 
     # Pretrained weights resolution
     # Priority:
@@ -847,7 +868,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     # Instantiate system
     print_only(f"Instantiating system <{cfg.system._target_}>")
-    val_audio_dir = os.path.join(cfg.exp.dir, cfg.exp.name, "val_audio")
+    val_audio_dir = os.path.join(_run_dir, "val_audio")
     system: LightningModule = hydra.utils.instantiate(
         cfg.system,
         model=model,
@@ -864,6 +885,13 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     )
 
     # Callbacks
+    # Patch all run-specific paths before any instantiation
+    os.makedirs(os.path.join(_run_dir, "logs"), exist_ok=True)
+    with open_dict(cfg):
+        cfg.checkpoint.dirpath       = os.path.join(_run_dir, "checkpoints")
+        cfg.logger.save_dir          = os.path.join(_run_dir, "logs")
+        cfg.trainer.default_root_dir = _run_dir
+
     callbacks: List[Callback] = []
 
     if cfg.get("early_stopping"):
@@ -876,7 +904,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     # Instantiate logger
     print_only(f"Instantiating logger <{cfg.logger._target_}>")
-    os.makedirs(os.path.join(cfg.exp.dir, cfg.exp.name, "logs"), exist_ok=True)
     logger = hydra.utils.instantiate(cfg.logger)
     logger.log_hyperparams = lambda *a, **kw: None
 
@@ -891,7 +918,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     def _save_and_exit(sig=None, frame=None):
         print_only("\n[interrupt] Ctrl+C caught — saving checkpoint...")
         try:
-            ckpt_dir = os.path.join(cfg.exp.dir, cfg.exp.name, "checkpoints")
+            ckpt_dir = os.path.join(_run_dir, "checkpoints")
             os.makedirs(ckpt_dir, exist_ok=True)
             out_path = os.path.join(ckpt_dir, "interrupted.ckpt")
             trainer.save_checkpoint(out_path)
@@ -917,7 +944,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     print_only("Training finished!")
 
     best_k = {k: v.item() for k, v in checkpoint.best_k_models.items()}
-    with open(os.path.join(cfg.exp.dir, cfg.exp.name, "best_k_models.json"), "w") as f:
+    with open(os.path.join(_run_dir, "best_k_models.json"), "w") as f:
         json.dump(best_k, f, indent=0)
 
     state_dict = torch.load(checkpoint.best_model_path)
@@ -925,7 +952,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     system.cpu()
 
     to_save = system.audio_model.serialize()
-    torch.save(to_save, os.path.join(cfg.exp.dir, cfg.exp.name, "best_model.pth"))
+    torch.save(to_save, os.path.join(_run_dir, "best_model.pth"))
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
