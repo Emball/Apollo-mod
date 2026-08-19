@@ -192,7 +192,6 @@ class AudioLightningModule(pl.LightningModule):
         loss = self.metrics(est_sources, ori_data)
 
         self.log("val_loss", loss, on_epoch=True, prog_bar=True, logger=True)
-        self.validation_step_outputs.append(loss)
 
         # Save restored audio every val_save_interval epochs so the rendered
         # audio and the loss number are always from the same computation.
