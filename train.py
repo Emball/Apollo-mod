@@ -889,17 +889,12 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     )
 
     def _save_and_exit(sig=None, frame=None):
-        print_only("\n[interrupt] Ctrl+C caught — saving current best model before exit...")
+        print_only("\n[interrupt] Ctrl+C caught — saving current model state...")
         try:
-            if checkpoint.best_model_path and os.path.exists(checkpoint.best_model_path):
-                state_dict = torch.load(checkpoint.best_model_path, map_location="cpu")
-                system.load_state_dict(state_dict=state_dict["state_dict"])
-                system.cpu()
-                out_path = os.path.join(cfg.exp.dir, cfg.exp.name, "interrupted_model.pth")
-                torch.save(system.audio_model.serialize(), out_path)
-                print_only(f"[interrupt] Saved to {out_path}")
-            else:
-                print_only("[interrupt] No checkpoint saved yet — nothing to export.")
+            out_path = os.path.join(cfg.exp.dir, cfg.exp.name, "interrupted_model.pth")
+            system.cpu()
+            torch.save(system.audio_model.serialize(), out_path)
+            print_only(f"[interrupt] Saved to {out_path}")
         except Exception as e:
             print_only(f"[interrupt] Save failed: {e}")
         os._exit(0)
