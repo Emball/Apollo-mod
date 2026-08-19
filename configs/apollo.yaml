@@ -144,7 +144,8 @@ checkpoint:
 logger:
   _target_: pytorch_lightning.loggers.TensorBoardLogger
   save_dir: ${exp.dir}/${exp.name}/logs
-  name: ${exp.name}
+  name: ""
+  version: ""
   log_graph: false
 
 trainer:
