@@ -45,13 +45,12 @@ class MultiFrequencyGenLoss(_Loss):
     def _freq_MAE(self, output, target):
         loss = 0.
         eps = torch.finfo(torch.float32).eps
-        device = output.device
         flat_out = output.view(-1, output.shape[-1])
         flat_tgt = target.view(-1, target.shape[-1])
 
         for win in self.all_win:
-            hann    = getattr(self, f"hann_{win}").to(device)
-            weights = getattr(self, f"weights_{win}").to(device)
+            hann    = getattr(self, f"hann_{win}")
+            weights = getattr(self, f"weights_{win}")
 
             est_spec    = torch.stft(flat_out, n_fft=win, hop_length=win // 2,
                                      window=hann, return_complex=True)

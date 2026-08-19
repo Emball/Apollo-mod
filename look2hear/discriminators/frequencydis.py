@@ -38,6 +38,11 @@ class MultiFrequencyDiscriminator(nn.Module):
             raw_weights / raw_weights.mean()
         )
 
+        # Pre-register hann windows as buffers so they're on the right device
+        # automatically and never allocated inside the forward pass.
+        for w in window:
+            self.register_buffer(f"hann_{w}", torch.hann_window(w).float())
+
     def forward(self, est, sample_rate=44100):
         B, nch, _ = est.shape
         assert nch == self.nch
@@ -54,7 +59,7 @@ class MultiFrequencyDiscriminator(nn.Module):
                 est.float(),
                 self.window[i],
                 self.window[i] // 2,
-                window=torch.hann_window(self.window[i]).to(est.device).float(),
+                window=getattr(self, f"hann_{self.window[i]}"),
                 return_complex=True
             )
             est_RI = torch.stack([est_spec.real, est_spec.imag], dim=1)
