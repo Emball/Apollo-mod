@@ -90,82 +90,47 @@ def _load_wav_stereo(path: str):
     return wav
 
 
-def _find_onset(wav: "torch.Tensor", threshold: float = 0.001) -> int:
-    """Return sample index of first frame where RMS over a 10ms window exceeds threshold."""
-    import torch
-    mono = wav.mean(0).abs()
-    window = 441  # 10ms at 44100
-    cumsum = torch.cumsum(mono ** 2, dim=0)
-    cumsum = torch.cat([torch.zeros(1), cumsum])
-    rms = ((cumsum[window:] - cumsum[:-window]) / window).sqrt()
-    above = (rms > threshold).nonzero(as_tuple=False)
-    if len(above) == 0:
-        return 0
-    return int(above[0].item())
+def _align_pair(lq: "torch.Tensor", hq: "torch.Tensor", stem: str) -> tuple:
+    """Full-signal FFT cross-correlation alignment of an LQ/HQ pair.
 
-
-def _xcorr_offset(a: "torch.Tensor", b: "torch.Tensor", search: int) -> int:
-    """Return the sample offset that best aligns a to b within ±search samples.
-    Positive = a leads b; negative = b leads a.
+    Downmixes to mono, computes xcorr over the entire signal with no search
+    window cap, finds the best lag, and trims the leading edge of whichever
+    file is ahead. Operates once on the full file before chunking.
     """
     import torch
-    n = min(a.shape[0], b.shape[0])
-    a = a[:n].double()
-    b = b[:n].double()
-    a = a / (a.std() + 1e-8)
-    b = b / (b.std() + 1e-8)
+
+    n = min(lq.shape[-1], hq.shape[-1])
+    lq_mono = lq[:, :n].mean(0).double()
+    hq_mono = hq[:, :n].mean(0).double()
+
+    # Normalise
+    lq_mono = lq_mono / (lq_mono.std() + 1e-8)
+    hq_mono = hq_mono / (hq_mono.std() + 1e-8)
+
+    # Full xcorr via FFT — no window cap
     N = n
     xcorr = torch.fft.irfft(
-        torch.fft.rfft(b, n=2*N) * torch.fft.rfft(a.flip(0), n=2*N), n=2*N
+        torch.fft.rfft(hq_mono, n=2*N) * torch.fft.rfft(lq_mono.flip(0), n=2*N),
+        n=2*N
     )
-    fwd = xcorr[1:search + 1]
-    bwd = xcorr[2*N - search:2*N]
-    best_fwd = float(fwd.max())
-    best_bwd = float(bwd.max())
-    if best_fwd >= best_bwd and best_fwd > float(xcorr[0]):
-        return int(fwd.argmax().item()) + 1   # a leads b
-    elif best_bwd > best_fwd and best_bwd > float(xcorr[0]):
-        return -(int(bwd.argmax().item()) + 1) # b leads a
-    return 0
 
+    # xcorr[0] = lag 0, xcorr[k] = LQ leads by k, xcorr[2N-k] = HQ leads by k
+    # Split into forward (LQ leads) and backward (HQ leads) halves
+    fwd = xcorr[1:N]       # LQ leads HQ
+    bwd = xcorr[N+1:2*N]   # HQ leads LQ (reversed order)
 
-def _align_pair(lq: "torch.Tensor", hq: "torch.Tensor", stem: str) -> tuple:
-    """Two-pass alignment of an LQ/HQ pair before chunking.
+    best_zero = float(xcorr[0])
+    best_fwd  = float(fwd.max()) if N > 1 else -1e9
+    best_bwd  = float(bwd.max()) if N > 1 else -1e9
 
-    Pass 1 — onset detection: finds the first transient in each file and
-    trims the coarser leading-silence offset (ms-level accuracy).
-
-    Pass 2 — narrow xcorr: refines to sample-level accuracy by searching
-    ±500 samples around the now-roughly-aligned signals.
-
-    Operates once on the full file — not per-chunk.
-    """
-    import torch
-
-    # Pass 1: onset-based coarse alignment
-    lq_onset = _find_onset(lq)
-    hq_onset = _find_onset(hq)
-    coarse = lq_onset - hq_onset
-    if coarse > 0:
-        lq = lq[:, coarse:]
-    elif coarse < 0:
-        hq = hq[:, -coarse:]
-
-    # Pass 2: sample-level xcorr refinement over first 5s mono
-    probe = min(lq.shape[-1], hq.shape[-1], 5 * _SR)
-    lq_mono = lq[:, :probe].mean(0)
-    hq_mono = hq[:, :probe].mean(0)
-    fine = _xcorr_offset(lq_mono, hq_mono, search=500)
-    if fine > 0:
-        lq = lq[:, fine:]
-    elif fine < 0:
-        hq = hq[:, -fine:]
-
-    total = coarse + fine
-    if total != 0:
-        src = "LQ" if total > 0 else "HQ"
-        print_only(f"[align] {stem}: trimmed {abs(total)} samples ({abs(total)*1000//_SR}ms) from {src} "
-                   f"(coarse={coarse}, fine={fine})")
+    if best_fwd >= best_bwd and best_fwd > best_zero:
+        lag = int(fwd.argmax().item()) + 1
+        lq = lq[:, lag:]
+        print_only(f"[align] {stem}: LQ leads by {lag} samples ({lag*1000//_SR}ms) — trimmed LQ")
+    elif best_bwd > best_fwd and best_bwd > best_zero:
+        lag = int(bwd.argmax().item()) + 1
+        hq = hq[:, lag:]
+        print_only(f"[align] {stem}: HQ leads by {lag} samples ({lag*1000//_SR}ms) — trimmed HQ")
     else:
         print_only(f"[align] {stem}: already aligned")
 
