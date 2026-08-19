@@ -91,48 +91,43 @@ def _load_wav_stereo(path: str):
 
 
 def _align_pair(lq: "torch.Tensor", hq: "torch.Tensor", stem: str) -> tuple:
-    """Full-signal FFT cross-correlation alignment of an LQ/HQ pair.
+    """Align LQ to HQ by finding encoder delay using a small leading pattern.
 
-    Downmixes to mono, computes xcorr over the entire signal with no search
-    window cap, finds the best lag, and trims the leading edge of whichever
-    file is ahead. Operates once on the full file before chunking.
+    Takes the first PATTERN_SIZE samples of HQ and searches for that exact
+    fingerprint within the first SEARCH_WINDOW samples of LQ. This prevents
+    false peaks from repeated musical content that plague full-signal xcorr.
+
+    Search window of 8192 samples (~186ms at 44100Hz) covers any realistic
+    MP3/AAC encoder delay (typically 576–2112 samples) with room to spare.
     """
     import torch
+    import torch.nn.functional as F
 
-    n = min(lq.shape[-1], hq.shape[-1])
-    lq_mono = lq[:, :n].mean(0).double()
-    hq_mono = hq[:, :n].mean(0).double()
+    PATTERN_SIZE  = 2048
+    SEARCH_WINDOW = 8192
+
+    # Mono left channel for offset calculation
+    hq_pat = hq[0, :PATTERN_SIZE].double()
+    lq_win = lq[0, :SEARCH_WINDOW].double()
 
     # Normalise
-    lq_mono = lq_mono / (lq_mono.std() + 1e-8)
-    hq_mono = hq_mono / (hq_mono.std() + 1e-8)
+    hq_pat = hq_pat / (hq_pat.std() + 1e-8)
+    lq_win = lq_win / (lq_win.std() + 1e-8)
 
-    # Full xcorr via FFT — no window cap
-    N = n
-    xcorr = torch.fft.irfft(
-        torch.fft.rfft(hq_mono, n=2*N) * torch.fft.rfft(lq_mono.flip(0), n=2*N),
-        n=2*N
-    )
+    # Slide hq_pat across lq_win — valid xcorr, output length = SEARCH_WINDOW - PATTERN_SIZE + 1
+    corr = F.conv1d(
+        lq_win.view(1, 1, -1),
+        hq_pat.flip(0).view(1, 1, -1),
+        padding=0
+    ).squeeze()
 
-    # xcorr[0] = lag 0, xcorr[k] = LQ leads by k, xcorr[2N-k] = HQ leads by k
-    # Split into forward (LQ leads) and backward (HQ leads) halves
-    fwd = xcorr[1:N]       # LQ leads HQ
-    bwd = xcorr[N+1:2*N]   # HQ leads LQ (reversed order)
+    delay = int(corr.argmax().item())
 
-    best_zero = float(xcorr[0])
-    best_fwd  = float(fwd.max()) if N > 1 else -1e9
-    best_bwd  = float(bwd.max()) if N > 1 else -1e9
-
-    if best_fwd >= best_bwd and best_fwd > best_zero:
-        lag = int(fwd.argmax().item()) + 1
-        lq = lq[:, lag:]
-        print_only(f"[align] {stem}: LQ leads by {lag} samples ({lag*1000//_SR}ms) — trimmed LQ")
-    elif best_bwd > best_fwd and best_bwd > best_zero:
-        lag = int(bwd.argmax().item()) + 1
-        hq = hq[:, lag:]
-        print_only(f"[align] {stem}: HQ leads by {lag} samples ({lag*1000//_SR}ms) — trimmed HQ")
+    if delay > 0:
+        lq = lq[:, delay:]
+        print_only(f"[align] {stem}: encoder delay {delay} samples ({delay*1000//_SR}ms) — trimmed LQ")
     else:
-        print_only(f"[align] {stem}: already aligned")
+        print_only(f"[align] {stem}: no delay detected")
 
     min_len = min(lq.shape[-1], hq.shape[-1])
     return lq[:, :min_len], hq[:, :min_len]
