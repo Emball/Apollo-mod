@@ -919,7 +919,13 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         try:
             ckpt_dir = os.path.join(_run_dir, "checkpoints")
             os.makedirs(ckpt_dir, exist_ok=True)
-            out_path = os.path.join(ckpt_dir, "interrupted.ckpt")
+            step = trainer.global_step
+            try:
+                val_loss = trainer.callback_metrics.get("val_loss", None)
+                loss_str = f"-val_loss={val_loss:.4f}" if val_loss is not None else ""
+            except Exception:
+                loss_str = ""
+            out_path = os.path.join(ckpt_dir, f"{step:06d}{loss_str}.ckpt")
             trainer.save_checkpoint(out_path)
             print_only(f"[interrupt] Saved to {out_path}")
         except Exception as e:
