@@ -19,7 +19,7 @@ accepted input layouts (_LQ/_HQ subdirs, flat postfix files, or pre-normalized
 LQ/HQ subdirs).
 
 Val loss is computed from chunks/val/ every validation epoch.
-Restored audio is saved to Exps/<n>/val_audio/epoch_NNNN/ every
+Restored audio is saved to runs/<n>/val_audio/epoch_NNNN/ every
 val_save_interval epochs for a fixed subset of val_audio_pairs chunks,
 controlled via the training: block in the config yaml.
 

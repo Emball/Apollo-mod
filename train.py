@@ -859,9 +859,9 @@ if __name__ == "__main__":
 
     _default_train_dir = os.path.join("chunks", cfg.exp.name, "train")
     _default_eval_dir  = os.path.join("chunks", cfg.exp.name, "val")
-    if not cfg.datas.get("train_dir") or cfg.datas.train_dir.startswith("./chunks/train"):
+    if not cfg.datas.get("train_dir"):
         cfg.datas.train_dir = _default_train_dir
-    if not cfg.datas.get("eval_dir") or cfg.datas.eval_dir.startswith("./chunks/val"):
+    if not cfg.datas.get("eval_dir"):
         cfg.datas.eval_dir = _default_eval_dir
 
     # If loose _LQ/_HQ files exist in data/ root, move them into data/<name>/

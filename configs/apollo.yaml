@@ -16,8 +16,6 @@ training:
 
 datas:
   _target_: paired_datamodule.PairedAudioDataModule
-  train_dir: ./chunks/train
-  eval_dir: ./chunks/val
   sr: 44100
   segment_sec: 4
   batch_size: 2
