@@ -81,18 +81,39 @@ class AudioLightningModule(pl.LightningModule):
         import look2hear.models.apollo as _apollo_mod
         import look2hear.discriminators.frequencydis as _dis_mod
 
-        original_bsnet_forward = _apollo_mod.BSNet.forward
 
-        def checkpointed_bsnet_forward(self_bsnet, input):
+
+        original_apollo_forward = _apollo_mod.Apollo.forward
+
+        def checkpointed_apollo_forward(self_apollo, input):
             if not torch.is_grad_enabled():
-                return original_bsnet_forward(self_bsnet, input)
-            return torch_checkpoint.checkpoint(
-                original_bsnet_forward, self_bsnet, input, use_reentrant=False
-            )
+                return original_apollo_forward(self_apollo, input)
 
-        _apollo_mod.BSNet.forward = checkpointed_bsnet_forward
+            subband_feature = self_apollo.feature_extractor(input)
 
-        print("[gradient_checkpointing] Enabled for BSNet layers.")
+            def _run_net(feat):
+                return self_apollo.net(feat)
+
+            feature = torch_checkpoint.checkpoint(_run_net, subband_feature, use_reentrant=False)
+
+            B, nch, nsample = input.shape
+            est_spec = []
+            for i in range(self_apollo.nband):
+                this_RI = self_apollo.output[i](feature[:, i]).view(B * nch, 2, self_apollo.band_width[i], -1)
+                est_spec.append(torch.complex(this_RI[:, 0], this_RI[:, 1]))
+            est_spec = torch.cat(est_spec, 1)
+            output = torch.istft(
+                est_spec.to(torch.complex64),
+                n_fft=self_apollo.win,
+                hop_length=self_apollo.stride,
+                window=self_apollo.hann_win,
+                length=nsample,
+            ).view(B, nch, -1).to(input.dtype)
+            return output
+
+        _apollo_mod.Apollo.forward = checkpointed_apollo_forward
+
+        print("[gradient_checkpointing] Enabled: single checkpoint over full BSNet stack.")
 
     def forward(self, wav):
         return self.audio_model(wav)
