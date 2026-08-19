@@ -51,7 +51,6 @@ class AudioLightningModule(pl.LightningModule):
         self.loss_func = loss_func
         self.metrics = metrics
         self.scheduler = list(scheduler)
-        self.val_save_interval = val_save_interval
         self.val_audio_dir = val_audio_dir
         self.val_audio_pairs = val_audio_pairs
         self._val_audio_indices = None  # always re-locks on first val run, even after resume
@@ -222,14 +221,13 @@ class AudioLightningModule(pl.LightningModule):
 
         if (
             self.val_audio_dir is not None
-            and self.current_epoch % self.val_save_interval == 0
             and self._val_audio_indices is not None
         ):
             save_this = batch_nb in self._val_audio_indices
 
             if save_this:
                 epoch_dir = os.path.join(
-                    self.val_audio_dir, f"epoch_{self.current_epoch:04d}"
+                    self.val_audio_dir, f"step_{self.global_step:06d}"
                 )
                 os.makedirs(epoch_dir, exist_ok=True)
                 sr = 44100

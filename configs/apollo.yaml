@@ -13,7 +13,6 @@ optimizations:
 training:
   n_layers_to_freeze: 4
   hf_boost: 1.5
-  val_save_interval: 2
   val_audio_pairs: 5
   grad_accum_steps: 1
 
