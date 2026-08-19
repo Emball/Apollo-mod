@@ -139,7 +139,7 @@ class Roformer(nn.Module):
         gate, z = self.MLP(output).chunk(2, dim=1)
         output = output + self.MLP_output(F.silu(gate) * z)
 
-        return output, (K_rot, V)
+        return output
     
 class ConvActNorm1d(nn.Module):
     def __init__(self, in_channel, hidden_channel, kernel=7, causal=False):
@@ -199,7 +199,7 @@ class BSNet(nn.Module):
 
         # band comm
         band_input = input.permute(0,3,2,1).reshape(B*T, -1, nband)
-        band_output, _ = self.band_net(band_input)
+        band_output = self.band_net(band_input)
         band_output = band_output.reshape(B, T, -1, nband).permute(0,3,2,1)
 
         # sequence modeling
