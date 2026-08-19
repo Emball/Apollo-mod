@@ -169,6 +169,7 @@ class AudioLightningModule(pl.LightningModule):
 
         self._accum_loss_g = (self._accum_loss_g or 0.0) + loss_g.detach()
         self.manual_backward(loss_g)
+        del est_outputs, est_feature_maps, targets_feature_maps, output, loss_g, loss_d
 
         for p in self.discriminator.parameters():
             p.requires_grad_(True)
