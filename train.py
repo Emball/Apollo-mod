@@ -977,6 +977,5 @@ if __name__ == "__main__":
         cfg.resume = True
 
     os.makedirs(os.path.join(cfg.exp.dir, cfg.exp.name), exist_ok=True)
-    OmegaConf.save(cfg, os.path.join(cfg.exp.dir, cfg.exp.name, "config.yaml"))
 
     train(cfg)
