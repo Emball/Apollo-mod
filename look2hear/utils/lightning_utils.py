@@ -26,7 +26,7 @@ from rich.progress import (
 from rich import print, reconfigure
 import sys as _sys
 
-_console = Console(stderr=True, highlight=False, markup=False)
+_console = Console(highlight=False, markup=False)
 
 @rank_zero_only
 def print_only(message: str):
@@ -98,7 +98,7 @@ class MyRichProgressBar(RichProgressBar):
             self._reset_progress_bar_ids()
             reconfigure(**self._console_kwargs)
             # file = open("/home/likai/data/Look2Hear/Experiments/run_logs/EdgeFRCNN-Noncausal.log", 'w')
-            self._console: Console = Console(force_terminal=True)
+            self._console: Console = _console
             self._console.clear_live()
             self._metric_component = MetricsTextColumn(trainer, self.theme.metrics)
             self.progress = CustomProgress(
