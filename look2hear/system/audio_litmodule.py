@@ -278,33 +278,45 @@ class AudioLightningModule(pl.LightningModule):
             self._val_batch_index = {}
             return
 
-        if self._val_audio_indices is None and hasattr(self, '_val_batch_index') and not self.trainer.sanity_checking:
-            import random
+        if self._val_audio_indices is None and not self.trainer.sanity_checking:
+            import random, re as _re
             from collections import defaultdict
 
-            # _val_batch_index maps batch_nb -> filename stem so we can group by song
-            song_batches = defaultdict(list)
-            for batch_nb, song_key in self._val_batch_index.items():
-                song_batches[song_key].append(batch_nb)
+            # Build song->batch_nb map directly from the full val dataset,
+            # not from the limited batches that actually ran (limit_val_batches
+            # may have cut off most songs).
+            try:
+                val_dataset = self.trainer.datamodule.data_val
+                batch_size  = self.trainer.datamodule.batch_size
+                song_batches = defaultdict(list)
+                for sample_idx, (pair_idx, _) in enumerate(val_dataset.index):
+                    lq_path  = val_dataset.pairs[pair_idx][0]
+                    stem     = os.path.splitext(os.path.basename(lq_path))[0]
+                    song_key = _re.sub(r'_chunk\d+$', '', stem)
+                    batch_nb = sample_idx // batch_size
+                    song_batches[song_key].append(batch_nb)
+            except Exception:
+                # Fallback: use whatever we observed during val steps
+                song_batches = defaultdict(list)
+                for batch_nb, song_key in self._val_batch_index.items():
+                    song_batches[song_key].append(batch_nb)
 
             songs = list(song_batches.keys())
             total = sum(len(v) for v in song_batches.values())
 
             if self.val_audio_pairs == 0:
-                # 0 means save all pairs
-                self._val_audio_indices = set(self._val_batch_index.keys())
+                self._val_audio_indices = set(range(total))
                 print(f"[val audio] Saving all {len(self._val_audio_indices)} val pairs across {len(songs)} songs")
             else:
-                n = min(self.val_audio_pairs, total)
-                # Guarantee 1 random batch per song, then fill remainder from the full pool
-                selected = [random.choice(song_batches[s]) for s in songs]
-                already = set(selected)
-                remainder = [nb for nb in self._val_batch_index if nb not in already]
-                still_needed = max(0, n - len(selected))
-                selected += random.sample(remainder, min(still_needed, len(remainder)))
+                # val_audio_pairs = pairs PER SONG, not total
+                per_song = max(1, self.val_audio_pairs)
+                selected = []
+                for s in songs:
+                    choices = song_batches[s]
+                    selected += random.sample(choices, min(per_song, len(choices)))
                 self._val_audio_indices = set(selected)
-                print(f"[val audio] Locked indices ({len(self._val_audio_indices)} randomly sampled across {len(songs)} songs): {sorted(self._val_audio_indices)}")
-            self._val_batch_index = {}  # free memory, no longer needed
+                print(f"[val audio] Locked {len(self._val_audio_indices)} indices ({per_song} per song across {len(songs)} songs): {sorted(self._val_audio_indices)}")
+            self._val_batch_index = {}  # free memory
 
     def test_step(self, batch, batch_nb):
         mixtures, targets = batch
