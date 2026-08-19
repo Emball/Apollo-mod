@@ -278,8 +278,15 @@ def augment_pair(
     if cfg.gain.enabled and random.random() < cfg.gain.prob:
         db    = random.uniform(-cfg.gain.db_max, cfg.gain.db_max)
         scale = 10 ** (db / 20.0)
-        lq    = (lq * scale).clamp(-1.0, 1.0)
-        hq    = (hq * scale).clamp(-1.0, 1.0)
+        lq    = lq * scale
+        hq    = hq * scale
+        # If the gain push would clip, rescale both down just enough to avoid it
+        # rather than hard-clamping — preserves waveform shape including any
+        # pre-existing clipping distortion in the source material
+        peak = max(lq.abs().max(), hq.abs().max())
+        if peak > 1.0:
+            lq = lq / peak
+            hq = hq / peak
 
     # Polarity inversion
     if cfg.polarity.enabled and random.random() < cfg.polarity.prob:
@@ -287,11 +294,14 @@ def augment_pair(
         hq = -hq
 
     # Gaussian noise
-    # Same noise tensor added to both — preserves the pair relationship.
     if cfg.noise.enabled and random.random() < cfg.noise.prob:
         noise = torch.randn_like(lq) * cfg.noise.sigma
-        lq = (lq + noise).clamp(-1.0, 1.0)
-        hq = (hq + noise).clamp(-1.0, 1.0)
+        lq = lq + noise
+        hq = hq + noise
+        peak = max(lq.abs().max(), hq.abs().max())
+        if peak > 1.0:
+            lq = lq / peak
+            hq = hq / peak
 
     # MP3 degradation (LQ only)
     if cfg.mp3_degradation.enabled and random.random() < cfg.mp3_degradation.prob:
