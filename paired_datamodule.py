@@ -474,7 +474,7 @@ class PairedAudioDataModule(LightningDataModule):
             shuffle=True,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
-            persistent_workers=self.num_workers > 0,
+            persistent_workers=False,
         )
 
     def val_dataloader(self) -> DataLoader:
