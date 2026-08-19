@@ -93,18 +93,23 @@ class AudioLightningModule(pl.LightningModule):
         _apollo_mod.BSNet.forward = checkpointed_bsnet_forward
 
         original_freqdis_forward = _dis_mod.FrequencyDiscriminator.forward
+        _HIDDENS_PER_WINDOW = 6  # FrequencyDiscriminator returns hiddens[:-1] = 6 tensors
 
         def checkpointed_freqdis_forward(self_dis, x):
             if not torch.is_grad_enabled():
                 return original_freqdis_forward(self_dis, x)
 
+            # Return out + all hidden tensors flat so checkpoint can handle them.
+            # Previously this ran the discriminator TWICE per call — once through
+            # checkpoint for out, once with no_grad for hiddens. That doubled the
+            # cost of every discriminator forward pass (3 calls/step × 2 = 6 passes).
             def _inner(x_):
-                out, _ = original_freqdis_forward(self_dis, x_)
-                return out
+                out, hiddens = original_freqdis_forward(self_dis, x_)
+                return (out,) + tuple(hiddens)
 
-            out = torch_checkpoint.checkpoint(_inner, x, use_reentrant=False)
-            with torch.no_grad():
-                _, hiddens = original_freqdis_forward(self_dis, x.detach())
+            results = torch_checkpoint.checkpoint(_inner, x, use_reentrant=False)
+            out = results[0]
+            hiddens = list(results[1:])
             return out, hiddens
 
         _dis_mod.FrequencyDiscriminator.forward = checkpointed_freqdis_forward
