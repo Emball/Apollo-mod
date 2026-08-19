@@ -65,7 +65,8 @@ class Roformer(nn.Module):
         cos_freq, sin_freq = self._calc_rotary_emb()
         self.register_buffer("cos_freq", cos_freq)  # win, N
         self.register_buffer("sin_freq", sin_freq)  # win, N
-        
+        self.register_buffer("reverse_sign", torch.tensor([-1.0, 1.0]))
+
         self.attention_drop = attention_drop
         self.causal = causal
         self.eps = 1e-5
@@ -100,7 +101,7 @@ class Roformer(nn.Module):
         pos = min(pos, self.window-1)
         cos_freq = self.cos_freq[pos]
         sin_freq = self.sin_freq[pos]
-        reverse_sign = torch.from_numpy(np.asarray([-1, 1])).to(feature.device).type(feature.dtype)
+        reverse_sign = self.reverse_sign.to(feature.dtype)
         feature_reshape_neg = (torch.flip(feature_reshape.reshape(-1, N//2, 2), [-1]) * reverse_sign.reshape(1, 1, 2)).reshape(-1, N)
         feature_rope = feature_reshape * cos_freq.unsqueeze(0) + feature_reshape_neg * sin_freq.unsqueeze(0)
     
@@ -113,7 +114,7 @@ class Roformer(nn.Module):
 
         cos_freq = self.cos_freq[:T]
         sin_freq = self.sin_freq[:T]
-        reverse_sign = torch.from_numpy(np.asarray([-1, 1])).to(feature.device).type(feature.dtype)
+        reverse_sign = self.reverse_sign.to(feature.dtype)
         feature_reshape_neg = (torch.flip(feature_reshape.reshape(-1, N//2, 2), [-1]) * reverse_sign.reshape(1, 1, 2)).reshape(-1, T, N)
         feature_rope = feature_reshape * cos_freq.unsqueeze(0) + feature_reshape_neg * sin_freq.unsqueeze(0)
     

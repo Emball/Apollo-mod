@@ -336,8 +336,8 @@ class AudioLightningModule(pl.LightningModule):
 
     def on_load_checkpoint(self, checkpoint: dict) -> None:
         # Inject missing buffer keys for checkpoints saved before 0.1.8.1
-        # (discriminator hann windows) and before 0.1.8.6 (loss_func hann/weights
-        # buffers, and loss_func now a ModuleDict so keys changed prefix).
+        # (discriminator hann windows), before 0.1.8.6 (loss_func buffers),
+        # and before 0.1.8.7 (Roformer reverse_sign buffers).
         sd = checkpoint.get("state_dict", {})
         import torch as _torch
 
@@ -348,8 +348,6 @@ class AudioLightningModule(pl.LightningModule):
                 sd[key] = _torch.hann_window(w).float()
 
         # Generator loss hann/weights buffers (pre-0.1.8.6).
-        # Old key: loss_func.g.hann_32 doesn't exist; new path under ModuleDict.
-        # If any are missing, inject them.
         for w in [32, 64, 128, 256, 512, 1024, 2048]:
             hann_key = f"loss_func.g.hann_{w}"
             if hann_key not in sd:
@@ -358,6 +356,19 @@ class AudioLightningModule(pl.LightningModule):
             if weights_key not in sd:
                 n_bins = w // 2 + 1
                 sd[weights_key] = _torch.ones(1, n_bins, 1)
+
+        # Roformer reverse_sign buffers (pre-0.1.8.7).
+        # Scan all existing keys to find Roformer module paths.
+        rev_sign = _torch.tensor([-1.0, 1.0])
+        roformer_paths = set()
+        for key in list(sd.keys()):
+            # Keys look like audio_model.net.N.band_net.cos_freq etc.
+            if key.endswith(".cos_freq"):
+                roformer_paths.add(key[: -len(".cos_freq")])
+        for path in roformer_paths:
+            rs_key = f"{path}.reverse_sign"
+            if rs_key not in sd:
+                sd[rs_key] = rev_sign.clone()
 
         checkpoint["state_dict"] = sd
 
