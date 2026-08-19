@@ -877,6 +877,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     print_only(f"Instantiating logger <{cfg.logger._target_}>")
     os.makedirs(os.path.join(cfg.exp.dir, cfg.exp.name, "logs"), exist_ok=True)
     logger = hydra.utils.instantiate(cfg.logger)
+    logger.log_hyperparams = lambda *a, **kw: None
 
     # Instantiate trainer — single GPU, no DDP
     print_only(f"Instantiating trainer")
