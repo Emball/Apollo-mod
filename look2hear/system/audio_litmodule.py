@@ -47,7 +47,7 @@ class AudioLightningModule(pl.LightningModule):
         self.audio_model = model
         self.discriminator = discriminator
         self.optimizer = list(optimizer)
-        self.loss_func = loss_func
+        self.loss_func = torch.nn.ModuleDict(loss_func) if loss_func is not None else None
         self.metrics = metrics
         self.scheduler = list(scheduler)
         self.val_audio_dir = val_audio_dir
@@ -335,15 +335,30 @@ class AudioLightningModule(pl.LightningModule):
             self._val_batch_index = {}  # free memory
 
     def on_load_checkpoint(self, checkpoint: dict) -> None:
-        # Checkpoints saved before hann windows were registered as buffers
-        # (pre-0.1.8.1) won't have those keys. Inject them so load_state_dict
-        # doesn't raise a RuntimeError for missing keys.
+        # Inject missing buffer keys for checkpoints saved before 0.1.8.1
+        # (discriminator hann windows) and before 0.1.8.6 (loss_func hann/weights
+        # buffers, and loss_func now a ModuleDict so keys changed prefix).
         sd = checkpoint.get("state_dict", {})
         import torch as _torch
+
+        # Discriminator hann buffers (pre-0.1.8.1)
         for w in [32, 64, 128, 256, 512, 1024, 2048]:
             key = f"discriminator.hann_{w}"
             if key not in sd:
                 sd[key] = _torch.hann_window(w).float()
+
+        # Generator loss hann/weights buffers (pre-0.1.8.6).
+        # Old key: loss_func.g.hann_32 doesn't exist; new path under ModuleDict.
+        # If any are missing, inject them.
+        for w in [32, 64, 128, 256, 512, 1024, 2048]:
+            hann_key = f"loss_func.g.hann_{w}"
+            if hann_key not in sd:
+                sd[hann_key] = _torch.hann_window(w).float()
+            weights_key = f"loss_func.g.weights_{w}"
+            if weights_key not in sd:
+                n_bins = w // 2 + 1
+                sd[weights_key] = _torch.ones(1, n_bins, 1)
+
         checkpoint["state_dict"] = sd
 
     def test_step(self, batch, batch_nb):
