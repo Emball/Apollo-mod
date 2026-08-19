@@ -24,10 +24,12 @@ from rich.progress import (
     ProgressColumn
 )
 from rich import print, reconfigure
+import sys as _sys
 
 @rank_zero_only
 def print_only(message: str):
-    print(message)
+    _sys.stderr.write(message + "\n")
+    _sys.stderr.flush()
 
 @dataclass
 class RichProgressBarTheme:
