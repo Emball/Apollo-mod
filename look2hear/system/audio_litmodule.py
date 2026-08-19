@@ -68,6 +68,8 @@ class AudioLightningModule(pl.LightningModule):
         self.test_step_outputs = []
         self.automatic_optimization = False
         self._amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16)
+        self._val_loss_sum = 0.0
+        self._val_loss_count = 0
 
     def _enable_gradient_checkpointing(self):
         """
@@ -190,7 +192,12 @@ class AudioLightningModule(pl.LightningModule):
         est_sources = self(codec_data)
         loss = self.metrics(est_sources, ori_data)
 
-        self.log("val_loss", loss, on_epoch=True, prog_bar=True, logger=True)
+        # Accumulate manually so we can reset per val run, not just per epoch.
+        # on_epoch=True in Lightning only resets at epoch boundaries — with
+        # val_check_interval firing multiple times per epoch the accumulator
+        # would grow unboundedly until epoch end, causing progressive slowdown.
+        self._val_loss_sum   += loss.detach().item()
+        self._val_loss_count += 1
 
         # Save restored audio every val run for the fixed subset of pairs chosen at first val.
 
@@ -263,7 +270,16 @@ class AudioLightningModule(pl.LightningModule):
         return {"val_loss": loss}
 
     def on_validation_epoch_end(self):
-        self.log("lr", self.optimizer[0].param_groups[0]["lr"], on_epoch=True, prog_bar=True)
+        # Compute val_loss mean from our manual accumulator and reset it.
+        # This fires after every val run (not just at epoch end), so the
+        # accumulator never grows beyond one val run's worth of values.
+        if self._val_loss_count > 0:
+            mean_val_loss = self._val_loss_sum / self._val_loss_count
+            self.log("val_loss", mean_val_loss, prog_bar=True, logger=True)
+        self._val_loss_sum   = 0.0
+        self._val_loss_count = 0
+
+        self.log("lr", self.optimizer[0].param_groups[0]["lr"], prog_bar=True)
         self.validation_step_outputs.clear()
 
         # After the first val epoch we know the full dataset size — randomly

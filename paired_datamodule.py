@@ -397,7 +397,6 @@ class FullLengthPairDataset(Dataset):
         self.pairs           = get_matched_pairs(lq_dir, hq_dir)
         self.sr              = sr
         self.segment_samples = int(segment_sec * sr)
-        self.hop_samples     = self.segment_samples // 2
 
         self.index = []
         for pair_idx, (lq_path, hq_path) in enumerate(self.pairs):
@@ -406,7 +405,7 @@ class FullLengthPairDataset(Dataset):
             start = 0
             while start + self.segment_samples <= min_len:
                 self.index.append((pair_idx, start))
-                start += self.hop_samples
+                start += self.segment_samples  # non-overlapping — no redundant computation
 
         print(f"Validation dataset: {len(self.pairs)} files → {len(self.index)} segments")
 

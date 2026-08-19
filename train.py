@@ -94,10 +94,12 @@ from look2hear.utils import RankedLogger, instantiate, print_only
 import warnings
 warnings.filterwarnings("ignore")
 
-# Constants mirrored from preprocess_pairs.py
-_SR           = 44100
-_CHUNK_SEC    = 3
-_OVERLAP      = 0.5
+# Constants — chunk size is read from cfg.datas.segment_sec at runtime in prepare_data()
+_SR      = 44100
+_OVERLAP = 0.5
+
+# Mutable globals set by prepare_data() from the config
+_CHUNK_SEC     = 3
 _CHUNK_SAMPLES = int(_CHUNK_SEC * _SR)
 _HOP_SAMPLES   = int(_CHUNK_SAMPLES * (1 - _OVERLAP))
 _SUPPORTED_EXTS = {".wav", ".mp3", ".flac"}
@@ -511,6 +513,11 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     return total
 
 def prepare_data(cfg: DictConfig) -> None:
+    # Sync chunk size globals from config so _slice_and_save uses the correct sizes.
+    global _CHUNK_SEC, _CHUNK_SAMPLES, _HOP_SAMPLES
+    _CHUNK_SEC     = float(getattr(cfg.datas, "segment_sec", 3))
+    _CHUNK_SAMPLES = int(_CHUNK_SEC * _SR)
+    _HOP_SAMPLES   = int(_CHUNK_SAMPLES * (1 - _OVERLAP))
     """
     Auto-preprocessing pipeline called before training.
 
