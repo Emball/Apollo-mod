@@ -334,6 +334,18 @@ class AudioLightningModule(pl.LightningModule):
                 print(f"[val audio] Locked {len(self._val_audio_indices)} indices ({per_song} per song across {len(songs)} songs): {sorted(self._val_audio_indices)}")
             self._val_batch_index = {}  # free memory
 
+    def on_load_checkpoint(self, checkpoint: dict) -> None:
+        # Checkpoints saved before hann windows were registered as buffers
+        # (pre-0.1.8.1) won't have those keys. Inject them so load_state_dict
+        # doesn't raise a RuntimeError for missing keys.
+        sd = checkpoint.get("state_dict", {})
+        import torch as _torch
+        for w in [32, 64, 128, 256, 512, 1024, 2048]:
+            key = f"discriminator.hann_{w}"
+            if key not in sd:
+                sd[key] = _torch.hann_window(w).float()
+        checkpoint["state_dict"] = sd
+
     def test_step(self, batch, batch_nb):
         mixtures, targets = batch
         est_sources = self(mixtures)
