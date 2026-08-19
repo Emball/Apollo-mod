@@ -54,7 +54,8 @@ class AudioLightningModule(pl.LightningModule):
         self.val_save_interval = val_save_interval
         self.val_audio_dir = val_audio_dir
         self.val_audio_pairs = val_audio_pairs
-        self._val_audio_indices = None
+        self._val_audio_indices = None  # always re-locks on first val run, even after resume
+        self._val_batch_index   = {}    # cleared after locking
         self.gradient_checkpointing = gradient_checkpointing
         self.grad_accum_steps = max(1, grad_accum_steps)
         self._accum_loss_g = None
@@ -303,6 +304,7 @@ class AudioLightningModule(pl.LightningModule):
                 selected += random.sample(remainder, min(still_needed, len(remainder)))
                 self._val_audio_indices = set(selected)
                 print(f"[val audio] Locked indices ({len(self._val_audio_indices)} randomly sampled across {len(songs)} songs): {sorted(self._val_audio_indices)}")
+            self._val_batch_index = {}  # free memory, no longer needed
 
     def test_step(self, batch, batch_nb):
         mixtures, targets = batch

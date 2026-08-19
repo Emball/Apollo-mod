@@ -482,7 +482,7 @@ class PairedAudioDataModule(LightningDataModule):
             self.data_val,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
-            persistent_workers=self.num_workers > 0,
+            num_workers=0,
+            pin_memory=False,
+            persistent_workers=False,
         )
