@@ -86,7 +86,7 @@ class MyMetricsTextColumn(ProgressColumn):
     def render(self, task) -> Text:
         text = ""
         for k, v in self._metrics.items():
-            text += f"{k}: {round(v, 3) if isinstance(v, float) else v} "
+            text += f"{k}: {round(v, 4) if isinstance(v, float) else v} "
         return Text(text, justify="left", style=self._style)
 
 class MyRichProgressBar(RichProgressBar):
