@@ -269,6 +269,10 @@ class AudioLightningModule(pl.LightningModule):
         # After the first val epoch we know the full dataset size — randomly
         # pick val_audio_pairs indices with at least 1 from each song, then
         # lock them in for all future epochs.
+        if self.trainer.sanity_checking:
+            self._val_batch_index = {}
+            return
+
         if self._val_audio_indices is None and hasattr(self, '_val_batch_index') and not self.trainer.sanity_checking:
             import random
             from collections import defaultdict

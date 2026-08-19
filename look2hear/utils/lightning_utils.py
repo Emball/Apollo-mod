@@ -26,10 +26,11 @@ from rich.progress import (
 from rich import print, reconfigure
 import sys as _sys
 
+_console = Console(stderr=True, highlight=False, markup=False)
+
 @rank_zero_only
 def print_only(message: str):
-    _sys.stderr.write(message + "\n")
-    _sys.stderr.flush()
+    _console.print(message)
 
 @dataclass
 class RichProgressBarTheme:
