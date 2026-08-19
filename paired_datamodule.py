@@ -438,6 +438,7 @@ class PairedAudioDataModule(LightningDataModule):
         pin_memory: bool = True,
         augmentation: Optional[dict] = None,
         val_bootstrap_chunks: int = 50,
+        **kwargs,  # absorb train-only keys (e.g. align_data) passed via Hydra
     ):
         super().__init__()
         self.train_dir            = train_dir
