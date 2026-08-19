@@ -176,8 +176,8 @@ class AudioLightningModule(pl.LightningModule):
             self.clip_gradients(optimizer_g, gradient_clip_val=5, gradient_clip_algorithm="norm")
             optimizer_g.step()
 
-            self.log("train_loss_d", self._accum_loss_d, on_epoch=True, prog_bar=True, logger=True)
-            self.log("train_loss_g", self._accum_loss_g, on_epoch=True, prog_bar=True, logger=True)
+            self.log("train_loss_d", self._accum_loss_d, on_epoch=False, on_step=True, prog_bar=True, logger=True)
+            self.log("train_loss_g", self._accum_loss_g, on_epoch=False, on_step=True, prog_bar=True, logger=True)
             self._accum_loss_g = None
             self._accum_loss_d = None
 
