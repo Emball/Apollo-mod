@@ -95,7 +95,6 @@ def _find_onset(wav: "torch.Tensor", threshold: float = 0.001) -> int:
     import torch
     mono = wav.mean(0).abs()
     window = 441  # 10ms at 44100
-    # Sliding RMS via cumsum
     cumsum = torch.cumsum(mono ** 2, dim=0)
     cumsum = torch.cat([torch.zeros(1), cumsum])
     rms = ((cumsum[window:] - cumsum[:-window]) / window).sqrt()
@@ -105,26 +104,68 @@ def _find_onset(wav: "torch.Tensor", threshold: float = 0.001) -> int:
     return int(above[0].item())
 
 
-def _align_pair(lq: "torch.Tensor", hq: "torch.Tensor", stem: str) -> tuple:
-    """Align LQ/HQ by comparing leading-silence onset positions.
-
-    Finds the first transient in each file, measures the offset between them,
-    and trims the leading silence from whichever file starts later so both
-    begin at the same musical moment. Operates once on the full file before
-    chunking — not per-chunk.
+def _xcorr_offset(a: "torch.Tensor", b: "torch.Tensor", search: int) -> int:
+    """Return the sample offset that best aligns a to b within ±search samples.
+    Positive = a leads b; negative = b leads a.
     """
+    import torch
+    n = min(a.shape[0], b.shape[0])
+    a = a[:n].double()
+    b = b[:n].double()
+    a = a / (a.std() + 1e-8)
+    b = b / (b.std() + 1e-8)
+    N = n
+    xcorr = torch.fft.irfft(
+        torch.fft.rfft(b, n=2*N) * torch.fft.rfft(a.flip(0), n=2*N), n=2*N
+    )
+    fwd = xcorr[1:search + 1]
+    bwd = xcorr[2*N - search:2*N]
+    best_fwd = float(fwd.max())
+    best_bwd = float(bwd.max())
+    if best_fwd >= best_bwd and best_fwd > float(xcorr[0]):
+        return int(fwd.argmax().item()) + 1   # a leads b
+    elif best_bwd > best_fwd and best_bwd > float(xcorr[0]):
+        return -(int(bwd.argmax().item()) + 1) # b leads a
+    return 0
+
+
+def _align_pair(lq: "torch.Tensor", hq: "torch.Tensor", stem: str) -> tuple:
+    """Two-pass alignment of an LQ/HQ pair before chunking.
+
+    Pass 1 — onset detection: finds the first transient in each file and
+    trims the coarser leading-silence offset (ms-level accuracy).
+
+    Pass 2 — narrow xcorr: refines to sample-level accuracy by searching
+    ±500 samples around the now-roughly-aligned signals.
+
+    Operates once on the full file — not per-chunk.
+    """
+    import torch
+
+    # Pass 1: onset-based coarse alignment
     lq_onset = _find_onset(lq)
     hq_onset = _find_onset(hq)
-    offset = lq_onset - hq_onset
+    coarse = lq_onset - hq_onset
+    if coarse > 0:
+        lq = lq[:, coarse:]
+    elif coarse < 0:
+        hq = hq[:, -coarse:]
 
-    if offset > 0:
-        # LQ has more leading silence — trim it
-        lq = lq[:, offset:]
-        print_only(f"[align] {stem}: trimmed {offset} samples ({offset*1000//_SR}ms) from LQ start")
-    elif offset < 0:
-        # HQ has more leading silence — trim it
-        hq = hq[:, -offset:]
-        print_only(f"[align] {stem}: trimmed {-offset} samples ({-offset*1000//_SR}ms) from HQ start")
+    # Pass 2: sample-level xcorr refinement over first 5s mono
+    probe = min(lq.shape[-1], hq.shape[-1], 5 * _SR)
+    lq_mono = lq[:, :probe].mean(0)
+    hq_mono = hq[:, :probe].mean(0)
+    fine = _xcorr_offset(lq_mono, hq_mono, search=500)
+    if fine > 0:
+        lq = lq[:, fine:]
+    elif fine < 0:
+        hq = hq[:, -fine:]
+
+    total = coarse + fine
+    if total != 0:
+        src = "LQ" if total > 0 else "HQ"
+        print_only(f"[align] {stem}: trimmed {abs(total)} samples ({abs(total)*1000//_SR}ms) from {src} "
+                   f"(coarse={coarse}, fine={fine})")
     else:
         print_only(f"[align] {stem}: already aligned")
 
@@ -370,7 +411,7 @@ def _build_cached_aug_fn(cfg: "DictConfig"):
 
     return _apply
 
-def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=None, variants: int = 1) -> int:
+def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=None, variants: int = 1, align: bool = True) -> int:
     """
     Normalize src_root into LQ/ + HQ/ layout (if not already), then chunk all
     matched pairs into dst_root/LQ and dst_root/HQ.
@@ -430,9 +471,8 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         hq_path = os.path.join(hq_src, hq_files[stem])
         lq_wav = _load_wav_stereo(lq_path)
         hq_wav = _load_wav_stereo(hq_path)
-        # Align non-WAV pairs (MP3/FLAC encoder delay compensation)
-        if os.path.splitext(lq_files[stem])[1].lower() != ".wav" \
-                or os.path.splitext(hq_files[stem])[1].lower() != ".wav":
+        if align and (os.path.splitext(lq_files[stem])[1].lower() != ".wav"
+                or os.path.splitext(hq_files[stem])[1].lower() != ".wav"):
             lq_wav, hq_wav = _align_pair(lq_wav, hq_wav, stem)
         saved  = _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out,
                                   cached_aug_fn=cached_aug_fn, variants=variants)
@@ -475,9 +515,10 @@ def prepare_data(cfg: DictConfig) -> None:
     variants      = int(getattr(getattr(cfg.datas, "augmentation", {}), "cached_variants", 1)
                         if hasattr(getattr(cfg.datas, "augmentation", None) or {}, "cached_variants")
                         else 1)
+    align         = bool(getattr(cfg.datas, "align_data", True))
 
-    _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, variants=variants)
-    _chunk_split(data_val,   val_chunks,   "val",   cached_aug_fn=None,          variants=1)
+    _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, variants=variants, align=align)
+    _chunk_split(data_val,   val_chunks,   "val",   cached_aug_fn=None,          variants=1,        align=align)
 
     # Val bootstrap from train chunks
     # If val is still empty after chunking (no data/val source exists),

@@ -24,6 +24,7 @@ datas:
   num_workers: 8
   pin_memory: true
   val_bootstrap_chunks: 15
+  align_data: true
   augmentation:
     live:
       enabled: true
