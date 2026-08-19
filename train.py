@@ -90,44 +90,60 @@ def _load_wav_stereo(path: str):
     return wav
 
 
-def _align_pair(lq: "torch.Tensor", hq: "torch.Tensor", stem: str) -> tuple:
-    """Align LQ to HQ by finding encoder delay using a small leading pattern.
+def _read_lame_delay(mp3_path: str) -> int:
+    """Read encoder delay from the LAME/Xing header of an MP3 file.
+    Returns the delay in samples, or -1 if not found.
+    """
+    try:
+        from mutagen.mp3 import MP3
+        audio = MP3(mp3_path)
+        # LAME tag lives in the Xing/Info frame as encoder_delay
+        if hasattr(audio, 'info') and hasattr(audio.info, 'encoder_delay'):
+            delay = audio.info.encoder_delay
+            if delay is not None and delay >= 0:
+                return int(delay)
+    except Exception:
+        pass
+    return -1
 
-    Takes the first PATTERN_SIZE samples of HQ and searches for that exact
-    fingerprint within the first SEARCH_WINDOW samples of LQ. This prevents
-    false peaks from repeated musical content that plague full-signal xcorr.
 
-    Search window of 8192 samples (~186ms at 44100Hz) covers any realistic
-    MP3/AAC encoder delay (typically 576–2112 samples) with room to spare.
+def _align_pair(lq: "torch.Tensor", hq: "torch.Tensor", stem: str, lq_path: str = "") -> tuple:
+    """Align LQ to HQ by reading the LAME encoder delay from the MP3 header.
+
+    Primary: reads encoder_delay from the Xing/Info LAME tag — exact, instant,
+    no correlation needed.
+    Fallback: if the tag isn't present, uses a small pattern xcorr over the
+    first 8192 samples of LQ only.
     """
     import torch
     import torch.nn.functional as F
 
-    PATTERN_SIZE  = 2048
-    SEARCH_WINDOW = 8192
+    delay = -1
 
-    # Mono left channel for offset calculation
-    hq_pat = hq[0, :PATTERN_SIZE].double()
-    lq_win = lq[0, :SEARCH_WINDOW].double()
+    # Primary: read LAME tag from MP3 header
+    if lq_path.lower().endswith(".mp3"):
+        delay = _read_lame_delay(lq_path)
+        if delay >= 0:
+            print_only(f"[align] {stem}: LAME header delay = {delay} samples — trimmed LQ")
 
-    # Normalise
-    hq_pat = hq_pat / (hq_pat.std() + 1e-8)
-    lq_win = lq_win / (lq_win.std() + 1e-8)
-
-    # Slide hq_pat across lq_win — valid xcorr, output length = SEARCH_WINDOW - PATTERN_SIZE + 1
-    corr = F.conv1d(
-        lq_win.view(1, 1, -1),
-        hq_pat.flip(0).view(1, 1, -1),
-        padding=0
-    ).squeeze()
-
-    delay = int(corr.argmax().item())
+    # Fallback: small-window pattern xcorr
+    if delay < 0:
+        PATTERN_SIZE  = 2048
+        SEARCH_WINDOW = 8192
+        hq_pat = hq[0, :PATTERN_SIZE].double()
+        lq_win = lq[0, :SEARCH_WINDOW].double()
+        hq_pat = hq_pat / (hq_pat.std() + 1e-8)
+        lq_win = lq_win / (lq_win.std() + 1e-8)
+        corr = F.conv1d(
+            lq_win.view(1, 1, -1),
+            hq_pat.flip(0).view(1, 1, -1),
+            padding=0
+        ).squeeze()
+        delay = int(corr.argmax().item())
+        print_only(f"[align] {stem}: no LAME tag — xcorr delay = {delay} samples — trimmed LQ")
 
     if delay > 0:
         lq = lq[:, delay:]
-        print_only(f"[align] {stem}: encoder delay {delay} samples ({delay*1000//_SR}ms) — trimmed LQ")
-    else:
-        print_only(f"[align] {stem}: no delay detected")
 
     min_len = min(lq.shape[-1], hq.shape[-1])
     return lq[:, :min_len], hq[:, :min_len]
@@ -433,7 +449,7 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         hq_wav = _load_wav_stereo(hq_path)
         if align and (os.path.splitext(lq_files[stem])[1].lower() != ".wav"
                 or os.path.splitext(hq_files[stem])[1].lower() != ".wav"):
-            lq_wav, hq_wav = _align_pair(lq_wav, hq_wav, stem)
+            lq_wav, hq_wav = _align_pair(lq_wav, hq_wav, stem, lq_path=lq_path)
         saved  = _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out,
                                   cached_aug_fn=cached_aug_fn, variants=variants)
         print_only(f"[data/{split_name}]   {stem}: {len(saved)} chunks")
