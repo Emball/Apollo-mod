@@ -90,76 +90,44 @@ def _load_wav_stereo(path: str):
     return wav
 
 
-# Maximum shift to search when aligning pairs (in samples at 44100 Hz).
-# 8820 = 200ms — enough to cover any realistic MP3 encoder delay or
-# manual edit offset, without risking false-peak xcorr matches.
-_ALIGN_MAX_SHIFT = int(0.200 * _SR)
+def _find_onset(wav: "torch.Tensor", threshold: float = 0.001) -> int:
+    """Return sample index of first frame where RMS over a 10ms window exceeds threshold."""
+    import torch
+    mono = wav.mean(0).abs()
+    window = 441  # 10ms at 44100
+    # Sliding RMS via cumsum
+    cumsum = torch.cumsum(mono ** 2, dim=0)
+    cumsum = torch.cat([torch.zeros(1), cumsum])
+    rms = ((cumsum[window:] - cumsum[:-window]) / window).sqrt()
+    above = (rms > threshold).nonzero(as_tuple=False)
+    if len(above) == 0:
+        return 0
+    return int(above[0].item())
+
 
 def _align_pair(lq: "torch.Tensor", hq: "torch.Tensor", stem: str) -> tuple:
-    """Xcorr-align an LQ/HQ pair by trimming the leading edge of whichever is ahead.
+    """Align LQ/HQ by comparing leading-silence onset positions.
 
-    Uses envelope cross-correlation on a mono downmix over the first 30s so
-    the search is fast. Trims up to _ALIGN_MAX_SHIFT samples from the start
-    of one signal and the corresponding end of the other to preserve length parity,
-    then truncates both to the shorter post-trim length.
-
-    Only called for non-WAV source pairs where encoder delay is expected.
+    Finds the first transient in each file, measures the offset between them,
+    and trims the leading silence from whichever file starts later so both
+    begin at the same musical moment. Operates once on the full file before
+    chunking — not per-chunk.
     """
-    import torch
-    import torch.nn.functional as F
+    lq_onset = _find_onset(lq)
+    hq_onset = _find_onset(hq)
+    offset = lq_onset - hq_onset
 
-    # Mono downmix, first 30s only for speed
-    probe_len = min(lq.shape[-1], hq.shape[-1], 30 * _SR)
-    lq_mono = lq[:, :probe_len].mean(0)
-    hq_mono = hq[:, :probe_len].mean(0)
-
-    # Envelope (abs + light smoothing)
-    kernel_size = 441  # 10ms at 44100
-    def envelope(x):
-        x = x.abs().unsqueeze(0).unsqueeze(0)
-        return F.avg_pool1d(x, kernel_size, stride=1, padding=kernel_size // 2).squeeze()
-
-    lq_env = envelope(lq_mono)
-    hq_env = envelope(hq_mono)
-
-    # Trim to equal length for xcorr
-    n = min(lq_env.shape[0], hq_env.shape[0])
-    lq_env = lq_env[:n]
-    hq_env = hq_env[:n]
-
-    # Normalise
-    lq_env = lq_env / (lq_env.std() + 1e-8)
-    hq_env = hq_env / (hq_env.std() + 1e-8)
-
-    # Full xcorr via FFT
-    N = lq_env.shape[0]
-    Lf = lq_env.double()
-    Hf = hq_env.double()
-    xcorr = torch.fft.irfft(torch.fft.rfft(Hf, n=2*N) * torch.fft.rfft(Lf.flip(0), n=2*N), n=2*N)
-
-    # Search window: lags in [-_ALIGN_MAX_SHIFT, +_ALIGN_MAX_SHIFT]
-    # xcorr[0] = lag 0, xcorr[k] = lag k, xcorr[2N-k] = lag -k
-    search = _ALIGN_MAX_SHIFT
-    fwd  = xcorr[1:search + 1]          # LQ leads HQ by 1..search samples
-    bwd  = xcorr[2*N - search:2*N]      # HQ leads LQ by 1..search samples (reversed)
-
-    best_fwd  = float(fwd.max())
-    best_bwd  = float(bwd.max())
-    lag_fwd   = int(fwd.argmax().item()) + 1
-    lag_bwd   = int(bwd.argmax().item()) + 1
-
-    if best_fwd >= best_bwd and best_fwd > float(xcorr[0]):
-        # LQ is ahead by lag_fwd — trim LQ start
-        lq = lq[:, lag_fwd:]
-        print_only(f"[align] {stem}: LQ leads by {lag_fwd} samples ({lag_fwd//_SR*1000:.1f}ms) — trimmed LQ")
-    elif best_bwd > best_fwd and best_bwd > float(xcorr[0]):
-        # HQ is ahead by lag_bwd — trim HQ start
-        hq = hq[:, lag_bwd:]
-        print_only(f"[align] {stem}: HQ leads by {lag_bwd} samples ({lag_bwd//_SR*1000:.1f}ms) — trimmed HQ")
+    if offset > 0:
+        # LQ has more leading silence — trim it
+        lq = lq[:, offset:]
+        print_only(f"[align] {stem}: trimmed {offset} samples ({offset*1000//_SR}ms) from LQ start")
+    elif offset < 0:
+        # HQ has more leading silence — trim it
+        hq = hq[:, -offset:]
+        print_only(f"[align] {stem}: trimmed {-offset} samples ({-offset*1000//_SR}ms) from HQ start")
     else:
-        print_only(f"[align] {stem}: already aligned (lag=0)")
+        print_only(f"[align] {stem}: already aligned")
 
-    # Truncate both to shorter post-trim length
     min_len = min(lq.shape[-1], hq.shape[-1])
     return lq[:, :min_len], hq[:, :min_len]
 
