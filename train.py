@@ -889,11 +889,12 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     )
 
     def _save_and_exit(sig=None, frame=None):
-        print_only("\n[interrupt] Ctrl+C caught — saving current model state...")
+        print_only("\n[interrupt] Ctrl+C caught — saving checkpoint...")
         try:
-            out_path = os.path.join(cfg.exp.dir, cfg.exp.name, "interrupted_model.pth")
-            system.cpu()
-            torch.save(system.audio_model.serialize(), out_path)
+            ckpt_dir = os.path.join(cfg.exp.dir, cfg.exp.name, "checkpoints")
+            os.makedirs(ckpt_dir, exist_ok=True)
+            out_path = os.path.join(ckpt_dir, "interrupted.ckpt")
+            trainer.save_checkpoint(out_path)
             print_only(f"[interrupt] Saved to {out_path}")
         except Exception as e:
             print_only(f"[interrupt] Save failed: {e}")

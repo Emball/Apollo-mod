@@ -2,6 +2,8 @@ exp:
   dir: ./runs
   name: null
 
+resume: true  # auto-resume from latest checkpoint (including interrupted.ckpt) if present
+
 optimizations:
   tf32: true
   cudnn_benchmark: true
