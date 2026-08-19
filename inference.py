@@ -100,9 +100,9 @@ def load_audio(file_path: str, target_sr: int = _SR) -> torch.Tensor:
 def save_audio(file_path: str, audio: torch.Tensor, sr: int = _SR) -> None:
     if audio.ndim == 3:
         audio = audio.squeeze(0)
-    audio = audio.cpu().clamp(-1.0, 1.0)
+    audio = audio.float().cpu()
     os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
-    torchaudio.save(file_path, audio, sr)
+    torchaudio.save(file_path, audio, sr, encoding="PCM_F", bits_per_sample=32)
     print(f"[inference] Saved -> {file_path}")
 
 
@@ -163,6 +163,14 @@ def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path):
     import soundfile as sf
     import numpy as np
 
+    # Normalize to match training: divide by peak so the model sees [-1, 1] input.
+    # Store the scale so we can restore the original level after inference.
+    peak = audio.abs().max().item()
+    if peak > 0:
+        audio = audio / peak
+    else:
+        peak = 1.0
+
     chunk_samples   = int(chunk_sec * sr)
     overlap_samples = int(overlap_sec * sr)
     hop_samples     = chunk_samples - overlap_samples
@@ -172,8 +180,9 @@ def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path):
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
 
+    # 32-bit float WAV: no integer ceiling, no clipping at ±1.0.
     with sf.SoundFile(out_path, mode="w", samplerate=sr, channels=2,
-                      subtype="PCM_24") as f:
+                      subtype="FLOAT") as f:
         start     = 0
         chunk_idx = 0
         while start < T:
@@ -182,8 +191,8 @@ def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path):
 
             with torch.no_grad():
                 enhanced = model(chunk)
-            # enhanced: [1, 2, T_chunk]
-            enhanced = enhanced.squeeze(0).cpu().clamp(-1.0, 1.0)  # [2, T_chunk]
+            # enhanced: [1, 2, T_chunk] — restore original level after inference
+            enhanced = enhanced.squeeze(0).cpu() * peak  # [2, T_chunk]
 
             chunk_len = enhanced.shape[-1]
 
@@ -278,9 +287,12 @@ def main(
         _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path=output_wav)
         print(f"[inference] Done -> {output_wav}")
     else:
+        peak = audio.abs().max().item()
+        if peak > 0:
+            audio = audio / peak
         with torch.no_grad():
             enhanced = model(audio.to(device))
-        enhanced = enhanced.cpu()
+        enhanced = enhanced.cpu() * peak
         save_audio(output_wav, enhanced, sr=sr)
 
 
