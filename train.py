@@ -76,10 +76,15 @@ _PRETRAINED_MODELS = {
 
 # Data preparation — runs before training, skips gracefully if already done
 
-def _load_wav_stereo(path: str):
-    """Load audio (WAV, MP3, FLAC), resample to _SR if needed, force stereo float32."""
+def _load_wav_stereo(path: str, frame_offset: int = 0):
+    """Load audio (WAV, MP3, FLAC), resample to _SR if needed, force stereo float32.
+
+    frame_offset: skip this many samples at the start of the file.
+    For MP3s this is passed directly to torchaudio.load so the decoder
+    seeks past the offset rather than decoding and discarding it.
+    """
     import torchaudio
-    wav, sr = torchaudio.load(path)
+    wav, sr = torchaudio.load(path, frame_offset=frame_offset)
     wav = wav.float()
     if sr != _SR:
         wav = torchaudio.functional.resample(wav, sr, _SR)
@@ -449,11 +454,15 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     for stem in matched:
         lq_path = os.path.join(lq_src, lq_files[stem])
         hq_path = os.path.join(hq_src, hq_files[stem])
-        lq_wav = _load_wav_stereo(lq_path)
-        hq_wav = _load_wav_stereo(hq_path)
-        if align and (os.path.splitext(lq_files[stem])[1].lower() != ".wav"
+        # Fixed delay: pass as frame_offset at decode time so the decoder skips
+        # the samples rather than decoding the whole file then trimming after.
+        lq_offset = fixed_delay if (align and fixed_delay is not None and fixed_delay > 0) else 0
+        hq_offset = (-fixed_delay) if (align and fixed_delay is not None and fixed_delay < 0) else 0
+        lq_wav = _load_wav_stereo(lq_path, frame_offset=lq_offset)
+        hq_wav = _load_wav_stereo(hq_path, frame_offset=hq_offset)
+        if align and fixed_delay is None and (os.path.splitext(lq_files[stem])[1].lower() != ".wav"
                 or os.path.splitext(hq_files[stem])[1].lower() != ".wav"):
-            lq_wav, hq_wav = _align_pair(lq_wav, hq_wav, stem, lq_path=lq_path, fixed_delay=fixed_delay)
+            lq_wav, hq_wav = _align_pair(lq_wav, hq_wav, stem, lq_path=lq_path, fixed_delay=None)
         saved  = _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out,
                                   cached_aug_fn=cached_aug_fn, variants=variants)
         print_only(f"[data/{split_name}]   {stem}: {len(saved)} chunks")
