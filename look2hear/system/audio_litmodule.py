@@ -92,28 +92,7 @@ class AudioLightningModule(pl.LightningModule):
 
         _apollo_mod.BSNet.forward = checkpointed_bsnet_forward
 
-        original_freqdis_forward = _dis_mod.FrequencyDiscriminator.forward
-        _HIDDENS_PER_WINDOW = 6  # FrequencyDiscriminator returns hiddens[:-1] = 6 tensors
-
-        def checkpointed_freqdis_forward(self_dis, x):
-            if not torch.is_grad_enabled():
-                return original_freqdis_forward(self_dis, x)
-
-            # Return out + all hidden tensors flat so checkpoint can handle them.
-            # Previously this ran the discriminator TWICE per call — once through
-            # checkpoint for out, once with no_grad for hiddens. That doubled the
-            # cost of every discriminator forward pass (3 calls/step × 2 = 6 passes).
-            def _inner(x_):
-                out, hiddens = original_freqdis_forward(self_dis, x_)
-                return (out,) + tuple(hiddens)
-
-            results = torch_checkpoint.checkpoint(_inner, x, use_reentrant=False)
-            out = results[0]
-            hiddens = list(results[1:])
-            return out, hiddens
-
-        _dis_mod.FrequencyDiscriminator.forward = checkpointed_freqdis_forward
-        print("[gradient_checkpointing] Enabled for BSNet layers and FrequencyDiscriminator.")
+        print("[gradient_checkpointing] Enabled for BSNet layers.")
 
     def forward(self, wav):
         return self.audio_model(wav)
@@ -192,13 +171,6 @@ class AudioLightningModule(pl.LightningModule):
         if self.trainer.is_last_batch:
             scheduler_g.step()
             scheduler_d.step()
-
-        # VRAM diagnostic — appends to vram_log.txt every 50 steps
-        if self._accum_step % 50 == 0 and torch.cuda.is_available():
-            alloc = torch.cuda.memory_allocated() / 1e9
-            reserved = torch.cuda.memory_reserved() / 1e9
-            with open("vram_log.txt", "a") as _f:
-                _f.write(f"step={self._accum_step}  allocated={alloc:.3f}GB  reserved={reserved:.3f}GB\n")
 
     def validation_step(self, batch, batch_nb):
         ori_data, codec_data = batch
