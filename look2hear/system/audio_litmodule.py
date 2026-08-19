@@ -237,16 +237,35 @@ class AudioLightningModule(pl.LightningModule):
                 os.makedirs(epoch_dir, exist_ok=True)
                 sr = 44100
 
+                # Derive a human-readable name from the val dataset
+                try:
+                    val_dataset = self.trainer.datamodule.data_val
+                    pair_idx, chunk_idx = val_dataset.index[batch_nb]
+                    lq_path = val_dataset.pairs[pair_idx][0]
+                    stem = os.path.splitext(os.path.basename(lq_path))[0]
+                    parts = stem.rsplit("_", 1)
+                    song_name = parts[0] if len(parts) == 2 and parts[1].isdigit() else stem
+                    fname_base = f"{song_name}_chunk{chunk_idx:04d}"
+                except Exception:
+                    fname_base = f"pair_{batch_nb:04d}"
+
                 out = est_sources
                 if out.ndim == 3:
                     out = out[0]
                 elif out.ndim == 1:
                     out = out.unsqueeze(0)
                 out = out.float().cpu().clamp(-1.0, 1.0)
-                torchaudio.save(
-                    os.path.join(epoch_dir, f"restored_{batch_nb:04d}.wav"),
-                    out, sr,
-                )
+                torchaudio.save(os.path.join(epoch_dir, f"{fname_base}_restored.wav"), out, sr)
+
+                # Save LQ and HQ alongside for easy A/B comparison
+                try:
+                    lq_t, hq_t = mixtures[0], targets[0]
+                    if lq_t.ndim == 1: lq_t = lq_t.unsqueeze(0)
+                    if hq_t.ndim == 1: hq_t = hq_t.unsqueeze(0)
+                    torchaudio.save(os.path.join(epoch_dir, f"{fname_base}_lq.wav"), lq_t.float().cpu().clamp(-1.0, 1.0), sr)
+                    torchaudio.save(os.path.join(epoch_dir, f"{fname_base}_hq.wav"), hq_t.float().cpu().clamp(-1.0, 1.0), sr)
+                except Exception:
+                    pass
 
         return {"val_loss": loss}
 
@@ -267,17 +286,22 @@ class AudioLightningModule(pl.LightningModule):
                 song_batches[song_key].append(batch_nb)
 
             songs = list(song_batches.keys())
-            n = min(self.val_audio_pairs, sum(len(v) for v in song_batches.values()))
+            total = sum(len(v) for v in song_batches.values())
 
-            # Guarantee 1 random batch per song, then fill remainder from the full pool
-            selected = [random.choice(song_batches[s]) for s in songs]
-            already = set(selected)
-            remainder = [nb for nb in self._val_batch_index if nb not in already]
-            still_needed = max(0, n - len(selected))
-            selected += random.sample(remainder, min(still_needed, len(remainder)))
-
-            self._val_audio_indices = set(selected)
-            print(f"[val audio] Locked indices ({len(self._val_audio_indices)} randomly sampled across {len(songs)} songs): {sorted(self._val_audio_indices)}")
+            if self.val_audio_pairs == 0:
+                # 0 means save all pairs
+                self._val_audio_indices = set(self._val_batch_index.keys())
+                print(f"[val audio] Saving all {len(self._val_audio_indices)} val pairs across {len(songs)} songs")
+            else:
+                n = min(self.val_audio_pairs, total)
+                # Guarantee 1 random batch per song, then fill remainder from the full pool
+                selected = [random.choice(song_batches[s]) for s in songs]
+                already = set(selected)
+                remainder = [nb for nb in self._val_batch_index if nb not in already]
+                still_needed = max(0, n - len(selected))
+                selected += random.sample(remainder, min(still_needed, len(remainder)))
+                self._val_audio_indices = set(selected)
+                print(f"[val audio] Locked indices ({len(self._val_audio_indices)} randomly sampled across {len(songs)} songs): {sorted(self._val_audio_indices)}")
 
     def test_step(self, batch, batch_nb):
         mixtures, targets = batch
