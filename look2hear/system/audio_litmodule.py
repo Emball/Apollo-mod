@@ -193,6 +193,13 @@ class AudioLightningModule(pl.LightningModule):
             scheduler_g.step()
             scheduler_d.step()
 
+        # VRAM diagnostic — prints every 50 steps so we can see what's growing
+        if self._accum_step % 50 == 0 and torch.cuda.is_available():
+            alloc = torch.cuda.memory_allocated() / 1e9
+            reserved = torch.cuda.memory_reserved() / 1e9
+            import sys
+            print(f"\n[VRAM step={self._accum_step}] allocated={alloc:.2f}GB  reserved={reserved:.2f}GB", file=sys.stderr, flush=True)
+
     def validation_step(self, batch, batch_nb):
         ori_data, codec_data = batch
         est_sources = self(codec_data)
