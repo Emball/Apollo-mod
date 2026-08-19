@@ -35,6 +35,7 @@ torch-mir-eval==0.4
 fast-bss-eval==0.1.4
 
 # Misc
+psutil
 sympy==1.12
 packaging==23.2
 setuptools

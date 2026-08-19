@@ -7,6 +7,7 @@ optimizations:
   cudnn_benchmark: true
   expandable_segments: true
   triton_cache: true
+  ram_limit_fraction: 0.90  # kill process cleanly at this fraction of total system RAM
 training:
   n_layers_to_freeze: 4
   hf_boost: 1.5

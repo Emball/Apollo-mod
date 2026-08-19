@@ -46,6 +46,44 @@ def apply_optimizations(cfg: DictConfig) -> None:
     # Misc env flags
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+    # RAM watchdog — kills the process cleanly if system RAM crosses the threshold
+    # before the OS does it violently. Threshold is a fraction of total RAM (default 90%).
+    ram_limit = opt.get("ram_limit_fraction", 0.90)
+    _start_ram_watchdog(ram_limit)
+
+
+def _start_ram_watchdog(limit_fraction: float = 0.90) -> None:
+    """Background thread that monitors system RAM and exits cleanly if usage
+    crosses limit_fraction of total RAM. Prevents OS-level crashes from
+    DataLoader workers or CUDA allocator runaway."""
+    import threading
+    try:
+        import psutil
+    except ImportError:
+        print_only("[watchdog] psutil not installed — RAM watchdog disabled. "
+                   "Run: pip install psutil")
+        return
+
+    total = psutil.virtual_memory().total
+    threshold = total * limit_fraction
+    threshold_gb = threshold / (1024 ** 3)
+    print_only(f"[watchdog] RAM watchdog active — will exit cleanly above "
+               f"{threshold_gb:.1f} GB ({limit_fraction*100:.0f}% of total)")
+
+    def _watch():
+        import time
+        while True:
+            used = psutil.virtual_memory().used
+            if used >= threshold:
+                used_gb = used / (1024 ** 3)
+                print_only(f"\n[watchdog] SYSTEM RAM CRITICAL: {used_gb:.1f} GB used "
+                            f"(threshold {threshold_gb:.1f} GB) — exiting cleanly to protect OS")
+                os._exit(1)
+            time.sleep(2)
+
+    t = threading.Thread(target=_watch, daemon=True)
+    t.start()
+
 import look2hear.system
 import look2hear.datas
 import look2hear.losses
@@ -848,7 +886,17 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         logger=logger,
     )
 
-    trainer.fit(system, datamodule=datamodule, ckpt_path=ckpt_path)
+    try:
+        trainer.fit(system, datamodule=datamodule, ckpt_path=ckpt_path)
+    except torch.cuda.OutOfMemoryError as e:
+        print_only(f"\n[OOM] CUDA out of memory — exiting cleanly. Try reducing batch_size or num_workers.")
+        print_only(f"[OOM] {e}")
+        torch.cuda.empty_cache()
+        os._exit(1)
+    except MemoryError as e:
+        print_only(f"\n[OOM] System RAM exhausted — exiting cleanly.")
+        print_only(f"[OOM] {e}")
+        os._exit(1)
     print_only("Training finished!")
 
     best_k = {k: v.item() for k, v in checkpoint.best_k_models.items()}
