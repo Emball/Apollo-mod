@@ -149,7 +149,6 @@ class AudioLightningModule(pl.LightningModule):
             [f.detach() for f in fmap] for fmap in targets_feature_maps
         ]
         del est_outputs_d, target_outputs
-        torch.cuda.empty_cache()
 
         # Generator update
         for p in self.discriminator.parameters():
