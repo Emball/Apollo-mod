@@ -929,7 +929,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             step = trainer.global_step
             try:
                 val_loss = trainer.callback_metrics.get("val_loss", None)
-                loss_str = f"-val_loss={val_loss:.4f}" if val_loss is not None else ""
+                loss_str = f"-{val_loss:.4f}" if val_loss is not None else ""
             except Exception:
                 loss_str = ""
             out_path = os.path.join(ckpt_dir, f"{step:06d}{loss_str}.ckpt")
