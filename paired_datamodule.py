@@ -399,13 +399,10 @@ class FullLengthPairDataset(Dataset):
         self.segment_samples = int(segment_sec * sr)
         self.hop_samples     = self.segment_samples // 2
 
-        self.index  = []
-        self._cache = {}
+        self.index = []
         for pair_idx, (lq_path, hq_path) in enumerate(self.pairs):
-            lq = load_wav(lq_path, sr)
-            hq = load_wav(hq_path, sr)
-            min_len = min(lq.shape[-1], hq.shape[-1])
-            self._cache[pair_idx] = (lq[:, :min_len], hq[:, :min_len])
+            info = torchaudio.info(lq_path)
+            min_len = info.num_frames
             start = 0
             while start + self.segment_samples <= min_len:
                 self.index.append((pair_idx, start))
@@ -418,10 +415,12 @@ class FullLengthPairDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         pair_idx, start = self.index[idx]
-        lq, hq = self._cache[pair_idx]
-        lq_chunk = lq[:, start:start + self.segment_samples]
-        hq_chunk = hq[:, start:start + self.segment_samples]
-        lq_chunk, hq_chunk = normalize_pair(lq_chunk, hq_chunk)
+        lq_path, hq_path = self.pairs[pair_idx]
+        lq, _ = torchaudio.load(lq_path, frame_offset=start, num_frames=self.segment_samples)
+        hq, _ = torchaudio.load(hq_path, frame_offset=start, num_frames=self.segment_samples)
+        if lq.shape[0] == 1: lq = lq.repeat(2, 1)
+        if hq.shape[0] == 1: hq = hq.repeat(2, 1)
+        lq_chunk, hq_chunk = normalize_pair(lq, hq)
         return hq_chunk, lq_chunk
 
 # DataModule

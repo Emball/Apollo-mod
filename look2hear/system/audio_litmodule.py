@@ -68,6 +68,7 @@ class AudioLightningModule(pl.LightningModule):
         self.validation_step_outputs = []
         self.test_step_outputs = []
         self.automatic_optimization = False
+        self._amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16)
 
     def _enable_gradient_checkpointing(self):
         """
@@ -126,7 +127,7 @@ class AudioLightningModule(pl.LightningModule):
         # Mixed precision context
         # Explicit autocast ensures every sub-op (STFT, conv, attention) runs
         # in fp16 rather than relying on implicit casting from Lightning alone.
-        amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16)
+        amp_ctx = self._amp_ctx
 
         with amp_ctx:
             output = self(codec_data)
@@ -210,7 +211,10 @@ class AudioLightningModule(pl.LightningModule):
                 sample_idx = min(batch_nb * batch_size, len(val_dataset.index) - 1)
                 pair_idx, _ = val_dataset.index[sample_idx]
                 lq_path = val_dataset.pairs[pair_idx][0]
-                song_key = os.path.splitext(os.path.basename(lq_path))[0]
+                stem = os.path.splitext(os.path.basename(lq_path))[0]
+                # Strip trailing _chunk#### suffix so all chunks of a song group together
+                import re as _re
+                song_key = _re.sub(r'_chunk\d+$', '', stem)
             except Exception:
                 song_key = str(batch_nb)
             self._val_batch_index[batch_nb] = song_key
@@ -251,7 +255,8 @@ class AudioLightningModule(pl.LightningModule):
 
                 # Save LQ and HQ alongside for easy A/B comparison
                 try:
-                    lq_t, hq_t = mixtures[0], targets[0]
+                    lq_t = codec_data[0]
+                    hq_t = ori_data[0]
                     if lq_t.ndim == 1: lq_t = lq_t.unsqueeze(0)
                     if hq_t.ndim == 1: hq_t = hq_t.unsqueeze(0)
                     torchaudio.save(os.path.join(epoch_dir, f"{fname_base}_lq.wav"), lq_t.float().cpu().clamp(-1.0, 1.0), sr)
