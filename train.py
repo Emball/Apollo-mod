@@ -72,6 +72,7 @@ def _start_ram_watchdog(limit_fraction: float = 0.90) -> None:
 
     def _watch():
         import time
+        time.sleep(30)  # wait for DataLoader workers to finish spawning
         while True:
             used = psutil.virtual_memory().used
             if used >= threshold:
