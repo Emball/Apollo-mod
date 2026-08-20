@@ -287,16 +287,24 @@ class AudioLightningModule(pl.LightningModule):
         # Perceptual metrics -- computed on CPU to avoid VRAM overhead
         try:
             with torch.no_grad():
+                # est_sources shape: (B, C, T) or (C, T)
                 est_cpu = est_sources.float().cpu()
                 ref_cpu = ori_data.float().cpu()
-                # use first batch item only for speed
+                # ensure (C, T) -- take first batch item if batched
                 e = est_cpu[0] if est_cpu.ndim == 3 else est_cpu
                 r = ref_cpu[0] if ref_cpu.ndim == 3 else ref_cpu
+                # ensure 2D (C, T)
+                if e.ndim == 1:
+                    e = e.unsqueeze(0)
+                if r.ndim == 1:
+                    r = r.unsqueeze(0)
                 self._val_msstft_sum += _ms_log_stft_loss(e, r)
                 self._val_sfr_sum    += _spectral_flatness_ratio(e, r)
                 self._val_perc_count += 1
-        except Exception:
-            pass
+        except Exception as _perc_err:
+            if not getattr(self, "_perc_err_logged", False):
+                print(f"[val metrics] perceptual metric error (suppressed after first): {_perc_err}")
+                self._perc_err_logged = True
 
         return {"val_loss": loss}
 
