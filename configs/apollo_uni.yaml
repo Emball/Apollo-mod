@@ -24,7 +24,7 @@ datas:
   num_workers: 8
   pin_memory: false
   val_bootstrap_chunks: 15
-  align_data: true  # true = auto-detect, false = off, integer = fixed offset in samples (+ trims LQ, - trims HQ)
+  align_data: false  # integer = fixed offset in samples (+ trims LQ, - trims HQ), false = off
   augmentation:
     live:
       enabled: true

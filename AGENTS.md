@@ -28,7 +28,7 @@ Read `README.md` for usage, config reference, data layout, commands, and augment
 
 **Val index locking:** After the first real val run, a set of dataset indices is locked and persisted in the checkpoint. On resume, the same reference chunks are used. Val dataloader shuffles each run — locked chunks only appear in audio output when drawn in the current batch.
 
-**Alignment:** Runs at chunk time. Fixed offset (`align_data: 1057`) trims via `frame_offset` — no decode overhead. Auto mode tries LAME header via mutagen, falls back to xcorr — unreliable on music. Negative values trim HQ instead of LQ.
+**Alignment:** Runs at chunk time. `align_data` accepts an integer offset in samples — positive trims LQ, negative trims HQ. Applied via `frame_offset` at decode time, no extra memory cost. iTunes-encoded MP3s have a consistent 1057-sample encoder delay. Set `false` to disable.
 
 **Augmentation internals:** `normalize_pair` scales by joint peak — pre-existing flat-top clipping is preserved as valid training signal, not clamped away. `stereo_alternation` picks L or R by sample index (even → L, odd → R) — `prob: 1.0` alternates systematically, does not randomly collapse to mono.
 

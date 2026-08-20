@@ -42,6 +42,5 @@ setuptools
 bitsandbytes>=0.43.0; sys_platform != 'darwin'
 
 # Augmentation
-mutagen
 ffmpeg-python
 

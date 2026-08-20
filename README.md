@@ -129,7 +129,7 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 | `batch_size` | Chunks per step. `1` is a good starting point to test where your VRAM sits before attempting to increase it. If you have a newer generation GPU with more than 11 GB of memory, starting with `2` for testing is likely the better move. |
 | `num_workers` | DataLoader workers. `2-4` is recommended on 16 GB RAM. Increasing beyond that seems to cause severe lag and memory issues. If you have more RAM, you can likely push it closer to your core count. |
 | `pin_memory` | Set `false` on 16 GB systems. Pinned memory cannot be swapped and causes instability under memory pressure. Worth experimenting with if you have more memory. |
-| `align_data` | Offset the MP3 chunks by a set number of samples either backwards or forwards. This can be used to correct for delay introduced by the encoding process of LQ data, but only really works if the delay is consistent across your entire dataset. |
+| `align_data` | Fixed sample offset to compensate for encoder delay. Positive trims LQ, negative trims HQ. iTunes-encoded MP3s use `1057`. Set `false` to disable. Only reliable when the delay is consistent across your entire dataset. |
 
 ### Augmentation
 

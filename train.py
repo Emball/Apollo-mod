@@ -142,65 +142,14 @@ def _load_wav_stereo(path: str, frame_offset: int = 0):
     return wav
 
 
-def _read_lame_delay(mp3_path: str) -> int:
-    """Read encoder delay from the LAME/Xing header of an MP3 file.
-    Returns the delay in samples, or -1 if not found.
-    """
-    try:
-        from mutagen.mp3 import MP3
-        audio = MP3(mp3_path)
-        # LAME tag lives in the Xing/Info frame as encoder_delay
-        if hasattr(audio, 'info') and hasattr(audio.info, 'encoder_delay'):
-            delay = audio.info.encoder_delay
-            if delay is not None and delay >= 0:
-                return int(delay)
-    except Exception:
-        pass
-    return -1
-
-
-def _align_pair(lq: "torch.Tensor", hq: "torch.Tensor", stem: str, lq_path: str = "", fixed_delay: int = None) -> tuple:
-    """Align LQ to HQ using a fixed sample offset.
-
-    If fixed_delay is set: trim that many samples from LQ (positive) or HQ (negative).
-    Otherwise: auto-detect via LAME header, with xcorr fallback.
-    """
-    import torch
-    import torch.nn.functional as F
-
-    if fixed_delay is not None:
-        delay = fixed_delay
-        print_only(f"[align] {stem}: fixed delay = {delay} samples")
-    else:
-        delay = -1
-
-        # Primary: read LAME tag from MP3 header
-        if lq_path.lower().endswith(".mp3"):
-            delay = _read_lame_delay(lq_path)
-            if delay >= 0:
-                print_only(f"[align] {stem}: LAME header delay = {delay} samples — trimmed LQ")
-
-        # Fallback: small-window pattern xcorr
-        if delay < 0:
-            PATTERN_SIZE  = 2048
-            SEARCH_WINDOW = 8192
-            hq_pat = hq[0, :PATTERN_SIZE].double()
-            lq_win = lq[0, :SEARCH_WINDOW].double()
-            hq_pat = hq_pat / (hq_pat.std() + 1e-8)
-            lq_win = lq_win / (lq_win.std() + 1e-8)
-            corr = F.conv1d(
-                lq_win.view(1, 1, -1),
-                hq_pat.flip(0).view(1, 1, -1),
-                padding=0
-            ).squeeze()
-            delay = int(corr.argmax().item())
-            print_only(f"[align] {stem}: no LAME tag — xcorr delay = {delay} samples — trimmed LQ")
-
-    if delay > 0:
-        lq = lq[:, delay:]
-    elif delay < 0:
-        hq = hq[:, abs(delay):]
-
+def _align_pair(lq: "torch.Tensor", hq: "torch.Tensor", stem: str, fixed_delay: int = 0) -> tuple:
+    """Trim a fixed sample offset from LQ (positive) or HQ (negative) to compensate for encoder delay."""
+    if fixed_delay > 0:
+        lq = lq[:, fixed_delay:]
+        print_only(f"[align] {stem}: trimmed {fixed_delay} samples from LQ")
+    elif fixed_delay < 0:
+        hq = hq[:, abs(fixed_delay):]
+        print_only(f"[align] {stem}: trimmed {abs(fixed_delay)} samples from HQ")
     min_len = min(lq.shape[-1], hq.shape[-1])
     return lq[:, :min_len], hq[:, :min_len]
 
@@ -443,7 +392,7 @@ def _build_cached_aug_fn(cfg: "DictConfig"):
 
     return _apply
 
-def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=None, variants: int = 1, align: bool = True, fixed_delay: int = None) -> int:
+def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=None, variants: int = 1, fixed_delay: int = None) -> int:
     """
     Normalize src_root into LQ/ + HQ/ layout (if not already), then chunk all
     matched pairs into dst_root/LQ and dst_root/HQ.
@@ -520,13 +469,10 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         hq_path = os.path.join(hq_src, hq_files[stem])
         # Fixed delay: pass as frame_offset at decode time so the decoder skips
         # the samples rather than decoding the whole file then trimming after.
-        lq_offset = fixed_delay if (align and fixed_delay is not None and fixed_delay > 0) else 0
-        hq_offset = (-fixed_delay) if (align and fixed_delay is not None and fixed_delay < 0) else 0
+        lq_offset = fixed_delay if (fixed_delay is not None and fixed_delay > 0) else 0
+        hq_offset = (-fixed_delay) if (fixed_delay is not None and fixed_delay < 0) else 0
         lq_wav = _load_wav_stereo(lq_path, frame_offset=lq_offset)
         hq_wav = _load_wav_stereo(hq_path, frame_offset=hq_offset)
-        if align and fixed_delay is None and (os.path.splitext(lq_files[stem])[1].lower() != ".wav"
-                or os.path.splitext(hq_files[stem])[1].lower() != ".wav"):
-            lq_wav, hq_wav = _align_pair(lq_wav, hq_wav, stem, lq_path=lq_path, fixed_delay=None)
         saved  = _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out,
                                   cached_aug_fn=cached_aug_fn, variants=variants)
         print_only(f"[data/{split_name}]   {stem}: {len(saved)} chunks")
@@ -573,19 +519,14 @@ def prepare_data(cfg: DictConfig) -> None:
     variants      = int(getattr(getattr(cfg.datas, "augmentation", {}), "cached_variants", 1)
                         if hasattr(getattr(cfg.datas, "augmentation", None) or {}, "cached_variants")
                         else 1)
-    _align_raw    = getattr(cfg.datas, "align_data", True)
-    if isinstance(_align_raw, int) and not isinstance(_align_raw, bool):
-        align       = True
+    _align_raw    = getattr(cfg.datas, "align_data", False)
+    if isinstance(_align_raw, int) and not isinstance(_align_raw, bool) and _align_raw != 0:
         fixed_delay = int(_align_raw)
-    elif _align_raw is True or _align_raw == "true":
-        align       = True
-        fixed_delay = None
     else:
-        align       = False
         fixed_delay = None
 
-    _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, variants=variants, align=align, fixed_delay=fixed_delay)
-    _chunk_split(data_val,   val_chunks,   "val",   cached_aug_fn=None,          variants=1,        align=align, fixed_delay=fixed_delay)
+    _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, variants=variants, fixed_delay=fixed_delay)
+    _chunk_split(data_val,   val_chunks,   "val",   cached_aug_fn=None,          variants=1,        fixed_delay=fixed_delay)
 
     # Val bootstrap from train chunks
     # If val is still empty after chunking (no data/val source exists),
