@@ -279,6 +279,20 @@ class AudioLightningModule(pl.LightningModule):
             self._val_audio_indices = set(selected)
             print(f"[val audio] Locked indices ({len(self._val_audio_indices)} randomly sampled across {len(songs)} songs): {sorted(self._val_audio_indices)}")
 
+    def on_load_checkpoint(self, checkpoint: dict) -> None:
+        # Strip keys that exist in checkpoints saved by newer code but not in
+        # this version of the model (e.g. hann buffers registered in 0.1.8.x).
+        sd = checkpoint.get("state_dict", {})
+        unexpected = [k for k in list(sd.keys()) if
+                      any(k.startswith(p) for p in [
+                          "loss_func.g.hann_", "loss_func.g.weights_",
+                          "loss_func.d.hann_", "loss_func.d.weights_",
+                          "discriminator.hann_",
+                      ])]
+        for k in unexpected:
+            del sd[k]
+        checkpoint["state_dict"] = sd
+
     def test_step(self, batch, batch_nb):
         mixtures, targets = batch
         est_sources = self(mixtures)
