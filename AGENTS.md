@@ -26,7 +26,9 @@ Read `README.md` for usage, config reference, data layout, commands, and augment
 
 **Run isolation:** Each fresh run creates `runs/<name>/<timestamp>/`. Resume finds the most recently modified timestamped subfolder with a `checkpoints/` dir and picks the newest `.ckpt` inside.
 
-**Val index locking:** After the first real val run, a set of dataset indices is locked and persisted in the checkpoint. On resume, the same reference chunks are used. Val dataloader shuffles each run — locked chunks only appear in audio output when drawn in the current batch.
+**Val index locking:** After the first real val run, `_val_locked_refs` stores the actual file paths and sample offsets for `val_audio_pairs` reference chunks (one per song where possible). These are persisted in the checkpoint. Every val epoch, `_save_val_audio` loads them directly from disk and runs them through the model — guaranteed output every run, independent of the dataloader shuffle. LQ and HQ files are copied alongside the restored output as triplets.
+
+**Step printer:** TQDM is disabled. `StepPrinter` in `train.py` prints one line per batch with wall-clock measured it/s. Val time is excluded from the rate calculation so it/s stays accurate before and after val runs. On resume mid-epoch, the timer starts from the first batch of the new session.
 
 **Alignment:** Runs at chunk time. `align_data` accepts an integer offset in samples — positive trims LQ, negative trims HQ. Applied via `frame_offset` at decode time, no extra memory cost. iTunes-encoded MP3s have a consistent 1057-sample encoder delay. Set `false` to disable.
 
