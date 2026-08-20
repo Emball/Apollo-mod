@@ -26,7 +26,11 @@ Read `README.md` for usage, config reference, data layout, commands, and augment
 
 **Run isolation:** Each fresh run creates `runs/<name>/<timestamp>/`. Resume finds the most recently modified timestamped subfolder with a `checkpoints/` dir and picks the newest `.ckpt` inside.
 
-**Val index locking:** After the first real val run, `_val_locked_refs` stores the actual file paths and sample offsets for `val_audio_pairs` reference chunks (one per song where possible). These are persisted in the checkpoint. Every val epoch, `_save_val_audio` loads them directly from disk and runs them through the model — guaranteed output every run, independent of the dataloader shuffle. LQ and HQ files are copied alongside the restored output as triplets.
+**Val fixed evaluation set:** On the first real val run, `_lock_val_fixed_indices` randomly samples `limit_val_batches` dataset indices from all chunks seen in that run and locks them into `_val_fixed_indices`. All subsequent val runs skip any chunk whose dataset index is not in this set — the loss is always computed on the same fixed chunks, making it perfectly comparable across checkpoints. Both `_val_fixed_indices` and `_val_locked_refs` are persisted in the checkpoint and restored on resume.
+
+**Val audio refs:** `_val_locked_refs` stores file paths and sample offsets for `val_audio_pairs` reference chunks (one per song where possible), drawn from the fixed index set. Every val epoch, `_save_val_audio` loads them directly from disk and saves LQ/HQ/Restored triplets.
+
+**Planned — hard example mining:** Future enhancement to replace the random fixed-set selection with a difficulty-ranked selection. On first val run, score all chunks by SI-SDR loss, lock the N hardest as the fixed evaluation set. Harder chunks give a more sensitive signal for detecting genuine model improvement vs easy material that saturates early. Implementation deferred — current dataset is homogeneous enough that random selection is sufficient.
 
 **Step printer:** TQDM is disabled. `StepPrinter` in `train.py` prints one line per batch with wall-clock measured it/s. Val time is excluded from the rate calculation so it/s stays accurate before and after val runs. On resume mid-epoch, the timer starts from the first batch of the new session.
 

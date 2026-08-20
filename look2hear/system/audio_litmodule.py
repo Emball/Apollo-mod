@@ -54,7 +54,8 @@ class AudioLightningModule(pl.LightningModule):
         self.val_save_interval = val_save_interval
         self.val_audio_dir = val_audio_dir
         self.val_audio_pairs = val_audio_pairs
-        self._val_locked_refs = None  # list of (song_key, lq_path, hq_path, start, seg_samples)
+        self._val_locked_refs    = None  # list of (song_key, lq_path, hq_path, start, seg_samples)
+        self._val_fixed_indices  = None  # locked dataset indices for loss computation
         self.gradient_checkpointing = gradient_checkpointing
         self.grad_accum_steps = max(1, grad_accum_steps)
         self._accum_loss_g = None
@@ -205,6 +206,21 @@ class AudioLightningModule(pl.LightningModule):
         ds_idx   = int(ds_idx[0])
         song_key = song_key[0] if isinstance(song_key, (list, tuple)) else song_key
 
+        if self.trainer.sanity_checking:
+            est_sources = self(codec_data)
+            loss = self.metrics(est_sources, ori_data)
+            return {"val_loss": loss}
+
+        # First run: collect all seen indices for locking later
+        if self._val_fixed_indices is None:
+            if not hasattr(self, '_val_seen_indices'):
+                self._val_seen_indices = []
+            self._val_seen_indices.append(ds_idx)
+
+        # Once locked, skip chunks not in the fixed set
+        if self._val_fixed_indices is not None and ds_idx not in self._val_fixed_indices:
+            return {"val_loss": None}
+
         est_sources = self(codec_data)
         loss = self.metrics(est_sources, ori_data)
 
@@ -212,33 +228,46 @@ class AudioLightningModule(pl.LightningModule):
         self._val_loss_count += 1
         self.validation_step_outputs.append(float(loss))
 
-        # On the first real val run, collect one ds_idx per song for locking.
-        if not self.trainer.sanity_checking and self._val_locked_refs is None:
-            if not hasattr(self, '_val_seen'):
-                self._val_seen = {}
-            if song_key not in self._val_seen:
-                self._val_seen[song_key] = ds_idx
-
         return {"val_loss": loss}
 
-    def _lock_val_refs(self):
-        """Pick one chunk per song from _val_seen, store file paths for direct loading."""
+    def _lock_val_fixed_indices(self):
+        """Randomly select limit_val_batches indices from seen indices, lock for all future runs."""
         import random
-        from collections import defaultdict
-
-        dataset = self.trainer.datamodule.data_val
-        seen = getattr(self, '_val_seen', {})
+        seen = getattr(self, '_val_seen_indices', [])
         if not seen:
             return
+        n = min(self.trainer.limit_val_batches if isinstance(self.trainer.limit_val_batches, int)
+                else int(self.trainer.limit_val_batches * len(self.trainer.datamodule.data_val)),
+                len(seen))
+        self._val_fixed_indices = set(random.sample(seen, n))
+        print(f"[val] Locked {len(self._val_fixed_indices)} fixed evaluation indices.")
 
-        # One per song, up to val_audio_pairs total
-        songs = list(seen.keys())
+    def _lock_val_refs(self):
+        """Pick one chunk per song from fixed indices, store file paths for direct loading."""
+        import random
+
+        dataset = self.trainer.datamodule.data_val
+        fixed = self._val_fixed_indices or set()
+        if not fixed:
+            return
+
+        # Group fixed indices by song
+        by_song = {}
+        for ds_idx in fixed:
+            pair_idx, _ = dataset.index[ds_idx]
+            _, hq_path = dataset.pairs[pair_idx]
+            song_key = os.path.splitext(os.path.basename(hq_path))[0]
+            if song_key not in by_song:
+                by_song[song_key] = []
+            by_song[song_key].append(ds_idx)
+
+        songs = list(by_song.keys())
         random.shuffle(songs)
         chosen_songs = songs[:self.val_audio_pairs]
 
         refs = []
         for song_key in chosen_songs:
-            ds_idx = seen[song_key]
+            ds_idx = random.choice(by_song[song_key])
             pair_idx, start = dataset.index[ds_idx]
             lq_path, hq_path = dataset.pairs[pair_idx]
             seg_samples = dataset.segment_samples
@@ -300,16 +329,22 @@ class AudioLightningModule(pl.LightningModule):
         if self.trainer.sanity_checking:
             return
 
+        # First real val run: lock fixed evaluation indices, then audio refs
+        if self._val_fixed_indices is None:
+            self._lock_val_fixed_indices()
+
         if self._val_locked_refs is None:
             self._lock_val_refs()
 
         self._save_val_audio()
 
     def on_save_checkpoint(self, checkpoint: dict) -> None:
-        checkpoint["val_locked_refs"] = self._val_locked_refs
+        checkpoint["val_locked_refs"]   = self._val_locked_refs
+        checkpoint["val_fixed_indices"] = self._val_fixed_indices
 
     def on_load_checkpoint(self, checkpoint: dict) -> None:
-        self._val_locked_refs = checkpoint.get("val_locked_refs", None)
+        self._val_locked_refs   = checkpoint.get("val_locked_refs", None)
+        self._val_fixed_indices = checkpoint.get("val_fixed_indices", None)
 
         # Strip state_dict keys from older checkpoints that no longer exist in model.
         sd = checkpoint.get("state_dict", {})
