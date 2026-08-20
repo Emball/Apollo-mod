@@ -471,7 +471,7 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     hq_offset = (-fixed_delay) if (fixed_delay is not None and fixed_delay < 0) else 0
 
     # Parallel workers: I/O-bound so threads are correct (no pickle needed, GIL released on disk writes)
-    n_workers = min(len(matched), (_mp.cpu_count() or 4), 8)
+    n_workers = min(len(matched), 4)
     print_lock = threading.Lock()
     total = 0
 
