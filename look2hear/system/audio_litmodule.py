@@ -29,6 +29,56 @@ def flatten_dict(d, parent_key="", sep="_"):
             items.append((new_key, v))
     return dict(items)
 
+def _ms_log_stft_loss(est: "torch.Tensor", ref: "torch.Tensor") -> float:
+    """Multi-scale log-magnitude STFT loss. Lower = better match to HQ."""
+    import torch, math
+    windows = [512, 1024, 2048]
+    total = 0.0
+    for n_fft in windows:
+        hop = n_fft // 4
+        win = torch.hann_window(n_fft, device=est.device)
+        def _mag(x):
+            # x: (C, T) -> (C, F, frames)
+            return torch.stft(x.reshape(-1, x.shape[-1]),
+                              n_fft=n_fft, hop_length=hop, win_length=n_fft,
+                              window=win, return_complex=True).abs()
+        e_mag = _mag(est)
+        r_mag = _mag(ref)
+        eps = 1e-7
+        total += torch.mean(torch.abs(torch.log(e_mag + eps) - torch.log(r_mag + eps))).item()
+    return total / len(windows)
+
+
+def _spectral_flatness_ratio(est: "torch.Tensor", ref: "torch.Tensor", sr: int = 44100) -> float:
+    """
+    Spectral flatness ratio in the 8-22 kHz band: est_flatness / ref_flatness.
+    > 1.0 means the restored signal is noisier than HQ in the high band.
+    Rising over training checkpoints = overfitting / noise injection.
+    """
+    import torch, math
+    n_fft = 2048
+    hop   = 512
+    win   = torch.hann_window(n_fft, device=est.device)
+    # frequency bin range for 8-22 kHz
+    bin_lo = int(8000  / (sr / n_fft))
+    bin_hi = int(22000 / (sr / n_fft))
+    bin_hi = min(bin_hi, n_fft // 2)
+
+    def _flatness(x):
+        mag = torch.stft(x.reshape(-1, x.shape[-1]),
+                         n_fft=n_fft, hop_length=hop, win_length=n_fft,
+                         window=win, return_complex=True).abs()
+        band = mag[:, bin_lo:bin_hi, :].clamp(min=1e-10)
+        log_mean = band.log().mean()
+        arith_mean = band.mean().log()
+        return (log_mean - arith_mean).exp().item()  # geometric/arithmetic = flatness
+
+    eps = 1e-8
+    est_f = _flatness(est) + eps
+    ref_f = _flatness(ref) + eps
+    return est_f / ref_f
+
+
 class AudioLightningModule(pl.LightningModule):
     def __init__(
         self,
@@ -63,6 +113,9 @@ class AudioLightningModule(pl.LightningModule):
         self._accum_step   = 0
         self._val_loss_sum   = 0.0
         self._val_loss_count = 0
+        self._val_msstft_sum  = 0.0
+        self._val_sfr_sum     = 0.0
+        self._val_perc_count  = 0
 
         if gradient_checkpointing:
             self._enable_gradient_checkpointing()
@@ -228,6 +281,20 @@ class AudioLightningModule(pl.LightningModule):
         self._val_loss_count += 1
         self.validation_step_outputs.append(float(loss))
 
+        # Perceptual metrics — computed on CPU to avoid VRAM overhead
+        try:
+            with torch.no_grad():
+                est_cpu = est_sources.float().cpu()
+                ref_cpu = ori_data.float().cpu()
+                # use first batch item only for speed
+                e = est_cpu[0] if est_cpu.ndim == 3 else est_cpu
+                r = ref_cpu[0] if ref_cpu.ndim == 3 else ref_cpu
+                self._val_msstft_sum += _ms_log_stft_loss(e, r)
+                self._val_sfr_sum    += _spectral_flatness_ratio(e, r)
+                self._val_perc_count += 1
+        except Exception:
+            pass
+
         return {"val_loss": loss}
 
     def _lock_val_fixed_indices(self):
@@ -341,6 +408,16 @@ class AudioLightningModule(pl.LightningModule):
             self.log("val_loss", avg_val_loss, prog_bar=True, logger=True)
         self._val_loss_sum   = 0.0
         self._val_loss_count = 0
+        if self._val_perc_count > 0:
+            avg_msstft = self._val_msstft_sum / self._val_perc_count
+            avg_sfr    = self._val_sfr_sum    / self._val_perc_count
+            self.log("val_msstft", avg_msstft, prog_bar=False, logger=True)
+            self.log("val_sfr",    avg_sfr,    prog_bar=False, logger=True)
+            print(f"[val] msstft={avg_msstft:.4f}  sfr={avg_sfr:.4f}  "
+                  f"({'noise↑' if avg_sfr > 1.05 else 'clean'})")
+        self._val_msstft_sum  = 0.0
+        self._val_sfr_sum     = 0.0
+        self._val_perc_count  = 0
         self.log("lr", self.optimizer[0].param_groups[0]["lr"], prog_bar=True)
         self.validation_step_outputs.clear()
 

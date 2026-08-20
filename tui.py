@@ -152,20 +152,8 @@ def _menu(
 def _navigate(items: list[str], title: str, hint: str = "", subtitle: str = "", start: int = 0) -> int | None:
     """Show a menu and return selected index, or None if user pressed Escape/q."""
     sel = max(0, min(start, len(items) - 1))
-    with Live(console=console, auto_refresh=False, screen=False) as live:
-        def _render():
-            live.update(
-                Table.grid()
-                .add_row(_banner_panel())
-                .__class__._from_column_and_row(  # type: ignore[attr-defined]
-                    None, None
-                ),
-                refresh=True,
-            )
-            # simpler direct approach:
-            live.update(_menu(title, items, sel, hint=hint, subtitle=subtitle), refresh=True)
-
-        _render()
+    with Live(_menu(title, items, sel, hint=hint, subtitle=subtitle),
+              console=console, auto_refresh=False, screen=False) as live:
         while True:
             ch = _getch()
             if ch in ("UP", "k"):
@@ -178,7 +166,7 @@ def _navigate(items: list[str], title: str, hint: str = "", subtitle: str = "", 
                 return None
             elif ch == "\x03":  # Ctrl+C
                 raise KeyboardInterrupt
-            _render()
+            live.update(_menu(title, items, sel, hint=hint, subtitle=subtitle), refresh=True)
     return None
 
 
