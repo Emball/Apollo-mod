@@ -107,7 +107,7 @@ def save_audio(file_path: str, audio: torch.Tensor, sr: int = _SR) -> None:
 
 
 def _load_ckpt(path: str, feature_dim: int, sr: int, win: int, layer: int):
-    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    ckpt = torch.load(path, map_location="cpu", weights_only=True)
     raw = ckpt["state_dict"]
     if any(k.startswith("audio_model.") for k in raw):
         state = {k.replace("audio_model.", ""): v

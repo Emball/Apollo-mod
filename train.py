@@ -739,7 +739,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     def _load_weights(path: str, feature_dim: int):
         """Load a .pth or .ckpt file and return an Apollo model with weights applied."""
         if path.endswith(".ckpt"):
-            ckpt = torch.load(path, map_location="cpu", weights_only=False)
+            ckpt = torch.load(path, map_location="cpu", weights_only=True)
             raw = ckpt["state_dict"]
             if any(k.startswith("audio_model.") for k in raw.keys()):
                 model_state = {k.replace("audio_model.", ""): v
@@ -965,7 +965,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     with open(os.path.join(_run_dir, "best_k_models.json"), "w") as f:
         json.dump(best_k, f, indent=0)
 
-    state_dict = torch.load(checkpoint.best_model_path)
+    state_dict = torch.load(checkpoint.best_model_path, map_location="cpu", weights_only=True)
     system.load_state_dict(state_dict=state_dict["state_dict"])
     system.cpu()
 

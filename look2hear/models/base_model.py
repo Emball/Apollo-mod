@@ -29,8 +29,8 @@ class BaseModel(nn.Module, PyTorchModelHubMixin):
         from . import get
 
         conf = torch.load(
-            pretrained_model_conf_or_path, map_location="cpu", weights_only=False
-        )  # Attempt to find the model and instantiate it.
+            pretrained_model_conf_or_path, map_location="cpu", weights_only=True
+        )
 
         model_class = get(conf["model_name"])
         # model_class = get("Conv_TasNet")
