@@ -15,6 +15,8 @@ Read `README.md` for usage, config reference, data layout, commands, and augment
 | `paired_datamodule.py` | Loads chunked LQ/HQ WAV pairs. Live + cached augmentation pipeline. Val dataloader shuffles; dataset index passed through batch for stable audio monitoring. |
 | `train.py` | Entry point. Auto-chunks `data/` on first run. Run isolation via timestamped subdirs, resume logic, chunk cache manifest. |
 | `inference.py` | Entry point. Chunked inference, streams output to disk. Auto-selects best checkpoint by val_loss when `--weights` is omitted. |
+| `tui.py` | Keyboard-navigated TUI (Rich). Launched by `apollo.bat`/`apollo.sh` with no arguments. Wraps train/inference/utilities with persistent per-config state in `.tui_state.json`. Ctrl+C during training sends SIGINT to the subprocess, triggers a clean checkpoint save, and returns to the menu. |
+| `eval_checkpoints.py` | Standalone utility. Evaluates all checkpoints against the val set, prints a ranked table (SI-SDR, msstft, sfr). `--rename` rewrites filenames with accurate loss values. |
 | `configs/apollo.yaml` | Base config (`feature_dim=256`). |
 | `configs/apollo_uni.yaml` | Universal config (`feature_dim=384`). |
 

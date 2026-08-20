@@ -80,33 +80,37 @@ After each val run the console prints a single line with all three metrics:
 
 ## Training
 
-Run the apollo.bat/.sh script to auto-launch the venv console. Then run:
+Run `apollo.bat` (Windows) or `./apollo.sh` (Linux/macOS) to open the TUI. Select **Train**, choose your config, and training starts immediately with live output in the terminal. Ctrl+C stops training cleanly, saves a checkpoint, and returns to the menu.
+
+To run directly from the command line:
 
 ```bash
 train --conf_dir configs/apollo_name.yaml
 ```
 
-Each run creates a timestamped folder under `runs/<name>/<timestamp>/`. Set `resume: true` in your config to continue from the most recent checkpoint automatically. Ctrl+C saves a checkpoint before exiting.
+Each run creates a timestamped folder under `runs/<name>/<timestamp>/`. Set `resume: true` in your config to continue from the most recent checkpoint automatically.
 
-Validation audio (LQ, HQ and restored triplets) is saved to `runs/<name>/<timestamp>/val_audio/` every val run for a pre-determined set of samples. Comparing these files over the course of training is the best way to monitor progress.
+Validation audio (LQ, HQ and restored triplets) is saved to `runs/<name>/<timestamp>/val_audio/` every val run for a fixed reference set of samples. Comparing these files over the course of training is the best way to monitor progress.
 
 ---
 
 ## Inference
 
-Run the apollo.bat/.sh script to auto-launch the venv console. Then run:
+Open the TUI and select **Inference** to pick a config, model, and input file interactively. The TUI remembers your last-used settings per config.
+
+To run directly from the command line:
 
 ```bash
 inference --in_wav "degraded.mp3" --out_wav "restored.wav" --conf_dir configs/apollo_stfl.yaml
 ```
 
-Or run with manual CLI args:
+Or with explicit weights:
 
 ```bash
 inference --in_wav "degraded.mp3" --out_wav "restored.wav" --weights models/apollo_model_uni.ckpt --feature_dim 384
 ```
 
-When `--conf_dir` is provided without `--weights`, inference automatically selects the best checkpoint from your run folder based on val_loss. Output is written to disk chunk-by-chunk as inference runs. You can open the output file in Audacity immediately to preview completed sections while the rest processes. Output format is 32-bit float WAV.
+When `--conf_dir` is provided without `--weights`, inference automatically selects the best checkpoint from your run folder based on val_loss. Output is written to disk chunk-by-chunk. Output format is 32-bit float WAV.
 
 ---
 
