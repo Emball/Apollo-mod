@@ -171,9 +171,10 @@ class AudioLightningModule(pl.LightningModule):
 
         self._accum_step += 1
 
-        if self.trainer.is_last_batch:
-            scheduler_g.step()
-            scheduler_d.step()
+    def on_train_epoch_end(self):
+        scheduler_g, scheduler_d = self.lr_schedulers()
+        scheduler_g.step()
+        scheduler_d.step()
 
     def validation_step(self, batch, batch_nb):
         ori_data, codec_data = batch
@@ -277,9 +278,19 @@ class AudioLightningModule(pl.LightningModule):
             self._val_audio_indices = set(selected)
             print(f"[val audio] Locked indices ({len(self._val_audio_indices)} randomly sampled across {len(songs)} songs): {sorted(self._val_audio_indices)}")
 
+    def on_save_checkpoint(self, checkpoint: dict) -> None:
+        # Persist val audio selection state so resume uses the same locked indices.
+        checkpoint["val_audio_indices"] = self._val_audio_indices
+        checkpoint["val_batch_index"]   = getattr(self, "_val_batch_index", None)
+
     def on_load_checkpoint(self, checkpoint: dict) -> None:
-        # Strip keys that exist in checkpoints saved by newer code but not in
-        # this version of the model (e.g. hann buffers registered in 0.1.8.x).
+        # Restore val audio selection state from checkpoint.
+        self._val_audio_indices = checkpoint.get("val_audio_indices", None)
+        saved_batch_index = checkpoint.get("val_batch_index", None)
+        if saved_batch_index is not None:
+            self._val_batch_index = saved_batch_index
+
+        # Strip state_dict keys from older checkpoints that no longer exist in model.
         sd = checkpoint.get("state_dict", {})
         unexpected = [k for k in list(sd.keys()) if
                       any(k.startswith(p) for p in [
