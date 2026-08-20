@@ -273,19 +273,27 @@ def main(
     device_str="auto",
     chunked=True,
 ):
-    # Load config and pull model params + chunk size from it
-    # Explicit CLI args always win over config values
+    # Config fills only args the user didn't explicitly provide (still None).
+    # Explicit CLI args always win — config is a fallback, not an override.
     if conf_dir is not None:
         cfg = load_config(conf_dir)
         m = cfg.get("model", {})
         d = cfg.get("datas", {})
-        if "sr"          in m: sr          = m.sr
-        if "win"         in m: win         = m.win
-        if "feature_dim" in m: feature_dim = m.feature_dim
-        if "layer"       in m: layer       = m.layer
-        if "segment_sec" in d: chunk_sec   = d.segment_sec
-        print(f"[inference] Config: feature_dim={feature_dim}, sr={sr}, win={win}, "
-              f"layer={layer}, chunk_sec={chunk_sec}")
+        if sr          is None and "sr"          in m: sr          = int(m.sr)
+        if win         is None and "win"         in m: win         = int(m.win)
+        if feature_dim is None and "feature_dim" in m: feature_dim = int(m.feature_dim)
+        if layer       is None and "layer"       in m: layer       = int(m.layer)
+        if chunk_sec   is None and "segment_sec" in d: chunk_sec   = float(d.segment_sec)
+
+    # Apply hardcoded defaults for anything still unset
+    if sr          is None: sr          = _SR
+    if win         is None: win         = 20
+    if feature_dim is None: feature_dim = 256
+    if layer       is None: layer       = 6
+    if chunk_sec   is None: chunk_sec   = _CHUNK_SEC
+
+    print(f"[inference] Config: feature_dim={feature_dim}, sr={sr}, win={win}, "
+          f"layer={layer}, chunk_sec={chunk_sec}")
 
     if device_str == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -345,23 +353,18 @@ if __name__ == "__main__":
                         help="Disable chunked inference (may OOM on long files)")
     args = parser.parse_args()
 
-    # Defaults — applied here so config can fill them before CLI overrides
-    sr          = args.sr          if args.sr          is not None else _SR
-    win         = args.win         if args.win         is not None else 20
-    feature_dim = args.feature_dim if args.feature_dim is not None else 256
-    layer       = args.layer       if args.layer       is not None else 6
-    chunk_sec   = args.chunk_sec   if args.chunk_sec   is not None else _CHUNK_SEC
-
+    # Pass None for args the user didn't explicitly set so main() can fill
+    # them from --conf_dir without clobbering explicit CLI values.
     main(
         input_wav=args.in_wav,
         output_wav=args.out_wav,
         weights=args.weights,
         conf_dir=args.conf_dir,
-        sr=sr,
-        win=win,
-        feature_dim=feature_dim,
-        layer=layer,
-        chunk_sec=chunk_sec,
+        sr=args.sr,
+        win=args.win,
+        feature_dim=args.feature_dim,
+        layer=args.layer,
+        chunk_sec=args.chunk_sec,
         overlap_sec=args.overlap_sec,
         device_str=args.device,
         chunked=not args.no_chunked,
