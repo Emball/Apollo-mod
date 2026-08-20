@@ -408,7 +408,7 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     manifest_path = os.path.join(dst_root, ".manifest.json")
 
     def _manifest_params():
-        return {"segment_sec": _CHUNK_SEC, "overlap": _OVERLAP, "align": str(align), "fixed_delay": str(fixed_delay)}
+        return {"segment_sec": _CHUNK_SEC, "overlap": _OVERLAP, "fixed_delay": str(fixed_delay)}
 
     def _manifest_valid():
         if not os.path.isfile(manifest_path):
