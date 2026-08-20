@@ -111,11 +111,8 @@ class AudioLightningModule(pl.LightningModule):
         self._accum_loss_g = None
         self._accum_loss_d = None
         self._accum_step   = 0
-        self._val_loss_sum   = 0.0
-        self._val_loss_count = 0
-        self._val_msstft_sum  = 0.0
-        self._val_sfr_sum     = 0.0
-        self._val_perc_count  = 0
+        self._val_loss_sum    = 0.0
+        self._val_loss_count  = 0
         self._last_val_sisdr  = None
         self._last_val_msstft = None
         self._last_val_sfr    = None
@@ -284,27 +281,8 @@ class AudioLightningModule(pl.LightningModule):
         self._val_loss_count += 1
         self.validation_step_outputs.append(float(loss))
 
-        # Perceptual metrics -- computed on CPU to avoid VRAM overhead
-        try:
-            with torch.no_grad():
-                # est_sources shape: (B, C, T) or (C, T)
-                est_cpu = est_sources.float().cpu()
-                ref_cpu = ori_data.float().cpu()
-                # ensure (C, T) -- take first batch item if batched
-                e = est_cpu[0] if est_cpu.ndim == 3 else est_cpu
-                r = ref_cpu[0] if ref_cpu.ndim == 3 else ref_cpu
-                # ensure 2D (C, T)
-                if e.ndim == 1:
-                    e = e.unsqueeze(0)
-                if r.ndim == 1:
-                    r = r.unsqueeze(0)
-                self._val_msstft_sum += _ms_log_stft_loss(e, r)
-                self._val_sfr_sum    += _spectral_flatness_ratio(e, r)
-                self._val_perc_count += 1
-        except Exception as _perc_err:
-            if not getattr(self, "_perc_err_logged", False):
-                print(f"[val metrics] perceptual metric error (suppressed after first): {_perc_err}")
-                self._perc_err_logged = True
+        # Perceptual metrics are computed on locked reference chunks in _save_val_audio,
+        # not per-batch, to avoid the CPU STFT overhead on every val step.
 
         return {"val_loss": loss}
 
@@ -378,8 +356,9 @@ class AudioLightningModule(pl.LightningModule):
     def _save_val_audio(self):
         """
         Run locked reference chunks through the model and save LQ/HQ/Restored triplets.
-        Called from on_validation_epoch_end -- training is paused at this point so the
-        full GPU is available. No threading needed.
+        Also computes perceptual metrics (msstft, sfr) on these chunks -- much cheaper
+        than computing on every val batch since we only have 4 reference chunks.
+        Called from on_validation_epoch_end -- training is paused so full GPU is available.
         """
         if not self._val_locked_refs or self.val_audio_dir is None:
             return
@@ -388,6 +367,10 @@ class AudioLightningModule(pl.LightningModule):
 
         epoch_dir = os.path.join(self.val_audio_dir, f"step_{self.global_step:06d}")
         os.makedirs(epoch_dir, exist_ok=True)
+
+        msstft_sum = 0.0
+        sfr_sum    = 0.0
+        perc_count = 0
 
         self.audio_model.eval()
         with torch.no_grad():
@@ -412,9 +395,27 @@ class AudioLightningModule(pl.LightningModule):
                     torchaudio.save(os.path.join(epoch_dir, f"{song_key}_LQ.wav"),       lq_save, 44100)
                     torchaudio.save(os.path.join(epoch_dir, f"{song_key}_HQ.wav"),       hq_save, 44100)
                     torchaudio.save(os.path.join(epoch_dir, f"{song_key}_Restored.wav"), out,     44100)
+
+                    # Perceptual metrics on this reference chunk (restored vs HQ)
+                    try:
+                        e = out[0:1] if out.ndim == 2 else out
+                        r = hq_save[0:1] if hq_save.ndim == 2 else hq_save
+                        msstft_sum += _ms_log_stft_loss(e, r)
+                        sfr_sum    += _spectral_flatness_ratio(e, r)
+                        perc_count += 1
+                    except Exception as _me:
+                        print(f"[val metrics] {song_key}: {_me}")
+
                 except Exception as e:
                     print(f"[val audio] Error saving {song_key}: {e}")
+
         self.audio_model.train()
+
+        if perc_count > 0:
+            self._last_val_msstft = msstft_sum / perc_count
+            self._last_val_sfr    = sfr_sum    / perc_count
+            self.log("val_msstft", self._last_val_msstft, prog_bar=False, logger=True)
+            self.log("val_sfr",    self._last_val_sfr,    prog_bar=False, logger=True)
 
     def on_validation_epoch_end(self):
         self._last_val_sisdr  = None
@@ -427,17 +428,6 @@ class AudioLightningModule(pl.LightningModule):
             self._last_val_sisdr = avg_val_loss
         self._val_loss_sum   = 0.0
         self._val_loss_count = 0
-
-        if self._val_perc_count > 0:
-            avg_msstft = self._val_msstft_sum / self._val_perc_count
-            avg_sfr    = self._val_sfr_sum    / self._val_perc_count
-            self.log("val_msstft", avg_msstft, prog_bar=False, logger=True)
-            self.log("val_sfr",    avg_sfr,    prog_bar=False, logger=True)
-            self._last_val_msstft = avg_msstft
-            self._last_val_sfr    = avg_sfr
-        self._val_msstft_sum  = 0.0
-        self._val_sfr_sum     = 0.0
-        self._val_perc_count  = 0
         self.log("lr", self.optimizer[0].param_groups[0]["lr"], prog_bar=True)
         self.validation_step_outputs.clear()
 
