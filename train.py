@@ -875,24 +875,28 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         so resume mid-epoch doesn't produce inflated rates.
         """
         def on_train_epoch_start(self, trainer, pl_module):
-            self._epoch_step0 = trainer.global_step
-            self._epoch_t0    = _time.monotonic()
-            self._epoch_batches = trainer.num_training_batches
+            self._epoch_batches  = trainer.num_training_batches
+            self._session_t0     = None   # set on first batch_end of this session
+            self._session_done   = 0      # batches processed this session in this epoch
             total = self._epoch_batches
             print(f"\nEpoch {trainer.current_epoch} — {total} batches", flush=True)
 
         def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-            now      = _time.monotonic()
-            elapsed  = now - self._epoch_t0
-            done     = batch_idx + 1
-            its      = done / elapsed if elapsed > 0 else 0.0
-            total    = self._epoch_batches
-            pct      = 100 * done / total
-            metrics  = trainer.callback_metrics
-            ld       = float(metrics.get("train_loss_d", 0))
-            lg       = float(metrics.get("train_loss_g", 0))
-            vl       = metrics.get("val_loss", None)
-            vl_str   = f"  val={float(vl):.3f}" if vl is not None else ""
+            now = _time.monotonic()
+            if self._session_t0 is None:
+                self._session_t0 = now
+            self._session_done += 1
+
+            elapsed = now - self._session_t0
+            its     = self._session_done / elapsed if elapsed > 0 else 0.0
+            done    = batch_idx + 1
+            total   = self._epoch_batches
+            pct     = 100 * done / total
+            metrics = trainer.callback_metrics
+            ld      = float(metrics.get("train_loss_d", 0))
+            lg      = float(metrics.get("train_loss_g", 0))
+            vl      = metrics.get("val_loss", None)
+            vl_str  = f"  val={float(vl):.3f}" if vl is not None else ""
             print(
                 f"\r  {pct:5.1f}%  step={trainer.global_step}  "
                 f"{done}/{total}  {its:.2f} it/s  "
