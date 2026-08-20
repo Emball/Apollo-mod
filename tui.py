@@ -377,26 +377,47 @@ def screen_train(state: dict) -> None:
 
 # -- Inference ---------------------------------------------------------------
 
+_PROCESS_ALL_SENTINEL = "__PROCESS_ALL__"
+
+
 def _pick_input_file(state: dict, cfg_stem: str) -> str | None:
-    """Pick an input audio file from /input or enter custom path."""
+    """Pick an input audio file from /input, process all, or enter custom path.
+
+    Returns a file path string, _PROCESS_ALL_SENTINEL, or None to cancel.
+    """
     last = state.get("inference", {}).get(cfg_stem, {}).get("last_input", "")
 
     INPUT_DIR.mkdir(exist_ok=True)
     files = sorted(f for f in INPUT_DIR.iterdir() if f.suffix.lower() in AUDIO_EXTS)
     file_names = [f.name for f in files]
 
-    items = file_names + ["[ Enter custom path ]"]
-    start = next((i for i, n in enumerate(file_names) if n == Path(last).name), len(items) - 1)
+    process_all_label = (
+        f"[ Process all {len(files)} file(s) in /input -> /output ]"
+        if files else "[ Process all in /input (folder empty) ]"
+    )
+    items = file_names + [process_all_label, "[ Enter custom path ]"]
+    process_all_idx = len(file_names)
+    custom_idx = len(file_names) + 1
 
-    idx = _pick("Inference — select input file", items, hint="Enter=select  Esc=back", start=start)
+    start = next((i for i, n in enumerate(file_names) if n == Path(last).name), 0)
+
+    idx = _pick(
+        "Inference — select input",
+        items,
+        hint="Enter=select  Esc=back",
+        start=start,
+    )
     if idx is None:
         return None
 
-    if idx == len(items) - 1:
+    if idx == custom_idx:
         console.clear()
         console.print(_banner_panel())
         path = console.input("[cyan]Enter path to input file:[/] ").strip().strip('"')
         return path if path else None
+
+    if idx == process_all_idx:
+        return _PROCESS_ALL_SENTINEL
 
     return str(files[idx])
 
@@ -491,6 +512,35 @@ def screen_inference(state: dict) -> None:
     if not input_path:
         return
 
+    # --- Batch mode: process all files in /input ---
+    if input_path == _PROCESS_ALL_SENTINEL:
+        INPUT_DIR.mkdir(exist_ok=True)
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        batch_files = sorted(
+            f for f in INPUT_DIR.iterdir() if f.suffix.lower() in AUDIO_EXTS
+        )
+        if not batch_files:
+            console.clear()
+            console.print(_banner_panel())
+            console.print("[yellow]No audio files found in /input.[/]")
+            console.input("Press Enter.")
+            return
+        for i, in_file in enumerate(batch_files):
+            out_file = OUTPUT_DIR / f"{in_file.stem}_restored.wav"
+            cmd = [
+                _python_bin(), str(ROOT / "inference.py"),
+                "--in_wav", str(in_file),
+                "--out_wav", str(out_file),
+                "--conf_dir", str(cfg_path),
+                "--weights", weights,
+            ]
+            _run_with_live_output(
+                cmd,
+                f"Inference [{i+1}/{len(batch_files)}]: {in_file.name}",
+            )
+        return
+
+    # --- Single file mode ---
     state["inference"][cfg_stem]["last_input"] = input_path
     _save_state(state)
 
