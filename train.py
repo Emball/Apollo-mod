@@ -878,6 +878,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             self._epoch_batches  = trainer.num_training_batches
             self._session_t0     = None   # set on first batch_end of this session
             self._session_done   = 0      # batches processed this session in this epoch
+            self._val_elapsed    = 0.0    # cumulative time spent in val (excluded from rate)
+            self._val_t0         = None
             total = self._epoch_batches
             print(f"\nEpoch {trainer.current_epoch} — {total} batches", flush=True)
 
@@ -887,7 +889,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 self._session_t0 = now
             self._session_done += 1
 
-            elapsed = now - self._session_t0
+            elapsed = (now - self._session_t0) - self._val_elapsed
             its     = self._session_done / elapsed if elapsed > 0 else 0.0
             done    = batch_idx + 1
             total   = self._epoch_batches
@@ -913,11 +915,14 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             self._val_t0 = _time.monotonic()
 
         def on_validation_epoch_end(self, trainer, pl_module):
-            elapsed = _time.monotonic() - self._val_t0
+            val_dur = _time.monotonic() - self._val_t0
+            # Exclude val time from training rate calculation
+            if hasattr(self, "_val_elapsed"):
+                self._val_elapsed += val_dur
             metrics = trainer.callback_metrics
             vl = metrics.get("val_loss", None)
             if vl is not None and not trainer.sanity_checking:
-                print(f" val_loss={float(vl):.4f}  ({elapsed:.1f}s)", flush=True)
+                print(f" val_loss={float(vl):.4f}  ({val_dur:.1f}s)", flush=True)
 
     callbacks: List[Callback] = [StepPrinter()]
 
