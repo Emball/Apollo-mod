@@ -1,23 +1,20 @@
 # @claude last-modified: 2026-08-13T00:00:00Z
 # @claude last-commit: feat: --conf_dir reads model params and chunk size from config
 """
-inference.py — Apollo audio enhancement script
-
-Model selection (--weights):
-  apollo      Official Apollo base model (default, auto-downloads pytorch_model.bin)
-  lew         Lew vocal enhancer v1 (auto-downloads apollo_model.ckpt)
-  lew_v2      Lew vocal enhancer v2 (auto-downloads apollo_model_v2.ckpt)
-  lew_uni     Lew universal model, feature_dim=384 (auto-downloads apollo_model_uni.ckpt)
-  <path>      Local .pth / .bin / .ckpt file
+inference.py -- Apollo audio enhancement script
 
 Usage:
-    python inference.py --in_wav input.wav --out_wav output.wav --weights lew_v2
-    python inference.py --in_wav input.wav --out_wav output.wav \\
-        --weights models/SFTL.ckpt --conf_dir configs/SFTL.yaml
-    python inference.py --in_wav input.wav --out_wav output.wav \\
-        --weights models/my_finetune.ckpt --feature_dim 256 --chunk_sec 4
-"""
+    # Auto-select best checkpoint from run folder
+    python inference.py --in_wav input.wav --out_wav output.wav --conf_dir configs/apollo_stfl.yaml
 
+    # Explicit checkpoint
+    python inference.py --in_wav input.wav --out_wav output.wav \\
+        --weights runs/apollo_stfl/20260819/checkpoints/step=001200-val_loss=-28.10.ckpt \\
+        --conf_dir configs/apollo_stfl.yaml
+
+    # Pretrained shortnames (no conf_dir needed)
+    python inference.py --in_wav input.wav --out_wav output.wav --weights lew_v2
+"""
 import argparse
 import os
 
@@ -259,6 +256,40 @@ def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path):
     return None  # output already written
 
 
+def _find_best_checkpoint(conf_dir: str) -> str:
+    cfg = load_config(conf_dir)
+    exp = cfg.get("exp", {})
+    run_dir = os.path.join(
+        str(exp.get("dir", "./runs")),
+        str(exp.get("name", os.path.splitext(os.path.basename(conf_dir))[0])),
+    )
+    if not os.path.isdir(run_dir):
+        raise FileNotFoundError(f"No run directory found at {run_dir!r}")
+
+    # Find all checkpoints across all timestamped subfolders
+    candidates = []
+    for ts_dir in os.listdir(run_dir):
+        ckpt_dir = os.path.join(run_dir, ts_dir, "checkpoints")
+        if os.path.isdir(ckpt_dir):
+            for f in os.listdir(ckpt_dir):
+                if f.endswith(".ckpt"):
+                    candidates.append(os.path.join(ckpt_dir, f))
+
+    if not candidates:
+        raise FileNotFoundError(f"No checkpoints found under {run_dir!r}")
+
+    def _parse_loss(path):
+        name = os.path.basename(path)
+        try:
+            return float(name.split("val_loss=")[1].replace(".ckpt", ""))
+        except (IndexError, ValueError):
+            return float("inf")
+
+    best = min(candidates, key=_parse_loss)
+    print(f"[inference] Auto-selected checkpoint: {os.path.relpath(best)}")
+    return best
+
+
 def main(
     input_wav,
     output_wav,
@@ -301,6 +332,9 @@ def main(
         device = torch.device(device_str)
     print(f"[inference] Device: {device}")
 
+    if weights is None and conf_dir is not None:
+        weights = _find_best_checkpoint(conf_dir)
+
     model = load_model(weights=weights, sr=sr, win=win, feature_dim=feature_dim, layer=layer)
     model = model.to(device).eval()
 
@@ -330,8 +364,8 @@ if __name__ == "__main__":
     parser.add_argument("--out_wav",     type=str, required=True,
                         help="Path to save enhanced output")
     parser.add_argument("--weights",     type=str, default=None,
-                        help="Model weights: shortname (apollo/lew/lew_v2/lew_uni), "
-                             "or local .pth/.bin/.ckpt path")
+                        help="Model weights: shortname (lew/lew_v2/lew_uni), local .pth/.bin/.ckpt path, "
+                             "or omit to auto-select the best checkpoint from the run folder (requires --conf_dir)")
     parser.add_argument("--conf_dir",    type=str, default=None,
                         help="Path to training yaml config. Reads feature_dim, sr, win, "
                              "layer, and segment_sec from it. Explicit CLI flags override.")

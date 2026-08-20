@@ -91,14 +91,17 @@ tensorboard --logdir ./runs
 ## Inference
 
 ```bash
-# With a config file (reads model settings automatically)
+# Auto-select the best checkpoint from your run folder
 python inference.py --in_wav input.mp3 --out_wav output.wav \
-    --weights runs/apollo_stfl/20260819_143022/checkpoints/001200-val_loss=-24.41.ckpt \
     --conf_dir configs/apollo_stfl.yaml
 
-# With manual settings
+# Explicit checkpoint
 python inference.py --in_wav input.mp3 --out_wav output.wav \
-    --weights models/apollo_model_uni.ckpt --feature_dim 384
+    --weights runs/apollo_stfl/20260819_143022/checkpoints/step=001200-val_loss=-28.10.ckpt \
+    --conf_dir configs/apollo_stfl.yaml
+
+# Pretrained shortnames (no conf_dir needed)
+python inference.py --in_wav input.mp3 --out_wav output.wav --weights lew_v2
 ```
 
 Output is written to disk chunk-by-chunk as inference runs. You can open the output file in Audacity immediately to preview completed sections while the rest processes. Output format is 32-bit float WAV.
