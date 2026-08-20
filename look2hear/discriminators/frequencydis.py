@@ -41,7 +41,9 @@ class MultiFrequencyDiscriminator(nn.Module):
 
     def forward(self, est, sample_rate=44100):
         B, nch, _ = est.shape
-        assert nch == self.nch
+        if nch < self.nch:
+            est = est.expand(B, self.nch, -1)
+            nch = self.nch
 
         # Normalize power
         est = est / (est.pow(2).sum((1, 2)) + self.eps).sqrt().reshape(B, 1, 1)
