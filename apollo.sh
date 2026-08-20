@@ -92,21 +92,9 @@ if [ $# -gt 0 ]; then
     exec "$VENV_DIR/bin/python" "$SCRIPT_DIR/$SCRIPT" "$@"
 fi
 
-# 5. No arguments — drop into an activated shell with command aliases
-RC=$(mktemp)
-cat > "$RC" <<- EOF
-alias train='python "$SCRIPT_DIR/train.py"'
-alias inference='python "$SCRIPT_DIR/inference.py"'
-alias test='python "$SCRIPT_DIR/test.py"'
-EOF
-
-echo
-echo -e "${GRN}  Apollo ready.${RST} Type 'exit' to leave."
-echo -e "  Commands: ${CYN}train, inference, test${RST} (or python directly)"
-echo
-
+# 5. No arguments — launch TUI
 export VIRTUAL_ENV="$VENV_DIR"
 export PATH="$VENV_DIR/bin:$PATH"
 unset PYTHONHOME
 
-exec "${SHELL:-bash}" --rcfile "$RC" --noprofile -i
+exec "$VENV_DIR/bin/python" "$SCRIPT_DIR/tui.py"

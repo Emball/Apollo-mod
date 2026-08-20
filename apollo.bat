@@ -67,20 +67,5 @@ if not "%*"=="" (
     exit /b %errorlevel%
 )
 
-:: 5. No arguments — drop into an activated cmd session with command aliases
-set "INIT_FILE=%TEMP%\apollo_init_%RANDOM%.bat"
-(
-    echo @echo off
-    echo doskey train=python "%SCRIPT_DIR%\train.py" $*
-    echo doskey inference=python "%SCRIPT_DIR%\inference.py" $*
-    echo doskey test=python "%SCRIPT_DIR%\test.py" $*
-    echo cd /d "%SCRIPT_DIR%"
-) > "%INIT_FILE%"
-
-echo.
-echo   Apollo ready. Type 'exit' to leave.
-echo   Commands: train, inference, test (or python directly)
-echo.
-
-call "%VENV_DIR%\Scripts\activate.bat"
-cmd /k "%INIT_FILE%"
+:: 5. No arguments — launch TUI
+"%VENV_DIR%\Scripts\python.exe" "%SCRIPT_DIR%\tui.py"
