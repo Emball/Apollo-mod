@@ -60,6 +60,8 @@ class AudioLightningModule(pl.LightningModule):
         self._accum_loss_g = None
         self._accum_loss_d = None
         self._accum_step   = 0
+        self._val_loss_sum   = 0.0
+        self._val_loss_count = 0
 
         if gradient_checkpointing:
             self._enable_gradient_checkpointing()
@@ -71,13 +73,16 @@ class AudioLightningModule(pl.LightningModule):
 
     def _enable_gradient_checkpointing(self):
         """
-        Wrap BSNet layers and FrequencyDiscriminator sub-networks with
-        torch.utils.checkpoint so intermediate activations are recomputed
-        during backward instead of stored — trades ~30% compute for large
-        VRAM savings.
+        Wrap BSNet layers with torch.utils.checkpoint so intermediate activations
+        are recomputed during backward instead of stored — trades ~30% compute for
+        large VRAM savings.
+
+        FrequencyDiscriminator is deliberately NOT checkpointed: feature matching
+        requires a single forward pass that returns both output and hidden feature
+        maps with live gradients. Checkpointing it caused a double forward (once
+        for output, once under no_grad for hiddens) with no correctness benefit.
         """
         import look2hear.models.apollo as _apollo_mod
-        import look2hear.discriminators.frequencydis as _dis_mod
 
         original_bsnet_forward = _apollo_mod.BSNet.forward
 
@@ -89,24 +94,7 @@ class AudioLightningModule(pl.LightningModule):
             )
 
         _apollo_mod.BSNet.forward = checkpointed_bsnet_forward
-
-        original_freqdis_forward = _dis_mod.FrequencyDiscriminator.forward
-
-        def checkpointed_freqdis_forward(self_dis, x):
-            if not torch.is_grad_enabled():
-                return original_freqdis_forward(self_dis, x)
-
-            def _inner(x_):
-                out, _ = original_freqdis_forward(self_dis, x_)
-                return out
-
-            out = torch_checkpoint.checkpoint(_inner, x, use_reentrant=False)
-            with torch.no_grad():
-                _, hiddens = original_freqdis_forward(self_dis, x.detach())
-            return out, hiddens
-
-        _dis_mod.FrequencyDiscriminator.forward = checkpointed_freqdis_forward
-        print("[gradient_checkpointing] Enabled for BSNet layers and FrequencyDiscriminator.")
+        print("[gradient_checkpointing] Enabled for BSNet layers only.")
 
     def forward(self, wav):
         return self.audio_model(wav)
@@ -149,7 +137,6 @@ class AudioLightningModule(pl.LightningModule):
             [f.detach() for f in fmap] for fmap in targets_feature_maps
         ]
         del est_outputs_d, target_outputs
-        torch.cuda.empty_cache()
 
         # Generator update
         for p in self.discriminator.parameters():
@@ -175,8 +162,10 @@ class AudioLightningModule(pl.LightningModule):
             self.clip_gradients(optimizer_g, gradient_clip_val=5, gradient_clip_algorithm="norm")
             optimizer_g.step()
 
-            self.log("train_loss_d", self._accum_loss_d, on_epoch=True, prog_bar=True, logger=True)
-            self.log("train_loss_g", self._accum_loss_g, on_epoch=True, prog_bar=True, logger=True)
+            # Log scalar values only — .item() detaches from GPU, avoiding the
+            # on_epoch=True accumulation bug (PL caches GPU tensors until epoch end).
+            self.log("train_loss_d", float(self._accum_loss_d), on_step=True, prog_bar=True, logger=True)
+            self.log("train_loss_g", float(self._accum_loss_g), on_step=True, prog_bar=True, logger=True)
             self._accum_loss_g = None
             self._accum_loss_d = None
 
@@ -191,8 +180,12 @@ class AudioLightningModule(pl.LightningModule):
         est_sources = self(codec_data)
         loss = self.metrics(est_sources, ori_data)
 
-        self.log("val_loss", loss, on_epoch=True, prog_bar=True, logger=True)
-        self.validation_step_outputs.append(loss)
+        # Accumulate as Python scalar — avoids the on_epoch=True bug where PL
+        # caches GPU tensors across the entire epoch (grows monotonically, causes
+        # progressive slowdown). Logged once per epoch in on_validation_epoch_end.
+        self._val_loss_sum   += float(loss)
+        self._val_loss_count += 1
+        self.validation_step_outputs.append(float(loss))
 
         # Save restored audio every val_save_interval epochs so the rendered
         # audio and the loss number are always from the same computation.
@@ -251,7 +244,12 @@ class AudioLightningModule(pl.LightningModule):
         return {"val_loss": loss}
 
     def on_validation_epoch_end(self):
-        self.log("lr", self.optimizer[0].param_groups[0]["lr"], on_epoch=True, prog_bar=True)
+        if self._val_loss_count > 0:
+            avg_val_loss = self._val_loss_sum / self._val_loss_count
+            self.log("val_loss", avg_val_loss, prog_bar=True, logger=True)
+        self._val_loss_sum   = 0.0
+        self._val_loss_count = 0
+        self.log("lr", self.optimizer[0].param_groups[0]["lr"], prog_bar=True)
         self.validation_step_outputs.clear()
 
         # After the first val epoch we know the full dataset size — randomly

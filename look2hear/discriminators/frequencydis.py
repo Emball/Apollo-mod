@@ -29,14 +29,17 @@ class MultiFrequencyDiscriminator(nn.Module):
 
         # Inverse window size weighting — smaller windows get higher weight
         # since they resolve high frequency content better.
-        # e.g. window=32 gets weight proportional to 1/32, window=2048 to 1/2048
         raw_weights = torch.tensor([1.0 / w for w in window], dtype=torch.float32)
-        # Normalize so weights sum to len(window) — keeps overall loss scale
-        # roughly the same as the original equal-weight version
         self.register_buffer(
             "window_weights",
             raw_weights / raw_weights.mean()
         )
+
+        # Pre-register Hann windows as buffers so they live on the correct device
+        # and are never reallocated per forward call (was causing CUDA allocator
+        # thrashing — 7 allocations × 3 discriminator calls = 21 per step).
+        for w in window:
+            self.register_buffer(f"hann_{w}", torch.hann_window(w))
 
     def forward(self, est, sample_rate=44100):
         B, nch, _ = est.shape
@@ -50,11 +53,12 @@ class MultiFrequencyDiscriminator(nn.Module):
         est_feature_maps = []
 
         for i in range(len(self.discriminators)):
+            hann = getattr(self, f"hann_{self.window[i]}").float()
             est_spec = torch.stft(
                 est.float(),
                 self.window[i],
                 self.window[i] // 2,
-                window=torch.hann_window(self.window[i]).to(est.device).float(),
+                window=hann,
                 return_complex=True
             )
             est_RI = torch.stack([est_spec.real, est_spec.imag], dim=1)
