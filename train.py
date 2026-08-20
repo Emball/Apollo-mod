@@ -1,8 +1,14 @@
 # @claude last-modified: 2026-05-05T06:34:39Z
 # @claude last-commit: feat: major update — TUI, augmentation system, gradient checkpointing, optimization bootstrap
+
+# Must be set before torch is imported — CUDA allocator reads this env var at
+# device init time. Setting it inside apply_optimizations() (post-import) has
+# no effect because CUDA is already initialised by then.
+import os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import json
 from typing import Any, Dict, List, Optional, Tuple
-import os
 from omegaconf import OmegaConf, open_dict
 import argparse
 import pytorch_lightning as pl

@@ -9,7 +9,7 @@ optimizations:
   cudnn_benchmark: true
   expandable_segments: true
   triton_cache: true
-  ram_limit_fraction: 0.90  # kill process cleanly at this fraction of total system RAM
+  ram_limit_fraction: 0.95  # kill process cleanly at this fraction of total system RAM
 training:
   n_layers_to_freeze: 4
   hf_boost: 1.5
@@ -22,7 +22,7 @@ datas:
   segment_sec: 4
   batch_size: 2
   num_workers: 8
-  pin_memory: true
+  pin_memory: false
   val_bootstrap_chunks: 15
   align_data: true  # true = auto-detect, false = off, integer = fixed offset in samples (+ trims LQ, - trims HQ)
   augmentation:
@@ -39,7 +39,7 @@ datas:
         enabled: true
         prob: 0.5
       pitch_shift:
-        enabled: true
+        enabled: false  # warps frequency relationships the model is learning
         prob: 0.5
         semitones_max: 1.5
       noise:
@@ -47,7 +47,7 @@ datas:
         prob: 0.5
         sigma: 0.002
       mp3_degradation:
-        enabled: true
+        enabled: false  # live ffmpeg per-chunk per-epoch causes severe loader jitter; use cached instead
         prob: 0.5
         kbps_min: 64
         kbps_max: 256
@@ -138,7 +138,7 @@ checkpoint:
   monitor: val_loss
   mode: min
   verbose: true
-  save_top_k: -1
+  save_top_k: 5
   save_last: false
   filename: '{step:06d}-{val_loss:.4f}'
 

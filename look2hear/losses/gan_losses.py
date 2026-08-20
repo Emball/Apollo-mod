@@ -32,15 +32,19 @@ class MultiFrequencyGenLoss(_Loss):
         self.eps = eps
         self.all_win = [32, 64, 128, 256, 512, 1024, 2048]
 
-        # Pre-build hann windows and HF weight tensors as buffers so they live
-        # on the right device automatically and are never reallocated per step.
+        # Hann windows and HF weight tensors cached as plain dicts — NOT
+        # register_buffer so they never pollute state_dict or checkpoints.
+        # Both are fully deterministic from constructor args; no learned state.
+        # Moved to device lazily on first _freq_MAE call.
+        self._hann_cache: dict = {}
+        self._weight_cache: dict = {}
         for win in self.all_win:
-            self.register_buffer(f"hann_{win}", torch.hann_window(win))
+            self._hann_cache[win] = torch.hann_window(win)
             n_bins = win // 2 + 1
             hf_cutoff = int(n_bins * hf_threshold_ratio)
             w = torch.ones(1, n_bins, 1)
             w[0, hf_cutoff:, 0] = hf_boost
-            self.register_buffer(f"weights_{win}", w)
+            self._weight_cache[win] = w
 
     def _freq_MAE(self, output, target):
         loss = 0.
@@ -50,8 +54,14 @@ class MultiFrequencyGenLoss(_Loss):
         flat_tgt = target.view(-1, target.shape[-1])
 
         for win in self.all_win:
-            hann    = getattr(self, f"hann_{win}").to(device)
-            weights = getattr(self, f"weights_{win}").to(device)
+            hann = self._hann_cache[win]
+            if hann.device != device:
+                hann = hann.to(device)
+                self._hann_cache[win] = hann
+            weights = self._weight_cache[win]
+            if weights.device != device:
+                weights = weights.to(device)
+                self._weight_cache[win] = weights
 
             est_spec    = torch.stft(flat_out, n_fft=win, hop_length=win // 2,
                                      window=hann, return_complex=True)
