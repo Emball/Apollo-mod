@@ -116,6 +116,7 @@ class AudioLightningModule(pl.LightningModule):
         self._last_val_sisdr  = None
         self._last_val_msstft = None
         self._last_val_sfr    = None
+        self._perc_thread     = None
 
         if gradient_checkpointing:
             self._enable_gradient_checkpointing()
@@ -368,9 +369,7 @@ class AudioLightningModule(pl.LightningModule):
         epoch_dir = os.path.join(self.val_audio_dir, f"step_{self.global_step:06d}")
         os.makedirs(epoch_dir, exist_ok=True)
 
-        msstft_sum = 0.0
-        sfr_sum    = 0.0
-        perc_count = 0
+        perc_pairs = []
 
         self.audio_model.eval()
         with torch.no_grad():
@@ -396,28 +395,49 @@ class AudioLightningModule(pl.LightningModule):
                     torchaudio.save(os.path.join(epoch_dir, f"{song_key}_HQ.wav"),       hq_save, 44100)
                     torchaudio.save(os.path.join(epoch_dir, f"{song_key}_Restored.wav"), out,     44100)
 
-                    # Perceptual metrics on this reference chunk (restored vs HQ)
-                    try:
-                        e = out[0:1] if out.ndim == 2 else out
-                        r = hq_save[0:1] if hq_save.ndim == 2 else hq_save
-                        msstft_sum += _ms_log_stft_loss(e, r)
-                        sfr_sum    += _spectral_flatness_ratio(e, r)
-                        perc_count += 1
-                    except Exception as _me:
-                        print(f"[val metrics] {song_key}: {_me}")
+                    # Collect tensors for perceptual metrics (computed in background thread)
+                    perc_pairs.append((
+                        out[0:1].clone() if out.ndim == 2 else out.clone(),
+                        hq_save[0:1].clone() if hq_save.ndim == 2 else hq_save.clone(),
+                        song_key,
+                    ))
 
                 except Exception as e:
                     print(f"[val audio] Error saving {song_key}: {e}")
 
         self.audio_model.train()
 
-        if perc_count > 0:
-            self._last_val_msstft = msstft_sum / perc_count
-            self._last_val_sfr    = sfr_sum    / perc_count
-            self.log("val_msstft", self._last_val_msstft, prog_bar=False, logger=True)
-            self.log("val_sfr",    self._last_val_sfr,    prog_bar=False, logger=True)
+        # Compute perceptual metrics in a background thread so training resumes immediately
+        import threading
+        def _compute_perc(pairs, module):
+            msstft_sum = 0.0
+            sfr_sum    = 0.0
+            count      = 0
+            for e, r, sk in pairs:
+                try:
+                    msstft_sum += _ms_log_stft_loss(e, r)
+                    sfr_sum    += _spectral_flatness_ratio(e, r)
+                    count += 1
+                except Exception as _me:
+                    print(f"[val metrics] {sk}: {_me}")
+            if count > 0:
+                module._last_val_msstft = msstft_sum / count
+                module._last_val_sfr    = sfr_sum    / count
+
+        if perc_pairs:
+            t = threading.Thread(target=_compute_perc, args=(perc_pairs, self), daemon=True)
+            t.start()
+            # Join before next val run so we don't pile up threads
+            if hasattr(self, '_perc_thread') and self._perc_thread is not None:
+                self._perc_thread.join(timeout=30)
+            self._perc_thread = t
 
     def on_validation_epoch_end(self):
+        # Wait for previous perceptual metric thread before logging new val results
+        if self._perc_thread is not None:
+            self._perc_thread.join(timeout=30)
+            self._perc_thread = None
+
         self._last_val_sisdr  = None
         self._last_val_msstft = None
         self._last_val_sfr    = None
@@ -434,11 +454,13 @@ class AudioLightningModule(pl.LightningModule):
         if self.trainer.sanity_checking:
             return
 
-        # First real val run: lock fixed evaluation indices, then audio refs
-        if self._val_fixed_indices is None:
+        # First real val run: lock fixed evaluation indices, then audio refs.
+        # Only re-lock if still None after collecting seen indices this run.
+        # If loaded from checkpoint, _val_fixed_indices is already set -- don't re-lock.
+        if self._val_fixed_indices is None and getattr(self, '_val_seen_indices', []):
             self._lock_val_fixed_indices()
 
-        if self._val_locked_refs is None:
+        if self._val_locked_refs is None and self._val_fixed_indices is not None:
             self._lock_val_refs()
 
         self._save_val_audio()
