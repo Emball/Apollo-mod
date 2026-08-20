@@ -865,7 +865,21 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         cfg.logger.save_dir          = os.path.join(_run_dir, "logs")
         cfg.trainer.default_root_dir = _run_dir
 
-    callbacks: List[Callback] = []
+    from pytorch_lightning.callbacks import TQDMProgressBar
+
+    class TrainRateProgressBar(TQDMProgressBar):
+        """Resets the TQDM rate display when training resumes after validation,
+        preventing the val dataloader's high it/s from bleeding into the train bar."""
+        def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
+            super().on_train_batch_start(trainer, pl_module, batch, batch_idx)
+            if batch_idx == 0 and self.train_progress_bar is not None:
+                try:
+                    self.train_progress_bar.reset(total=self.train_progress_bar.total)
+                    self.train_progress_bar.start_t = None
+                except Exception:
+                    pass
+
+    callbacks: List[Callback] = [TrainRateProgressBar()]
 
     if cfg.get("early_stopping"):
         print_only(f"Instantiating early_stopping")
