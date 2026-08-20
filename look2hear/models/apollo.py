@@ -1,5 +1,5 @@
 # @claude last-modified: 2026-05-05T06:34:39Z
-# @claude last-commit: feat: major update — TUI, augmentation system, gradient checkpointing, optimization bootstrap
+# @claude last-commit: feat: major update -- TUI, augmentation system, gradient checkpointing, optimization bootstrap
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

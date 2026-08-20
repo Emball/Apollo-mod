@@ -67,7 +67,7 @@ def test(cfg):
         if idx % 10 == 0:
             dicts = metrics.update()
             print_only(
-                f"Processed {idx}/{length} — "
+                f"Processed {idx}/{length} -- "
                 f"SDR: {dicts['sdr']}, SI-SNR: {dicts['si-snr']}, VISQOL: {dicts['visqol']}"
             )
 

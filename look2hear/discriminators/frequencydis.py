@@ -1,5 +1,5 @@
 # @claude last-modified: 2026-05-05T06:34:39Z
-# @claude last-commit: feat: major update — TUI, augmentation system, gradient checkpointing, optimization bootstrap
+# @claude last-commit: feat: major update -- TUI, augmentation system, gradient checkpointing, optimization bootstrap
 ###
 # Modified from original Apollo frequencydis.py
 # Changes:
@@ -26,7 +26,7 @@ class MultiFrequencyDiscriminator(nn.Module):
             for _ in range(len(self.window))
         ])
 
-        # Inverse window size weighting — smaller windows get higher weight
+        # Inverse window size weighting -- smaller windows get higher weight
         # since they resolve high frequency content better.
         raw_weights = torch.tensor([1.0 / w for w in window], dtype=torch.float32)
         self.register_buffer(
@@ -34,7 +34,7 @@ class MultiFrequencyDiscriminator(nn.Module):
             raw_weights / raw_weights.mean()
         )
 
-        # Hann windows cached as plain tensors — NOT register_buffer so they
+        # Hann windows cached as plain tensors -- NOT register_buffer so they
         # never appear in state_dict or checkpoints (fully deterministic from
         # window size, carry no learned state). Moved to device on first use.
         self._hann_cache: dict = {w: torch.hann_window(w) for w in window}
@@ -75,7 +75,7 @@ class MultiFrequencyDiscriminator(nn.Module):
                 est_RI[:, :, :valid_enc].contiguous()
             )
 
-            # Scale output by window weight — applied to every forward pass (real
+            # Scale output by window weight -- applied to every forward pass (real
             # AND fake) so the weight is consistent across both sides of the D loss.
             weight = self.window_weights[i]
             est_outputs.append(est_out * weight)

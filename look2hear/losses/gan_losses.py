@@ -1,5 +1,5 @@
 # @claude last-modified: 2026-05-05T06:34:39Z
-# @claude last-commit: feat: major update — TUI, augmentation system, gradient checkpointing, optimization bootstrap
+# @claude last-commit: feat: major update -- TUI, augmentation system, gradient checkpointing, optimization bootstrap
 ###
 # Modified from original Apollo gan_losses.py
 # Changes:
@@ -32,7 +32,7 @@ class MultiFrequencyGenLoss(_Loss):
         self.eps = eps
         self.all_win = [32, 64, 128, 256, 512, 1024, 2048]
 
-        # Hann windows and HF weight tensors cached as plain dicts — NOT
+        # Hann windows and HF weight tensors cached as plain dicts -- NOT
         # register_buffer so they never pollute state_dict or checkpoints.
         # Both are fully deterministic from constructor args; no learned state.
         # Moved to device lazily on first _freq_MAE call.

@@ -1,7 +1,7 @@
 # @claude last-modified: 2026-05-05T06:34:39Z
-# @claude last-commit: feat: major update — TUI, augmentation system, gradient checkpointing, optimization bootstrap
+# @claude last-commit: feat: major update -- TUI, augmentation system, gradient checkpointing, optimization bootstrap
 
-# Must be set before torch is imported — CUDA allocator reads this env var at
+# Must be set before torch is imported -- CUDA allocator reads this env var at
 # device init time. Setting it inside apply_optimizations() (post-import) has
 # no effect because CUDA is already initialised by then.
 import os
@@ -17,7 +17,7 @@ import hydra
 from pytorch_lightning import Callback, LightningDataModule, LightningModule, Trainer
 from omegaconf import DictConfig
 
-# Optimisation bootstrap — reads cfg.optimizations and applies everything
+# Optimisation bootstrap -- reads cfg.optimizations and applies everything
 # in one place, before any model or trainer code runs.
 
 def apply_optimizations(cfg: DictConfig) -> None:
@@ -52,7 +52,7 @@ def apply_optimizations(cfg: DictConfig) -> None:
     # Misc env flags
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-    # RAM watchdog — kills the process cleanly if system RAM crosses the threshold
+    # RAM watchdog -- kills the process cleanly if system RAM crosses the threshold
     # before the OS does it violently. Threshold is a fraction of total RAM (default 90%).
     ram_limit = opt.get("ram_limit_fraction", 0.90)
     _start_ram_watchdog(ram_limit)
@@ -66,14 +66,14 @@ def _start_ram_watchdog(limit_fraction: float = 0.90) -> None:
     try:
         import psutil
     except ImportError:
-        print_only("[watchdog] psutil not installed — RAM watchdog disabled. "
+        print_only("[watchdog] psutil not installed -- RAM watchdog disabled. "
                    "Run: pip install psutil")
         return
 
     total = psutil.virtual_memory().total
     threshold = total * limit_fraction
     threshold_gb = threshold / (1024 ** 3)
-    print_only(f"[watchdog] RAM watchdog active — will exit cleanly above "
+    print_only(f"[watchdog] RAM watchdog active -- will exit cleanly above "
                f"{threshold_gb:.1f} GB ({limit_fraction*100:.0f}% of total)")
 
     def _watch():
@@ -84,7 +84,7 @@ def _start_ram_watchdog(limit_fraction: float = 0.90) -> None:
             if used >= threshold:
                 used_gb = used / (1024 ** 3)
                 print_only(f"\n[watchdog] SYSTEM RAM CRITICAL: {used_gb:.1f} GB used "
-                            f"(threshold {threshold_gb:.1f} GB) — exiting cleanly to protect OS")
+                            f"(threshold {threshold_gb:.1f} GB) -- exiting cleanly to protect OS")
                 os._exit(1)
             time.sleep(2)
 
@@ -100,7 +100,7 @@ from look2hear.utils import print_only
 import warnings
 warnings.filterwarnings("ignore")
 
-# Constants — chunk size is read from cfg.datas.segment_sec at runtime in prepare_data()
+# Constants -- chunk size is read from cfg.datas.segment_sec at runtime in prepare_data()
 _SR      = 44100
 _OVERLAP = 0.5
 
@@ -110,10 +110,10 @@ _CHUNK_SAMPLES = int(_CHUNK_SEC * _SR)
 _HOP_SAMPLES   = int(_CHUNK_SAMPLES * (1 - _OVERLAP))
 _SUPPORTED_EXTS = {".wav", ".mp3", ".flac"}
 
-# Models directory — pretrained weights are looked up here automatically
+# Models directory -- pretrained weights are looked up here automatically
 _MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
-# Pretrained model filenames to search for (base → universal).
+# Pretrained model filenames to search for (base -> universal).
 # Set download URLs here once you have them; None = skip auto-download.
 _PRETRAINED_MODELS = {
     "apollo_model.ckpt":     None,  # base model   (feature_dim=256)
@@ -121,7 +121,7 @@ _PRETRAINED_MODELS = {
     "pytorch_model.bin":     None,  # HF bin format (feature_dim=256)
 }
 
-# Data preparation — runs before training, skips gracefully if already done
+# Data preparation -- runs before training, skips gracefully if already done
 
 def _load_wav_stereo(path: str, frame_offset: int = 0):
     """Load audio (WAV, MP3, FLAC), resample to _SR if needed, force stereo float32.
@@ -217,19 +217,19 @@ def _normalize_data_dir(src_root: str, split_name: str) -> bool:
     Accepts two input layouts and normalizes both into src_root/LQ + src_root/HQ.
     Returns True if src_root is ready (has matched LQ/HQ content), False otherwise.
 
-    Layout A — subfolder pairs (existing):
+    Layout A -- subfolder pairs (existing):
         src_root/song1_LQ/   song1_HQ/
         src_root/song2_LQ/   song2_HQ/
-        → moves audio files from each _LQ/_HQ subdir into src_root/LQ/ + src_root/HQ/
+        -> moves audio files from each _LQ/_HQ subdir into src_root/LQ/ + src_root/HQ/
 
-    Layout B — flat postfix files (new shortcut):
+    Layout B -- flat postfix files (new shortcut):
         src_root/song1_LQ.wav   song1_HQ.wav
         src_root/song2_LQ.flac  song2_HQ.flac
-        → moves files into src_root/LQ/ + src_root/HQ/, stripping the _LQ/_HQ suffix
+        -> moves files into src_root/LQ/ + src_root/HQ/, stripping the _LQ/_HQ suffix
 
-    Layout C — already normalized (LQ/ and HQ/ subdirs exist):
+    Layout C -- already normalized (LQ/ and HQ/ subdirs exist):
         src_root/LQ/   src_root/HQ/
-        → nothing to do
+        -> nothing to do
 
     After normalization src_root always looks like:
         src_root/LQ/<stem>.wav ...
@@ -243,12 +243,12 @@ def _normalize_data_dir(src_root: str, split_name: str) -> bool:
     lq_dir = os.path.join(src_root, "LQ")
     hq_dir = os.path.join(src_root, "HQ")
 
-    # Layout C — already normalized, nothing to do
+    # Layout C -- already normalized, nothing to do
     if os.path.isdir(lq_dir) and os.path.isdir(hq_dir):
         lq_files = [f for f in os.listdir(lq_dir) if os.path.splitext(f)[1].lower() in _SUPPORTED_EXTS]
         hq_files = [f for f in os.listdir(hq_dir) if os.path.splitext(f)[1].lower() in _SUPPORTED_EXTS]
         if lq_files and hq_files:
-            print_only(f"[data/{split_name}] LQ/ + HQ/ already present — skipping normalization.")
+            print_only(f"[data/{split_name}] LQ/ + HQ/ already present -- skipping normalization.")
             return True
 
     entries = os.listdir(src_root)
@@ -279,7 +279,7 @@ def _normalize_data_dir(src_root: str, split_name: str) -> bool:
     os.makedirs(lq_dir, exist_ok=True)
     os.makedirs(hq_dir, exist_ok=True)
 
-    # Move Layout A: song_LQ/ → LQ/<stem_from_dir>.wav (files keep their own names)
+    # Move Layout A: song_LQ/ -> LQ/<stem_from_dir>.wav (files keep their own names)
     for stem in dir_pairs:
         src_lq = os.path.join(src_root, lq_dirs[stem])
         src_hq = os.path.join(src_root, hq_dirs[stem])
@@ -297,10 +297,10 @@ def _normalize_data_dir(src_root: str, split_name: str) -> bool:
             os.rmdir(src_lq)
             os.rmdir(src_hq)
         except OSError:
-            pass  # not empty (e.g. had subdirs or other files) — leave it
+            pass  # not empty (e.g. had subdirs or other files) -- leave it
         print_only(f"[data/{split_name}]   normalized dir pair: {stem}")
 
-    # Move Layout B: song_LQ.wav → LQ/song.wav  (strip postfix from filename)
+    # Move Layout B: song_LQ.wav -> LQ/song.wav  (strip postfix from filename)
     for stem in file_pairs:
         lq_fname = lq_files_flat[stem]
         hq_fname = hq_files_flat[stem]
@@ -399,9 +399,9 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     Returns the number of chunk pairs written. Skips if already chunked.
 
     Accepted src_root layouts (all auto-detected and normalized):
-        A)  src_root/<song>_LQ/  <song>_HQ/     — subdirectory pairs
-        B)  src_root/<song>_LQ.wav  <song>_HQ.wav  — flat postfix files
-        C)  src_root/LQ/  src_root/HQ/           — already normalized
+        A)  src_root/<song>_LQ/  <song>_HQ/     -- subdirectory pairs
+        B)  src_root/<song>_LQ.wav  <song>_HQ.wav  -- flat postfix files
+        C)  src_root/LQ/  src_root/HQ/           -- already normalized
     """
     lq_out = os.path.join(dst_root, "LQ")
     hq_out = os.path.join(dst_root, "HQ")
@@ -424,10 +424,10 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     if os.path.isdir(lq_out) and any(f.endswith(".wav") for f in os.listdir(lq_out)):
         if _manifest_valid():
             n = sum(1 for f in os.listdir(lq_out) if f.endswith(".wav"))
-            print_only(f"[data/{split_name}] Already chunked ({n} pairs) — skipping.")
+            print_only(f"[data/{split_name}] Already chunked ({n} pairs) -- skipping.")
             return n
         else:
-            print_only(f"[data/{split_name}] Chunk parameters changed — re-chunking.")
+            print_only(f"[data/{split_name}] Chunk parameters changed -- re-chunking.")
 
     # Normalize the source layout first
     if not _normalize_data_dir(src_root, split_name):
@@ -460,7 +460,7 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
 
     sep = "=" * 58
     print_only(f"\n[data/{split_name}] {sep}")
-    print_only(f"[data/{split_name}] Chunking {len(matched)} pairs → {dst_root}")
+    print_only(f"[data/{split_name}] Chunking {len(matched)} pairs -> {dst_root}")
     print_only(f"[data/{split_name}] {sep}\n")
 
     total = 0
@@ -478,7 +478,7 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         print_only(f"[data/{split_name}]   {stem}: {len(saved)} chunks")
         total += len(saved)
 
-    print_only(f"[data/{split_name}] Done — {total} chunk pairs → {dst_root}\n")
+    print_only(f"[data/{split_name}] Done -- {total} chunk pairs -> {dst_root}\n")
     import json as _json
     with open(manifest_path, "w") as _f:
         _json.dump(_manifest_params(), _f, indent=2)
@@ -494,9 +494,9 @@ def prepare_data(cfg: DictConfig) -> None:
     Auto-preprocessing pipeline called before training.
 
     Accepts any of these layouts under data/train/ and data/val/:
-        A)  <song>_LQ/  <song>_HQ/        — subdirectory pairs
-        B)  <song>_LQ.wav  <song>_HQ.wav  — flat postfix files
-        C)  LQ/  HQ/                       — already normalized
+        A)  <song>_LQ/  <song>_HQ/        -- subdirectory pairs
+        B)  <song>_LQ.wav  <song>_HQ.wav  -- flat postfix files
+        C)  LQ/  HQ/                       -- already normalized
 
     Layouts A and B are automatically reorganized into LQ/ + HQ/ in-place,
     then chunked into:
@@ -530,7 +530,7 @@ def prepare_data(cfg: DictConfig) -> None:
 
     # Val bootstrap from train chunks
     # If val is still empty after chunking (no data/val source exists),
-    # copy a random selection of train chunks into val — without removing
+    # copy a random selection of train chunks into val -- without removing
     # them from training. Chunks are picked by randomly selecting songs first,
     # then random chunks from those songs, so val covers diverse source material.
     val_lq = os.path.join(val_chunks, "LQ")
@@ -547,9 +547,9 @@ def prepare_data(cfg: DictConfig) -> None:
         train_hq = os.path.join(train_chunks, "HQ")
 
         if not os.path.isdir(train_lq) or not any(f.endswith(".wav") for f in os.listdir(train_lq)):
-            print_only("[data/val] No train chunks available for val bootstrap — skipping.")
+            print_only("[data/val] No train chunks available for val bootstrap -- skipping.")
         else:
-            # Build stem → [chunk filenames] map grouped by song
+            # Build stem -> [chunk filenames] map grouped by song
             from collections import defaultdict
             song_chunks = defaultdict(list)
             for fname in sorted(os.listdir(train_lq)):
@@ -593,7 +593,7 @@ def freeze_early_layers(model, n_layers_to_freeze=4):
     """
     Freeze the band-split front-end (BN) and first N BSNet layers.
     Default of 4 keeps VRAM and backprop cost manageable on the universal
-    model (feature_dim=384) with an 11 GB card — only layers 4-5 and the
+    model (feature_dim=384) with an 11 GB card -- only layers 4-5 and the
     output heads are trained, which is where band reconstruction happens
     and where codec-specific adaptation matters most.
     """
@@ -621,7 +621,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # Auto-preprocess raw data and bootstrap eval if needed
     prepare_data(cfg)
 
-    # Verify chunks exist — if data/ was empty, provide a clear error
+    # Verify chunks exist -- if data/ was empty, provide a clear error
     script_dir = os.path.dirname(os.path.abspath(__file__))
     train_lq   = os.path.join(script_dir, cfg.datas.train_dir, "LQ")
     if not os.path.isdir(train_lq) or not any(f.endswith(".wav") for f in os.listdir(train_lq)):
@@ -630,8 +630,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         print_only("ERROR: No training chunks found.")
         print_only("")
         print_only(f"  Populate data/{_name}/train/ and data/{_name}/val/ with paired audio files:")
-        print_only(f"    data/{_name}/train/LQ/   ← degraded audio (MP3, FLAC, WAV)")
-        print_only(f"    data/{_name}/train/HQ/   ← clean reference (same filenames)")
+        print_only(f"    data/{_name}/train/LQ/   <- degraded audio (MP3, FLAC, WAV)")
+        print_only(f"    data/{_name}/train/HQ/   <- clean reference (same filenames)")
         print_only(f"    data/{_name}/val/LQ/")
         print_only(f"    data/{_name}/val/HQ/")
         print_only("")
@@ -643,7 +643,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     print_only(f"Instantiating datamodule <{cfg.datas._target_}>")
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.datas)
 
-    # Resolve run directory — fresh start gets a timestamped subfolder,
+    # Resolve run directory -- fresh start gets a timestamped subfolder,
     # resume reuses the most recent existing run folder.
     from datetime import datetime as _dt
     _base_dir = os.path.join(cfg.exp.dir, cfg.exp.name)
@@ -661,10 +661,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             if _subdirs:
                 _run_dir = max(_subdirs, key=os.path.getmtime)
         if _run_dir is None:
-            # No existing runs — fresh start
+            # No existing runs -- fresh start
             _run_id = _dt.now().strftime("%Y%m%d_%H%M%S")
             _run_dir = os.path.join(_base_dir, _run_id)
-            print_only(f"[resume] No existing runs found — starting fresh run: {_run_id}")
+            print_only(f"[resume] No existing runs found -- starting fresh run: {_run_id}")
         else:
             _run_id = os.path.basename(_run_dir)
             ckpt_dir = os.path.join(_run_dir, "checkpoints")
@@ -677,9 +677,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 ckpt_path = max(candidates, key=os.path.getmtime)
                 print_only(f"[resume] Resuming run {_run_id}")
                 print_only(f"[resume] Checkpoint: {os.path.basename(ckpt_path)}")
-                print_only("[resume] Skipping pretrain weight loading — checkpoint takes precedence.")
+                print_only("[resume] Skipping pretrain weight loading -- checkpoint takes precedence.")
             else:
-                print_only(f"[resume] Run folder found but no checkpoints — starting from pretrained weights.")
+                print_only(f"[resume] Run folder found but no checkpoints -- starting from pretrained weights.")
     else:
         _run_id = _dt.now().strftime("%Y%m%d_%H%M%S")
         _run_dir = os.path.join(_base_dir, _run_id)
@@ -725,10 +725,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         return m
 
     if ckpt_path is not None:
-        # Resuming — Lightning will restore all weights from the checkpoint.
+        # Resuming -- Lightning will restore all weights from the checkpoint.
         # Just instantiate a bare model so the system can be constructed;
         # the state dict will be overwritten by trainer.fit(ckpt_path=...).
-        print_only("[weights] Resume mode — skipping pretrain load, instantiating bare model.")
+        print_only("[weights] Resume mode -- skipping pretrain load, instantiating bare model.")
         model = look2hear.models.apollo.Apollo(
             sr=44100, win=20, feature_dim=feature_dim, layer=6
         )
@@ -758,8 +758,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             model = _load_weights(local_path, feature_dim)
             print_only("[weights] Weights loaded.")
         else:
-            # Final fallback — HuggingFace hub
-            print_only("[weights] No local model found in models/ — downloading from HuggingFace...")
+            # Final fallback -- HuggingFace hub
+            print_only("[weights] No local model found in models/ -- downloading from HuggingFace...")
             from huggingface_hub import hf_hub_download
             weights_path = hf_hub_download(
                 repo_id="JusperLee/Apollo",
@@ -771,11 +771,11 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             )
             print_only("[weights] Pretrained weights loaded.")
 
-    # Freeze early layers for fine-tuning — count driven by config
+    # Freeze early layers for fine-tuning -- count driven by config
     # (no-op when resuming since frozen params are restored by the checkpoint too)
     freeze_early_layers(model, n_layers_to_freeze=cfg.training.n_layers_to_freeze)
 
-    # Instantiate discriminator fresh — learns your artifact type from scratch
+    # Instantiate discriminator fresh -- learns your artifact type from scratch
     print_only(f"Instantiating Discriminator <{cfg.discriminator._target_}>")
     discriminator = hydra.utils.instantiate(cfg.discriminator)
 
@@ -786,9 +786,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     # Optimizer factory
     # Reads cfg.optimizer.type to select the optimizer:
-    #   adamw       — standard 32-bit AdamW
-    #   adamw_8bit  — 8-bit AdamW via bitsandbytes (pip install bitsandbytes)
-    #   cpu_offload — 32-bit AdamW with momentum states in CPU RAM
+    #   adamw       -- standard 32-bit AdamW
+    #   adamw_8bit  -- 8-bit AdamW via bitsandbytes (pip install bitsandbytes)
+    #   cpu_offload -- 32-bit AdamW with momentum states in CPU RAM
     def _make_optimizer(params, lr, weight_decay, betas):
         opt_type = opt_cfg.get("type", "adamw").lower()
 
@@ -796,21 +796,21 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             try:
                 import bitsandbytes as bnb
                 opt = bnb.optim.AdamW8bit(params, lr=lr, weight_decay=weight_decay, betas=betas)
-                print_only(f"[optimizer] AdamW8bit (bitsandbytes) — lr={lr}")
+                print_only(f"[optimizer] AdamW8bit (bitsandbytes) -- lr={lr}")
                 return opt
             except ImportError:
-                print_only("[optimizer] bitsandbytes not installed — falling back to AdamW32bit")
+                print_only("[optimizer] bitsandbytes not installed -- falling back to AdamW32bit")
 
         if opt_type == "cpu_offload":
             try:
                 opt = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay, betas=betas, fused=False)
-                print_only(f"[optimizer] AdamW32bit with CPU offload — lr={lr}")
+                print_only(f"[optimizer] AdamW32bit with CPU offload -- lr={lr}")
                 return opt
             except Exception as e:
                 print_only(f"[optimizer] CPU offload failed ({e}), falling back to AdamW32bit")
 
         opt = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay, betas=betas)
-        print_only(f"[optimizer] AdamW32bit — lr={lr}")
+        print_only(f"[optimizer] AdamW32bit -- lr={lr}")
         return opt
 
     optimizer_g = _make_optimizer(
@@ -881,7 +881,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             self._val_elapsed    = 0.0    # cumulative time spent in val (excluded from rate)
             self._val_t0         = None
             total = self._epoch_batches
-            print(f"\nEpoch {trainer.current_epoch} — {total} batches", flush=True)
+            print(f"\nEpoch {trainer.current_epoch} -- {total} batches", flush=True)
 
         def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
             now = _time.monotonic()
@@ -924,7 +924,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 if sisdr  is not None: parts.append(f"sisdr={float(sisdr):.3f}")
                 if msstft is not None: parts.append(f"msstft={float(msstft):.4f}")
                 if sfr    is not None:
-                    flag = "  noise↑" if float(sfr) > 1.05 else ""
+                    flag = "  noise^" if float(sfr) > 1.05 else ""
                     parts.append(f"sfr={float(sfr):.4f}{flag}")
                 if parts:
                     print(f" [val] {' '.join(parts)}  ({val_dur:.1f}s)", flush=True)
@@ -944,7 +944,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     logger = hydra.utils.instantiate(cfg.logger)
     logger.log_hyperparams = lambda *a, **kw: None
 
-    # Instantiate trainer — single GPU, no DDP
+    # Instantiate trainer -- single GPU, no DDP
     print_only(f"Instantiating trainer")
     trainer: Trainer = hydra.utils.instantiate(
         cfg.trainer,
@@ -954,7 +954,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     )
 
     def _save_and_exit(sig=None, frame=None):
-        print_only("\n[interrupt] Ctrl+C caught — saving checkpoint...")
+        print_only("\n[interrupt] Ctrl+C caught -- saving checkpoint...")
         try:
             ckpt_dir = os.path.join(_run_dir, "checkpoints")
             os.makedirs(ckpt_dir, exist_ok=True)
@@ -977,12 +977,12 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     try:
         trainer.fit(system, datamodule=datamodule, ckpt_path=ckpt_path)
     except torch.cuda.OutOfMemoryError as e:
-        print_only(f"\n[OOM] CUDA out of memory — exiting cleanly. Try reducing batch_size or num_workers.")
+        print_only(f"\n[OOM] CUDA out of memory -- exiting cleanly. Try reducing batch_size or num_workers.")
         print_only(f"[OOM] {e}")
         torch.cuda.empty_cache()
         os._exit(1)
     except MemoryError as e:
-        print_only(f"\n[OOM] System RAM exhausted — exiting cleanly.")
+        print_only(f"\n[OOM] System RAM exhausted -- exiting cleanly.")
         print_only(f"[OOM] {e}")
         os._exit(1)
     print_only("Training finished!")
@@ -1020,7 +1020,7 @@ if __name__ == "__main__":
 
     # --- Autodiscovery ---
     # Derive exp.name from config filename stem if not explicitly set in config.
-    # e.g. configs/apollo_sftl.yaml → "apollo_sftl"
+    # e.g. configs/apollo_sftl.yaml -> "apollo_sftl"
     _conf_stem = os.path.splitext(os.path.basename(args.conf_dir))[0]
     if not cfg.exp.get("name"):
         cfg.exp.name = _conf_stem
@@ -1053,7 +1053,7 @@ if __name__ == "__main__":
             for _f in _loose:
                 _shutil.move(os.path.join(_data_root, _f),
                              os.path.join(_data_name_root, _f))
-            print(f"[autodiscovery] Moved {len(_loose)} loose file(s) from data/ → data/{cfg.exp.name}/")
+            print(f"[autodiscovery] Moved {len(_loose)} loose file(s) from data/ -> data/{cfg.exp.name}/")
 
     print(f"[autodiscovery] name={cfg.exp.name}  data=data/{cfg.exp.name}  chunks=chunks/{cfg.exp.name}")
     # --- End autodiscovery ---

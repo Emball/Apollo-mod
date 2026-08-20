@@ -1,5 +1,5 @@
 """
-Apollo TUI — keyboard-navigated launcher for train / inference / utilities.
+Apollo TUI -- keyboard-navigated launcher for train / inference / utilities.
 
 Navigation: arrow keys or j/k, Enter to select, Escape or q to go back.
 During training: output streams live; press Ctrl+C to stop and return to menu.
@@ -304,7 +304,7 @@ def _run_with_live_output(cmd: list[str], label: str) -> None:
 
     except KeyboardInterrupt:
         if proc and proc.poll() is None:
-            console.print("\n[yellow]Ctrl+C caught — sending stop signal...[/]")
+            console.print("\n[yellow]Ctrl+C caught -- sending stop signal...[/]")
             if IS_WINDOWS:
                 proc.send_signal(signal.CTRL_C_EVENT)  # type: ignore[attr-defined]
             else:
@@ -351,7 +351,7 @@ def screen_train(state: dict) -> None:
         display = [f"{items[i]}  [dim]{summaries[i]}[/dim]" for i in range(len(items))]
         # Rich doesn't render markup in Text directly in menu, so strip for plain display
         plain = [f"{items[i]}   {summaries[i]}" for i in range(len(items))]
-        idx = _pick("Train — select config", plain, hint="Enter=start  Esc=back", start=start)
+        idx = _pick("Train -- select config", plain, hint="Enter=start  Esc=back", start=start)
         if idx is None:
             return
 
@@ -392,7 +392,7 @@ def _pick_input_file(state: dict, cfg_stem: str) -> str | None:
     start = next((i for i, n in enumerate(file_names) if n == Path(last).name), 0)
 
     idx = _pick(
-        "Inference — select input",
+        "Inference -- select input",
         items,
         hint="Enter=select  Esc=back",
         start=start,
@@ -413,7 +413,7 @@ def _pick_input_file(state: dict, cfg_stem: str) -> str | None:
 
 
 def _pick_output_path(state: dict, cfg_stem: str, input_path: str) -> str | None:
-    """Pick output path — default to /output/<input_stem>_restored.wav or last used."""
+    """Pick output path -- default to /output/<input_stem>_restored.wav or last used."""
     last = state.get("inference", {}).get(cfg_stem, {}).get("last_output", "")
     input_stem = Path(input_path).stem
     default = str(OUTPUT_DIR / f"{input_stem}_restored.wav")
@@ -423,7 +423,7 @@ def _pick_output_path(state: dict, cfg_stem: str, input_path: str) -> str | None
         f"Default: {suggested}",
         "[ Enter custom path ]",
     ]
-    idx = _pick("Inference — output path", items, hint="Enter=select  Esc=back")
+    idx = _pick("Inference -- output path", items, hint="Enter=select  Esc=back")
     if idx is None:
         return None
     if idx == 0:
@@ -447,7 +447,7 @@ def screen_inference(state: dict) -> None:
     start = next((i for i, c in enumerate(configs) if c.name == last_cfg), 0)
 
     items = [c.stem for c in configs]
-    idx = _pick("Inference — select config", items, hint="Enter=select  Esc=back", start=start)
+    idx = _pick("Inference -- select config", items, hint="Enter=select  Esc=back", start=start)
     if idx is None:
         return
 
@@ -477,7 +477,7 @@ def screen_inference(state: dict) -> None:
     w_start = next((i for i, p in enumerate(model_paths) if p == last_weights), 0)
 
     widx = _pick(
-        "Inference — select model",
+        "Inference -- select model",
         model_options,
         hint="Enter=select  Esc=back",
         start=w_start,
@@ -614,7 +614,7 @@ def screen_edit_config(state: dict) -> None:
     start = next((i for i, c in enumerate(configs) if c.name == last_cfg), 0)
     items = [c.stem for c in configs]
 
-    idx = _pick("Edit Config — select config", items, hint="Enter=select  Esc=back", start=start)
+    idx = _pick("Edit Config -- select config", items, hint="Enter=select  Esc=back", start=start)
     if idx is None:
         return
 
@@ -709,7 +709,7 @@ def _util_clean_chunks() -> None:
         return
 
     items = [f"{name}  ({_dir_size(path)})" for name, path in dirs] + ["Back"]
-    idx = _pick("Clean Chunks — select folder to delete", items, hint="Enter=delete  Esc=back")
+    idx = _pick("Clean Chunks -- select folder to delete", items, hint="Enter=delete  Esc=back")
     if idx is None or idx == len(items) - 1:
         return
 
@@ -792,8 +792,8 @@ def _util_view_runs() -> None:
                 table.add_row(
                     cfg_dir.name,
                     run_dir.name,
-                    f"{best_loss:.4f}" if best_loss else "—",
-                    str(best_step) if best_step else "—",
+                    f"{best_loss:.4f}" if best_loss else "--",
+                    str(best_step) if best_step else "--",
                     str(len(ckpts)),
                 )
 
@@ -827,7 +827,7 @@ def main() -> None:
 
     sel = 0
     while True:
-        idx = _pick("Main Menu", MAIN_ITEMS, hint="↑↓ navigate  Enter select  q quit", start=sel)
+        idx = _pick("Main Menu", MAIN_ITEMS, hint="^v navigate  Enter select  q quit", start=sel)
         if idx is None or idx == len(MAIN_ITEMS) - 1:
             console.clear()
             break

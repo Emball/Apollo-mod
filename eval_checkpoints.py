@@ -102,7 +102,7 @@ def _eval_checkpoint(model, chunks, device):
                 hq, _ = torchaudio.load(hq_path)
                 lq, hq = _normalize_pair(lq, hq)
 
-                # Apollo expects (B, C, T) — single channel
+                # Apollo expects (B, C, T) -- single channel
                 if lq.shape[0] == 2:
                     lq = lq[0:1]
                     hq = hq[0:1]
@@ -227,7 +227,7 @@ def main():
     print(f"{'Rank':<5} {'SI-SDR':>8} {'MSSTFT':>8} {'SFR':>8}  Checkpoint")
     print("-" * 80)
     for rank, (fname, _, m) in enumerate(results, 1):
-        sfr_flag = " noise↑" if m["sfr"] > 1.05 else ""
+        sfr_flag = " noise^" if m["sfr"] > 1.05 else ""
         print(f"  {rank:<3} {m['sisdr']:>8.4f} {m['msstft']:>8.4f} {m['sfr']:>8.4f}{sfr_flag}  {fname}")
     print("=" * 80)
     print(f"\nBest checkpoint: {results[0][0]}")
@@ -237,7 +237,7 @@ def main():
         print("\n[eval] Renaming checkpoints with accurate val_loss ...")
         for fname, ckpt_path, m in results:
             sisdr = m["sisdr"]
-            # Build new name — preserve step number if present
+            # Build new name -- preserve step number if present
             step_match = re.search(r"step[=_](\d+)", fname)
             if step_match:
                 step = step_match.group(1)

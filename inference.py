@@ -24,7 +24,7 @@ import look2hear.models
 import look2hear.models.apollo
 
 _SR          = 44100  # Apollo's native sample rate
-_CHUNK_SEC   = 4      # default chunk size — matches training segment_sec
+_CHUNK_SEC   = 4      # default chunk size -- matches training segment_sec
 _OVERLAP_SEC = 0.5    # crossfade overlap at chunk boundaries
 
 _MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
@@ -158,7 +158,7 @@ def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path):
     """Process audio in chunks and write each chunk to disk immediately.
     
     Writes sequentially so the output WAV can be previewed in Audacity
-    while inference is still running — just drag the file in and hit play.
+    while inference is still running -- just drag the file in and hit play.
     Returns None (output already on disk).
     """
     import soundfile as sf
@@ -196,7 +196,7 @@ def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path):
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
 
-    # 32-bit float WAV: no integer ceiling, no clipping at ±1.0.
+    # 32-bit float WAV: no integer ceiling, no clipping at +/-1.0.
     with sf.SoundFile(out_path, mode="w", samplerate=sr, channels=2,
                       subtype="FLOAT") as f:
         start     = 0
@@ -207,7 +207,7 @@ def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path):
 
             with torch.no_grad():
                 enhanced = model(chunk)
-            # enhanced: [1, 2, T_chunk] — restore original level after inference
+            # enhanced: [1, 2, T_chunk] -- restore original level after inference
             enhanced = enhanced.squeeze(0).cpu() * peak  # [2, T_chunk]
 
             chunk_len = enhanced.shape[-1]
@@ -217,7 +217,7 @@ def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path):
                 fade_in  = torch.linspace(0.0, 1.0, fade_len)
                 fade_out = 1.0 - fade_in
 
-                # crossfade zone — blend previous tail with current head
+                # crossfade zone -- blend previous tail with current head
                 blended = prev_tail[..., :fade_len] * fade_out \
                         + enhanced[..., :fade_len]  * fade_in
 
@@ -228,7 +228,7 @@ def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path):
                 if write_end > fade_len:
                     f.write(enhanced[..., fade_len:write_end].T.numpy())
             else:
-                # first chunk — write everything except the tail we'll crossfade next time
+                # first chunk -- write everything except the tail we'll crossfade next time
                 write_end = chunk_len - overlap_samples if (T - end) > 0 else chunk_len
                 write_end = max(write_end, 0)
                 if write_end > 0:
@@ -239,7 +239,7 @@ def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path):
                 tail_start = max(0, chunk_len - overlap_samples)
                 prev_tail  = enhanced[..., tail_start:]
             else:
-                # last chunk — flush any remaining tail
+                # last chunk -- flush any remaining tail
                 if prev_tail is not None and overlap_samples > 0:
                     tail_start = max(0, chunk_len - overlap_samples)
                     f.write(enhanced[..., tail_start:].T.numpy())
@@ -250,7 +250,7 @@ def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path):
 
             chunk_idx += 1
             print(f"[inference] Chunk {chunk_idx} done  "
-                  f"({start/sr:.1f}s – {end/sr:.1f}s)  -> {out_path}")
+                  f"({start/sr:.1f}s - {end/sr:.1f}s)  -> {out_path}")
             start += hop_samples
 
     return None  # output already written
@@ -305,7 +305,7 @@ def main(
     chunked=True,
 ):
     # Config fills only args the user didn't explicitly provide (still None).
-    # Explicit CLI args always win — config is a fallback, not an override.
+    # Explicit CLI args always win -- config is a fallback, not an override.
     if conf_dir is not None:
         cfg = load_config(conf_dir)
         m = cfg.get("model", {})
@@ -344,7 +344,7 @@ def main(
 
     if chunked and audio.shape[-1] > int(chunk_sec * sr):
         print(f"[inference] Chunked inference ({chunk_sec}s chunks, {overlap_sec}s overlap)")
-        print(f"[inference] Writing sequentially — you can preview in Audacity now")
+        print(f"[inference] Writing sequentially -- you can preview in Audacity now")
         _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path=output_wav)
         print(f"[inference] Done -> {output_wav}")
     else:

@@ -1,5 +1,5 @@
 # @claude last-modified: 2026-05-05T06:34:39Z
-# @claude last-commit: feat: major update — TUI, augmentation system, gradient checkpointing, optimization bootstrap
+# @claude last-commit: feat: major update -- TUI, augmentation system, gradient checkpointing, optimization bootstrap
 ###
 # Modified from original Apollo audio_litmodule.py
 # Changes:
@@ -131,7 +131,7 @@ class AudioLightningModule(pl.LightningModule):
     def _enable_gradient_checkpointing(self):
         """
         Wrap BSNet layers with torch.utils.checkpoint so intermediate activations
-        are recomputed during backward instead of stored — trades ~30% compute for
+        are recomputed during backward instead of stored -- trades ~30% compute for
         large VRAM savings.
 
         FrequencyDiscriminator is deliberately NOT checkpointed: feature matching
@@ -188,7 +188,7 @@ class AudioLightningModule(pl.LightningModule):
         self._accum_loss_d = (self._accum_loss_d or 0.0) + loss_d.detach()
         self.manual_backward(loss_d)
 
-        # Detach targets_feature_maps — fixed reference for feature matching;
+        # Detach targets_feature_maps -- fixed reference for feature matching;
         # dropping the D graph here is the primary VRAM saving.
         targets_feature_maps = [
             [f.detach() for f in fmap] for fmap in targets_feature_maps
@@ -212,7 +212,7 @@ class AudioLightningModule(pl.LightningModule):
         for p in self.discriminator.parameters():
             p.requires_grad_(True)
 
-        # Optimizer step — only after accumulating grad_accum_steps batches
+        # Optimizer step -- only after accumulating grad_accum_steps batches
         if is_last_accum:
             self.clip_gradients(optimizer_d, gradient_clip_val=5, gradient_clip_algorithm="norm")
             optimizer_d.step()
@@ -220,7 +220,7 @@ class AudioLightningModule(pl.LightningModule):
             self.clip_gradients(optimizer_g, gradient_clip_val=5, gradient_clip_algorithm="norm")
             optimizer_g.step()
 
-            # Log scalar values only — .item() detaches from GPU, avoiding the
+            # Log scalar values only -- .item() detaches from GPU, avoiding the
             # on_epoch=True accumulation bug (PL caches GPU tensors until epoch end).
             self.log("train_loss_d", float(self._accum_loss_d), on_step=True, prog_bar=True, logger=True)
             self.log("train_loss_g", float(self._accum_loss_g), on_step=True, prog_bar=True, logger=True)
@@ -246,7 +246,7 @@ class AudioLightningModule(pl.LightningModule):
                 self.log("train_loss_d", float(self._accum_loss_d), on_step=False, prog_bar=False, logger=True)
                 self.log("train_loss_g", float(self._accum_loss_g), on_step=False, prog_bar=False, logger=True)
             except AssertionError:
-                # AMP scaler has no inf-checks recorded — partial window with no
+                # AMP scaler has no inf-checks recorded -- partial window with no
                 # completed backward (happens on early stop mid-accumulation).
                 pass
             self._accum_loss_g = None
@@ -284,7 +284,7 @@ class AudioLightningModule(pl.LightningModule):
         self._val_loss_count += 1
         self.validation_step_outputs.append(float(loss))
 
-        # Perceptual metrics — computed on CPU to avoid VRAM overhead
+        # Perceptual metrics -- computed on CPU to avoid VRAM overhead
         try:
             with torch.no_grad():
                 est_cpu = est_sources.float().cpu()
@@ -301,7 +301,7 @@ class AudioLightningModule(pl.LightningModule):
         return {"val_loss": loss}
 
     def _lock_val_fixed_indices(self):
-        """Stratified sample — equal chunks per song — lock for all future runs."""
+        """Stratified sample -- equal chunks per song -- lock for all future runs."""
         import random
 
         dataset  = self.trainer.datamodule.data_val
@@ -328,7 +328,7 @@ class AudioLightningModule(pl.LightningModule):
             fixed.update(random.sample(indices, k))
 
         self._val_fixed_indices = fixed
-        print(f"[val] Locked {len(fixed)} fixed indices — {per_song} per song across {num_songs} songs.")
+        print(f"[val] Locked {len(fixed)} fixed indices -- {per_song} per song across {num_songs} songs.")
 
     def _lock_val_refs(self):
         """Pick one chunk per song from fixed indices, store file paths for direct loading."""
@@ -367,7 +367,7 @@ class AudioLightningModule(pl.LightningModule):
     def _save_val_audio(self):
         """
         Run locked reference chunks through the model and save LQ/HQ/Restored triplets.
-        Called from on_validation_epoch_end — training is paused at this point so the
+        Called from on_validation_epoch_end -- training is paused at this point so the
         full GPU is available. No threading needed.
         """
         if not self._val_locked_refs or self.val_audio_dir is None:

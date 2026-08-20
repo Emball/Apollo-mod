@@ -1,5 +1,5 @@
 # @claude last-modified: 2026-05-05T06:34:39Z
-# @claude last-commit: feat: major update — TUI, augmentation system, gradient checkpointing, optimization bootstrap
+# @claude last-commit: feat: major update -- TUI, augmentation system, gradient checkpointing, optimization bootstrap
 """
 Paired audio datamodule for Apollo fine-tuning.
 
@@ -14,7 +14,7 @@ chunks/
         HQ/  held_out_0000.wav  ...
 
 Chunking is handled automatically by train.py's prepare_data() at startup.
-Raw source material goes in data/train/ and data/val/ — see train.py for
+Raw source material goes in data/train/ and data/val/ -- see train.py for
 accepted input layouts (_LQ/_HQ subdirs, flat postfix files, or pre-normalized
 LQ/HQ subdirs).
 
@@ -95,7 +95,7 @@ def _parse_aug_cfg(raw) -> AugmentationCfg:
     Falls back to reading the block directly for backwards compatibility."""
     if raw is None:
         return AugmentationCfg()
-    # New-style: augmentation.live — extract the live sub-block
+    # New-style: augmentation.live -- extract the live sub-block
     live = _get(raw, "live", None)
     if live is not None:
         raw = live
@@ -151,7 +151,7 @@ def _check_ffmpeg() -> bool:
             import ffmpeg
             _ffmpeg_available = True
         except ImportError:
-            print("[augmentation] WARNING: ffmpeg-python not installed — mp3_degradation disabled.")
+            print("[augmentation] WARNING: ffmpeg-python not installed -- mp3_degradation disabled.")
             print("               Install with: pip install ffmpeg-python")
             _ffmpeg_available = False
     return _ffmpeg_available
@@ -281,7 +281,7 @@ def augment_pair(
         lq    = lq * scale
         hq    = hq * scale
         # If the gain push would clip, rescale both down just enough to avoid it
-        # rather than hard-clamping — preserves waveform shape including any
+        # rather than hard-clamping -- preserves waveform shape including any
         # pre-existing clipping distortion in the source material
         peak = max(lq.abs().max(), hq.abs().max())
         if peak > 1.0:
@@ -354,7 +354,7 @@ def get_matched_pairs(lq_dir: str, hq_dir: str) -> List[Tuple[str, str]]:
 
     return [(lq_files[s], hq_files[s]) for s in matched]
 
-# Training dataset — loads pre-chunked files
+# Training dataset -- loads pre-chunked files
 
 class ChunkedPairDataset(Dataset):
     def __init__(self, chunks_dir: str, sr: int = SR, aug_cfg: AugmentationCfg = None):
@@ -368,11 +368,11 @@ class ChunkedPairDataset(Dataset):
         print(
             f"Augmentation     : enabled={aug.enabled}  "
             f"stereo_alternation={aug.stereo_alternation.enabled}(p={aug.stereo_alternation.prob})  "
-            f"gain={aug.gain.enabled}(p={aug.gain.prob}, ±{aug.gain.db_max}dB)  "
+            f"gain={aug.gain.enabled}(p={aug.gain.prob}, +/-{aug.gain.db_max}dB)  "
             f"polarity={aug.polarity.enabled}(p={aug.polarity.prob})  "
             f"pitch_shift={aug.pitch_shift.enabled}(p={aug.pitch_shift.prob}, "
-            f"±{aug.pitch_shift.semitones_max}st)  "
-            f"noise={aug.noise.enabled}(p={aug.noise.prob}, σ={aug.noise.sigma})  "
+            f"+/-{aug.pitch_shift.semitones_max}st)  "
+            f"noise={aug.noise.enabled}(p={aug.noise.prob}, sigma={aug.noise.sigma})  "
             f"mp3={aug.mp3_degradation.enabled}(p={aug.mp3_degradation.prob}, "
             f"{aug.mp3_degradation.kbps_min}-{aug.mp3_degradation.kbps_max}kbps)"
         )
@@ -388,7 +388,7 @@ class ChunkedPairDataset(Dataset):
         lq, hq = augment_pair(lq, hq, self.aug_cfg, sr=self.sr, idx=idx)
         return hq, lq
 
-# Validation dataset — full-length files sliced at runtime
+# Validation dataset -- full-length files sliced at runtime
 
 class FullLengthPairDataset(Dataset):
     def __init__(self, eval_dir: str, sr: int = SR, segment_sec: float = 2.0):
@@ -408,7 +408,7 @@ class FullLengthPairDataset(Dataset):
                 self.index.append((pair_idx, start))
                 start += self.segment_samples
 
-        print(f"Validation dataset: {len(self.pairs)} files → {len(self.index)} segments")
+        print(f"Validation dataset: {len(self.pairs)} files -> {len(self.index)} segments")
 
     def __len__(self) -> int:
         return len(self.index)
