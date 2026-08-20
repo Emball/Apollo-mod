@@ -231,16 +231,34 @@ class AudioLightningModule(pl.LightningModule):
         return {"val_loss": loss}
 
     def _lock_val_fixed_indices(self):
-        """Randomly select limit_val_batches indices from seen indices, lock for all future runs."""
+        """Stratified sample — equal chunks per song — lock for all future runs."""
         import random
-        seen = getattr(self, '_val_seen_indices', [])
+
+        dataset  = self.trainer.datamodule.data_val
+        seen     = getattr(self, '_val_seen_indices', [])
         if not seen:
             return
-        n = min(self.trainer.limit_val_batches if isinstance(self.trainer.limit_val_batches, int)
-                else int(self.trainer.limit_val_batches * len(self.trainer.datamodule.data_val)),
-                len(seen))
-        self._val_fixed_indices = set(random.sample(seen, n))
-        print(f"[val] Locked {len(self._val_fixed_indices)} fixed evaluation indices.")
+
+        # Group seen indices by song
+        by_song = {}
+        for ds_idx in seen:
+            pair_idx, _ = dataset.index[ds_idx]
+            _, hq_path  = dataset.pairs[pair_idx]
+            song_key    = os.path.splitext(os.path.basename(hq_path))[0]
+            by_song.setdefault(song_key, []).append(ds_idx)
+
+        num_songs   = len(by_song)
+        lv          = self.trainer.limit_val_batches
+        total_n     = lv if isinstance(lv, int) else int(lv * len(dataset))
+        per_song    = max(1, total_n // num_songs)
+
+        fixed = set()
+        for song_key, indices in by_song.items():
+            k = min(per_song, len(indices))
+            fixed.update(random.sample(indices, k))
+
+        self._val_fixed_indices = fixed
+        print(f"[val] Locked {len(fixed)} fixed indices — {per_song} per song across {num_songs} songs.")
 
     def _lock_val_refs(self):
         """Pick one chunk per song from fixed indices, store file paths for direct loading."""
