@@ -35,11 +35,10 @@ class MultiFrequencyDiscriminator(nn.Module):
             raw_weights / raw_weights.mean()
         )
 
-        # Pre-register Hann windows as buffers so they live on the correct device
-        # and are never reallocated per forward call (was causing CUDA allocator
-        # thrashing — 7 allocations × 3 discriminator calls = 21 per step).
-        for w in window:
-            self.register_buffer(f"hann_{w}", torch.hann_window(w))
+        # Hann windows cached as plain tensors — NOT register_buffer so they
+        # never appear in state_dict or checkpoints (fully deterministic from
+        # window size, carry no learned state). Moved to device on first use.
+        self._hann_cache: dict = {w: torch.hann_window(w) for w in window}
 
     def forward(self, est, sample_rate=44100):
         B, nch, _ = est.shape
@@ -53,12 +52,16 @@ class MultiFrequencyDiscriminator(nn.Module):
         est_feature_maps = []
 
         for i in range(len(self.discriminators)):
-            hann = getattr(self, f"hann_{self.window[i]}").float()
+            w = self.window[i]
+            hann = self._hann_cache[w]
+            if hann.device != est.device:
+                hann = hann.to(est.device)
+                self._hann_cache[w] = hann
             est_spec = torch.stft(
                 est.float(),
-                self.window[i],
-                self.window[i] // 2,
-                window=hann,
+                w,
+                w // 2,
+                window=hann.float(),
                 return_complex=True
             )
             est_RI = torch.stack([est_spec.real, est_spec.imag], dim=1)

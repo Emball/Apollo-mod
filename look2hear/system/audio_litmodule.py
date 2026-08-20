@@ -285,7 +285,6 @@ class AudioLightningModule(pl.LightningModule):
                       any(k.startswith(p) for p in [
                           "loss_func.g.hann_", "loss_func.g.weights_",
                           "loss_func.d.hann_", "loss_func.d.weights_",
-                          "discriminator.hann_",
                       ])]
         for k in unexpected:
             del sd[k]
