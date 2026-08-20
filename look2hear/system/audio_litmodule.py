@@ -443,6 +443,10 @@ class AudioLightningModule(pl.LightningModule):
 
         self._save_val_audio()
 
+        # Release any CUDA memory held by val forward passes before training resumes.
+        # Val uses torch.no_grad() but the allocator may still hold freed blocks.
+        torch.cuda.empty_cache()
+
     def on_save_checkpoint(self, checkpoint: dict) -> None:
         checkpoint["val_locked_refs"]   = self._val_locked_refs
         checkpoint["val_fixed_indices"] = self._val_fixed_indices
