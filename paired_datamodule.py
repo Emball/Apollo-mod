@@ -81,7 +81,7 @@ class AugmentationCfg:
     pitch_shift:  PitchShiftAugCfg = field(default_factory=PitchShiftAugCfg)
     noise:        NoiseAugCfg     = field(default_factory=NoiseAugCfg)
     mp3_degradation: Mp3AugCfg   = field(default_factory=Mp3AugCfg)
-    mono_channel: SimpleAugCfg   = field(default_factory=SimpleAugCfg)
+    stereo_alternation: SimpleAugCfg   = field(default_factory=SimpleAugCfg)
 
 def _get(d, key, default):
     try:
@@ -105,7 +105,7 @@ def _parse_aug_cfg(raw) -> AugmentationCfg:
     pitch_raw   = _get(raw, "pitch_shift", {})
     noise_raw   = _get(raw, "noise", {})
     mp3_raw     = _get(raw, "mp3_degradation", {})
-    mono_raw    = _get(raw, "mono_channel", {})
+    mono_raw    = _get(raw, "stereo_alternation", {})
 
     return AugmentationCfg(
         enabled=_get(raw, "enabled", True),
@@ -134,7 +134,7 @@ def _parse_aug_cfg(raw) -> AugmentationCfg:
             kbps_min=_get(mp3_raw, "kbps_min", 64),
             kbps_max=_get(mp3_raw, "kbps_max", 256),
         ),
-        mono_channel=SimpleAugCfg(
+        stereo_alternation=SimpleAugCfg(
             enabled=_get(mono_raw, "enabled", True),
             prob=   _get(mono_raw, "prob",    1.0),
         ),
@@ -237,7 +237,7 @@ def augment_pair(
     Apply random augmentations to an LQ/HQ pair. Shape: (2, samples).
     Inputs are expected to be in [-1, 1] (post normalize_pair).
 
-    mono_channel: picks one channel (L or R) randomly and returns a
+    stereo_alternation: picks one channel (L or R) randomly and returns a
         (1, samples) tensor for both LQ and HQ. Apollo processes each
         channel independently anyway, so this avoids feeding near-duplicate
         stereo channels as if they were unique data.
@@ -259,11 +259,11 @@ def augment_pair(
     if not cfg.enabled:
         return lq, hq
 
-    # mono_channel
+    # stereo_alternation
     # Alternate L/R deterministically by sample index so every epoch covers
     # both channels evenly rather than randomly clumping on one side.
     # Applied first so all subsequent augmentations work on the selected channel.
-    if cfg.mono_channel.enabled and random.random() < cfg.mono_channel.prob:
+    if cfg.stereo_alternation.enabled and random.random() < cfg.stereo_alternation.prob:
         ch = (idx % 2) if idx is not None else random.randint(0, lq.shape[0] - 1)
         lq = lq[ch:ch+1]
         hq = hq[ch:ch+1]
@@ -367,7 +367,7 @@ class ChunkedPairDataset(Dataset):
         print(f"Training dataset : {len(self.pairs)} chunk pairs")
         print(
             f"Augmentation     : enabled={aug.enabled}  "
-            f"mono_channel={aug.mono_channel.enabled}(p={aug.mono_channel.prob})  "
+            f"stereo_alternation={aug.stereo_alternation.enabled}(p={aug.stereo_alternation.prob})  "
             f"gain={aug.gain.enabled}(p={aug.gain.prob}, ±{aug.gain.db_max}dB)  "
             f"polarity={aug.polarity.enabled}(p={aug.polarity.prob})  "
             f"pitch_shift={aug.pitch_shift.enabled}(p={aug.pitch_shift.prob}, "

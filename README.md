@@ -163,7 +163,7 @@ Two base configs: `configs/apollo.yaml` (`feature_dim=256`) and `configs/apollo_
 | `gain` | Live | Never hard-clamps — scales both signals down if clipping would occur. |
 | `polarity` | Live | Multiply by −1. Free. |
 | `noise` | Live | Matched noise on both LQ and HQ. Same soft-clamp behavior as gain. |
-| `mono_channel` | Live | One channel per sample, alternating L/R by index. |
+| `stereo_alternation` | Live | One channel per sample, alternating L/R by index. |
 | `pitch_shift` | Cached | **Off for codec restoration** — warps the frequency relationships the model is trying to learn. |
 | `mp3_degradation` | Cached | CBR MP3 re-encode on LQ only. Keep cached, not live — live spawns ffmpeg per chunk per epoch. |
 

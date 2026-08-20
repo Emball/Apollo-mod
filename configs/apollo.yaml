@@ -28,7 +28,7 @@ datas:
   augmentation:
     live:
       enabled: true
-      mono_channel:
+      stereo_alternation:
         enabled: false
         prob: 1.0
       gain:
@@ -54,7 +54,7 @@ datas:
     cached:
       enabled: false
       cached_variants: 1
-      mono_channel:
+      stereo_alternation:
         enabled: true
         fraction: 1.0
       gain:

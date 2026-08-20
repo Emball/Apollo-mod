@@ -401,7 +401,7 @@ def _build_cached_aug_fn(cfg: "DictConfig"):
     ps  = getattr(cached_cfg, "pitch_shift",      {})
     ns  = getattr(cached_cfg, "noise",            {})
     mp3 = getattr(cached_cfg, "mp3_degradation",  {})
-    mc  = getattr(cached_cfg, "mono_channel",     {})
+    mc  = getattr(cached_cfg, "stereo_alternation",     {})
 
     aug_cfg = AugmentationCfg(
         enabled=True,
@@ -430,7 +430,7 @@ def _build_cached_aug_fn(cfg: "DictConfig"):
             kbps_min=int(_frac(mp3, "kbps_min", 64)),
             kbps_max=int(_frac(mp3, "kbps_max", 256)),
         ),
-        mono_channel=SimpleAugCfg(
+        stereo_alternation=SimpleAugCfg(
             enabled=_bool(mc, "enabled", False),
             prob=   _frac(mc, "fraction", 1.0),
         ),
