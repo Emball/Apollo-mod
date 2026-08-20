@@ -175,8 +175,8 @@ class AudioLightningModule(pl.LightningModule):
             self.clip_gradients(optimizer_g, gradient_clip_val=5, gradient_clip_algorithm="norm")
             optimizer_g.step()
 
-            self.log("train_loss_d", self._accum_loss_d, on_epoch=True, prog_bar=True, logger=True)
-            self.log("train_loss_g", self._accum_loss_g, on_epoch=True, prog_bar=True, logger=True)
+            self.log("train_loss_d", self._accum_loss_d, on_step=True, on_epoch=False, prog_bar=True, logger=True)
+            self.log("train_loss_g", self._accum_loss_g, on_step=True, on_epoch=False, prog_bar=True, logger=True)
             self._accum_loss_g = None
             self._accum_loss_d = None
 
@@ -192,7 +192,6 @@ class AudioLightningModule(pl.LightningModule):
         loss = self.metrics(est_sources, ori_data)
 
         self.log("val_loss", loss, on_epoch=True, prog_bar=True, logger=True)
-        self.validation_step_outputs.append(loss)
 
         # Save restored audio every val_save_interval epochs so the rendered
         # audio and the loss number are always from the same computation.
