@@ -59,14 +59,14 @@ On first run, `train.py` automatically chunks these into fixed-length segments u
 
 The val set is used to lock a fixed evaluation sample (`limit_val_batches` chunks) on the first val run. That same fixed set is used for every subsequent val check for the duration of training, giving you a perfectly comparable loss signal across all checkpoints.
 
-Because only `limit_val_batches` chunks are ever evaluated, the size of your val set beyond that number does not affect the loss calculation — it only affects the quality of the initial draw. The selection is stratified by song: equal chunks are drawn from each song, ensuring no single song or bit rate dominates the evaluation. A larger val set gives the sampler more material to pick from per song, but the evaluation itself is always the locked fixed set.
+Because only `limit_val_batches` chunks are ever evaluated, the size of your val set beyond that number does not affect the loss calculation and it only affects the quality of the initial draw. The selection is stratified by song: equal chunks are drawn from each song, ensuring no single song or bit rate dominates the evaluation. A larger val set gives the sampler more material to pick from per song, but the evaluation itself is always the locked fixed set.
 
 **What to put in your val set:**
 
 - Use your most representative and challenging material. Avoid easy outliers like spoken word skits or instrumentals if your model targets a different task.
 - Match the degradation type exactly to your training data.
 - A few songs of similar character is better than many songs of mixed difficulty.
-- Aim for at least enough chunks to fill `limit_val_batches` — with a 3-second chunk size and `limit_val_batches: 100`, that is 5 minutes of audio minimum.
+- Aim for at least enough chunks to fill `limit_val_batches`. With a 3-second chunk size and `limit_val_batches: 100`, that is 5 minutes of audio minimum.
 
 ---
 
