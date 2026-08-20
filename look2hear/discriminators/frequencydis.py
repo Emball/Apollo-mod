@@ -12,7 +12,6 @@
 
 import torch
 import torch.nn as nn
-import numpy as np
 
 class MultiFrequencyDiscriminator(nn.Module):
     def __init__(self, nch, window):

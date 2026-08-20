@@ -96,7 +96,7 @@ import look2hear.datas
 import look2hear.losses
 import look2hear.models
 import look2hear.models.apollo
-from look2hear.utils import RankedLogger, instantiate, print_only
+from look2hear.utils import print_only
 import warnings
 warnings.filterwarnings("ignore")
 

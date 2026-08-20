@@ -24,30 +24,6 @@ class RMSNorm(nn.Module):
 
         return input_norm.type_as(input).reshape(B, N, T) * self.weight.reshape(1, -1, 1)
     
-class RMVN(nn.Module):
-    """
-    Rescaled MVN.
-    """
-    def __init__(self, dimension, groups=1):
-        super(RMVN, self).__init__()
-        
-        self.mean = nn.Parameter(torch.zeros(dimension))
-        self.std = nn.Parameter(torch.ones(dimension))
-        self.groups = groups
-        self.eps = 1e-5
-
-    def forward(self, input):
-        # input size: (B, N, *)
-        B, N = input.shape[:2]
-        assert N % self.groups == 0
-        input_reshape = input.reshape(B, self.groups, N // self.groups, -1)
-        T = input_reshape.shape[-1]
-
-        input_norm = (input_reshape - input_reshape.mean(2).unsqueeze(2)) / (input_reshape.var(2).unsqueeze(2) + self.eps).sqrt()
-        input_norm = input_norm.reshape(B, N, T) * self.std.reshape(1, -1, 1) + self.mean.reshape(1, -1, 1)
-
-        return input_norm.reshape(input.shape)
-    
 class Roformer(nn.Module):
     """
     Transformer with rotary positional embedding.

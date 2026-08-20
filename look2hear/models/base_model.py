@@ -12,30 +12,6 @@ import torch.nn as nn
 from huggingface_hub import PyTorchModelHubMixin
 
 
-def _unsqueeze_to_3d(x):
-    """Normalize shape of `x` to [batch, n_chan, time]."""
-    if x.ndim == 1:
-        return x.reshape(1, 1, -1)
-    elif x.ndim == 2:
-        return x.unsqueeze(1)
-    else:
-        return x
-
-
-def pad_to_appropriate_length(x, lcm):
-    values_to_pad = int(x.shape[-1]) % lcm
-    if values_to_pad:
-        appropriate_shape = x.shape
-        padded_x = torch.zeros(
-            list(appropriate_shape[:-1])
-            + [appropriate_shape[-1] + lcm - values_to_pad],
-            dtype=torch.float32,
-        ).to(x.device)
-        padded_x[..., : x.shape[-1]] = x
-        return padded_x
-    return x
-
-
 class BaseModel(nn.Module, PyTorchModelHubMixin):
     def __init__(self, sample_rate, in_chan=1):
         super().__init__()
@@ -47,17 +23,6 @@ class BaseModel(nn.Module, PyTorchModelHubMixin):
 
     def sample_rate(self,):
         return self._sample_rate
-
-    @staticmethod
-    def load_state_dict_in_audio(model, pretrained_dict):
-        model_dict = model.state_dict()
-        update_dict = {}
-        for k, v in pretrained_dict.items():
-            if "audio_model" in k:
-                update_dict[k[12:]] = v
-        model_dict.update(update_dict)
-        model.load_state_dict(model_dict)
-        return model
 
     @staticmethod
     def from_pretrain(pretrained_model_conf_or_path, *args, **kwargs):

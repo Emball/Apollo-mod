@@ -9,7 +9,6 @@ from .apollo import Apollo
 
 __all__ = [
     "BaseModel",
-    "GullFullband",
     "Apollo"
 ]
 
