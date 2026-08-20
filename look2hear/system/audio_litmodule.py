@@ -29,8 +29,6 @@ def flatten_dict(d, parent_key="", sep="_"):
             items.append((new_key, v))
     return dict(items)
 
-import time as _time
-
 class AudioLightningModule(pl.LightningModule):
     def __init__(
         self,
@@ -64,7 +62,6 @@ class AudioLightningModule(pl.LightningModule):
         self._accum_step   = 0
         self._val_loss_sum   = 0.0
         self._val_loss_count = 0
-        self._step_ts = None  # timestamp of last logged step, for real it/s verification
 
         if gradient_checkpointing:
             self._enable_gradient_checkpointing()
@@ -170,15 +167,6 @@ class AudioLightningModule(pl.LightningModule):
             # on_epoch=True accumulation bug (PL caches GPU tensors until epoch end).
             self.log("train_loss_d", float(self._accum_loss_d), on_step=True, prog_bar=True, logger=True)
             self.log("train_loss_g", float(self._accum_loss_g), on_step=True, prog_bar=True, logger=True)
-
-            # Every 50 optimizer steps, print a real it/s measurement using wall time.
-            # This lets you verify whether the TQDM display matches actual throughput.
-            now = _time.monotonic()
-            if self._step_ts is not None:
-                real_its = 50.0 / (now - self._step_ts)
-                print(f"[step {self.global_step}] real it/s (last 50 steps): {real_its:.2f}", flush=True)
-            if self.global_step % 50 == 0:
-                self._step_ts = now
 
             self._accum_loss_g = None
             self._accum_loss_d = None

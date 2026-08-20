@@ -865,34 +865,57 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         cfg.logger.save_dir          = os.path.join(_run_dir, "logs")
         cfg.trainer.default_root_dir = _run_dir
 
-    from pytorch_lightning.callbacks import TQDMProgressBar
+    import time as _time
+    from pytorch_lightning.callbacks import Callback as _Callback
 
-    class TrainRateProgressBar(TQDMProgressBar):
-        """Resets the TQDM rate counter at the start of each epoch so that
-        resuming mid-epoch doesn't report a false inflated it/s from dividing
-        already-completed steps by near-zero elapsed time."""
+    class StepPrinter(_Callback):
+        """
+        Replaces TQDM with a clean line-per-step console output.
+        Reports wall-clock measured it/s from the first batch of each epoch,
+        so resume mid-epoch doesn't produce inflated rates.
+        """
         def on_train_epoch_start(self, trainer, pl_module):
-            super().on_train_epoch_start(trainer, pl_module)
-            if self.train_progress_bar is not None:
-                try:
-                    self.train_progress_bar.unpause()
-                    self.train_progress_bar._time = self.train_progress_bar._time.__class__
-                except Exception:
-                    pass
-            self._epoch_start_batch = trainer.fit_loop.epoch_loop.batch_idx
+            self._epoch_step0 = trainer.global_step
+            self._epoch_t0    = _time.monotonic()
+            self._epoch_batches = trainer.num_training_batches
+            total = self._epoch_batches
+            print(f"\nEpoch {trainer.current_epoch} — {total} batches", flush=True)
 
         def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-            super().on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
-            if self.train_progress_bar is not None and batch_idx == getattr(self, '_epoch_start_batch', -1):
-                try:
-                    import time
-                    self.train_progress_bar.start_t = time.monotonic()
-                    self.train_progress_bar.last_print_t = self.train_progress_bar.start_t
-                    self.train_progress_bar.n = batch_idx + 1
-                except Exception:
-                    pass
+            now      = _time.monotonic()
+            elapsed  = now - self._epoch_t0
+            done     = batch_idx + 1
+            its      = done / elapsed if elapsed > 0 else 0.0
+            total    = self._epoch_batches
+            pct      = 100 * done / total
+            metrics  = trainer.callback_metrics
+            ld       = float(metrics.get("train_loss_d", 0))
+            lg       = float(metrics.get("train_loss_g", 0))
+            vl       = metrics.get("val_loss", None)
+            vl_str   = f"  val={float(vl):.3f}" if vl is not None else ""
+            print(
+                f"\r  {pct:5.1f}%  step={trainer.global_step}  "
+                f"{done}/{total}  {its:.2f} it/s  "
+                f"loss_d={ld:.3f}  loss_g={lg:.3f}{vl_str}",
+                end="", flush=True
+            )
 
-    callbacks: List[Callback] = [TrainRateProgressBar()]
+        def on_train_epoch_end(self, trainer, pl_module):
+            print(flush=True)
+
+        def on_validation_epoch_start(self, trainer, pl_module):
+            if not trainer.sanity_checking:
+                print("  [val]", end="", flush=True)
+            self._val_t0 = _time.monotonic()
+
+        def on_validation_epoch_end(self, trainer, pl_module):
+            elapsed = _time.monotonic() - self._val_t0
+            metrics = trainer.callback_metrics
+            vl = metrics.get("val_loss", None)
+            if vl is not None and not trainer.sanity_checking:
+                print(f" val_loss={float(vl):.4f}  ({elapsed:.1f}s)", flush=True)
+
+    callbacks: List[Callback] = [StepPrinter()]
 
     if cfg.get("early_stopping"):
         print_only(f"Instantiating early_stopping")
@@ -913,6 +936,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         cfg.trainer,
         callbacks=callbacks,
         logger=logger,
+        enable_progress_bar=False,
     )
 
     def _save_and_exit(sig=None, frame=None):
