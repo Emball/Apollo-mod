@@ -12,10 +12,14 @@ import platform
 import signal
 import subprocess
 import sys
-import termios
 import threading
-import tty
 from pathlib import Path
+
+IS_WINDOWS = platform.system() == "Windows"
+
+if not IS_WINDOWS:
+    import termios
+    import tty
 
 from rich.align import Align
 from rich.console import Console
@@ -38,8 +42,6 @@ MODELS_DIR = ROOT / "models"
 STATE_FILE = ROOT / ".tui_state.json"
 
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".aac", ".m4a", ".aiff", ".aif"}
-
-IS_WINDOWS = platform.system() == "Windows"
 
 console = Console()
 
