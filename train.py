@@ -897,12 +897,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             metrics = trainer.callback_metrics
             ld      = float(metrics.get("train_loss_d", 0))
             lg      = float(metrics.get("train_loss_g", 0))
-            vl      = metrics.get("val_loss", None)
-            vl_str  = f"  val={float(vl):.3f}" if vl is not None else ""
             print(
                 f"\r  {pct:5.1f}%  step={trainer.global_step}  "
                 f"{done}/{total}  {its:.2f} it/s  "
-                f"loss_d={ld:.3f}  loss_g={lg:.3f}{vl_str}",
+                f"loss_d={ld:.3f}  loss_g={lg:.3f}",
                 end="", flush=True
             )
 
@@ -916,13 +914,20 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
         def on_validation_epoch_end(self, trainer, pl_module):
             val_dur = _time.monotonic() - self._val_t0
-            # Exclude val time from training rate calculation
             if hasattr(self, "_val_elapsed"):
                 self._val_elapsed += val_dur
-            metrics = trainer.callback_metrics
-            vl = metrics.get("val_loss", None)
-            if vl is not None and not trainer.sanity_checking:
-                print(f" val_loss={float(vl):.4f}  ({val_dur:.1f}s)", flush=True)
+            if not trainer.sanity_checking:
+                sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
+                msstft = getattr(pl_module, "_last_val_msstft", None)
+                sfr    = getattr(pl_module, "_last_val_sfr",    None)
+                parts = []
+                if sisdr  is not None: parts.append(f"sisdr={float(sisdr):.3f}")
+                if msstft is not None: parts.append(f"msstft={float(msstft):.4f}")
+                if sfr    is not None:
+                    flag = "  noise↑" if float(sfr) > 1.05 else ""
+                    parts.append(f"sfr={float(sfr):.4f}{flag}")
+                if parts:
+                    print(f" [val] {' '.join(parts)}  ({val_dur:.1f}s)", flush=True)
 
     callbacks: List[Callback] = [StepPrinter()]
 

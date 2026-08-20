@@ -116,6 +116,9 @@ class AudioLightningModule(pl.LightningModule):
         self._val_msstft_sum  = 0.0
         self._val_sfr_sum     = 0.0
         self._val_perc_count  = 0
+        self._last_val_sisdr  = None
+        self._last_val_msstft = None
+        self._last_val_sfr    = None
 
         if gradient_checkpointing:
             self._enable_gradient_checkpointing()
@@ -403,18 +406,24 @@ class AudioLightningModule(pl.LightningModule):
         self.audio_model.train()
 
     def on_validation_epoch_end(self):
+        self._last_val_sisdr  = None
+        self._last_val_msstft = None
+        self._last_val_sfr    = None
+
         if self._val_loss_count > 0:
             avg_val_loss = self._val_loss_sum / self._val_loss_count
             self.log("val_loss", avg_val_loss, prog_bar=True, logger=True)
+            self._last_val_sisdr = avg_val_loss
         self._val_loss_sum   = 0.0
         self._val_loss_count = 0
+
         if self._val_perc_count > 0:
             avg_msstft = self._val_msstft_sum / self._val_perc_count
             avg_sfr    = self._val_sfr_sum    / self._val_perc_count
             self.log("val_msstft", avg_msstft, prog_bar=False, logger=True)
             self.log("val_sfr",    avg_sfr,    prog_bar=False, logger=True)
-            print(f"[val] msstft={avg_msstft:.4f}  sfr={avg_sfr:.4f}  "
-                  f"({'noise↑' if avg_sfr > 1.05 else 'clean'})")
+            self._last_val_msstft = avg_msstft
+            self._last_val_sfr    = avg_sfr
         self._val_msstft_sum  = 0.0
         self._val_sfr_sum     = 0.0
         self._val_perc_count  = 0
