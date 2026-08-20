@@ -53,13 +53,13 @@ apollo.bat              # Windows
 ./apollo.sh             # Linux / macOS
 
 # Train
-python train.py --conf_dir configs/apollo_uni.yaml
+train --conf_dir configs/apollo_uni.yaml
 
 # Inference (auto-selects best checkpoint)
-python inference.py --in_wav input.mp3 --out_wav output.wav --conf_dir configs/apollo_stfl.yaml
+inference --in_wav input.mp3 --out_wav output.wav --conf_dir configs/apollo_stfl.yaml
 
 # Inference (explicit checkpoint)
-python inference.py --in_wav input.mp3 --out_wav output.wav --weights path/to/checkpoint.ckpt --conf_dir configs/apollo_stfl.yaml
+inference --in_wav input.mp3 --out_wav output.wav --weights path/to/checkpoint.ckpt --conf_dir configs/apollo_stfl.yaml
 
 # Monitor
 tensorboard --logdir ./runs
