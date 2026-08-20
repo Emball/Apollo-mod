@@ -33,30 +33,3 @@ Read `README.md` for usage, config reference, data layout, commands, and augment
 **Augmentation internals:** `normalize_pair` scales by joint peak — pre-existing flat-top clipping is preserved as valid training signal, not clamped away. `stereo_alternation` picks L or R by sample index (even → L, odd → R) — `prob: 1.0` alternates systematically, does not randomly collapse to mono.
 
 **Inference normalization:** Input normalized by peak before chunked inference, rescaled back after. Preserves transient headroom — hot MP3 transients above 1.0 at decode time are handled correctly.
-
----
-
-## Performance Notes
-
-- `torch.cuda.empty_cache()` removed from training loop. Was the primary cause of sub-1 it/s on Windows/WDDM. Only called in OOM recovery now.
-- Hann windows in `_hann_cache` dicts — not `register_buffer`. Avoids checkpoint bloat and the key-stripping dance on load.
-- Gradient checkpointing on BSNet only. Checkpointing the discriminator caused a double-forward and dead feature-matching gradients.
-- `on_epoch=True` PL logging replaced with manual scalar accumulator to prevent GPU tensor accumulation across epochs (PL issue #4556).
-- Scheduler stepping moved to `on_train_epoch_end` — prevents double-step on resume which caused a visible loss jump.
-
----
-
-## Known Constraints
-
-- `sr=44100` required. Do not change.
-- cuFFT does not support fp16 for non-power-of-two FFT sizes — STFT always casts to float32.
-- Single GPU only — `sync_dist` and `all_gather` removed.
-- `apollo.bat` on Windows: `C:\Windows\System32\uv` stub may shadow the real uv at `%USERPROFILE%\.local\bin\uv.exe`.
-- torch and torchaudio pinned to `2.1.2+cu121`.
-- All `torch.load` calls use `weights_only=True`. Remote downloads are not hash-verified — only load `.ckpt` files from trusted sources.
-
----
-
-## Version
-
-Current: 0.2.4.9
