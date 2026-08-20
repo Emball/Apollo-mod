@@ -868,14 +868,27 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     from pytorch_lightning.callbacks import TQDMProgressBar
 
     class TrainRateProgressBar(TQDMProgressBar):
-        """Resets the TQDM rate display when training resumes after validation,
-        preventing the val dataloader's high it/s from bleeding into the train bar."""
-        def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
-            super().on_train_batch_start(trainer, pl_module, batch, batch_idx)
-            if batch_idx == 0 and self.train_progress_bar is not None:
+        """Resets the TQDM rate counter at the start of each epoch so that
+        resuming mid-epoch doesn't report a false inflated it/s from dividing
+        already-completed steps by near-zero elapsed time."""
+        def on_train_epoch_start(self, trainer, pl_module):
+            super().on_train_epoch_start(trainer, pl_module)
+            if self.train_progress_bar is not None:
                 try:
-                    self.train_progress_bar.reset(total=self.train_progress_bar.total)
-                    self.train_progress_bar.start_t = None
+                    self.train_progress_bar.unpause()
+                    self.train_progress_bar._time = self.train_progress_bar._time.__class__
+                except Exception:
+                    pass
+            self._epoch_start_batch = trainer.fit_loop.epoch_loop.batch_idx
+
+        def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+            super().on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
+            if self.train_progress_bar is not None and batch_idx == getattr(self, '_epoch_start_batch', -1):
+                try:
+                    import time
+                    self.train_progress_bar.start_t = time.monotonic()
+                    self.train_progress_bar.last_print_t = self.train_progress_bar.start_t
+                    self.train_progress_bar.n = batch_idx + 1
                 except Exception:
                     pass
 
