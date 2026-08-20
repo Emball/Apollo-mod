@@ -54,7 +54,7 @@ class AudioLightningModule(pl.LightningModule):
         self.val_save_interval = val_save_interval
         self.val_audio_dir = val_audio_dir
         self.val_audio_pairs = val_audio_pairs
-        self._val_audio_indices = None
+        self._val_locked_refs = None  # list of (song_key, lq_path, hq_path, start, seg_samples)
         self.gradient_checkpointing = gradient_checkpointing
         self.grad_accum_steps = max(1, grad_accum_steps)
         self._accum_loss_g = None
@@ -192,7 +192,6 @@ class AudioLightningModule(pl.LightningModule):
 
     def validation_step(self, batch, batch_nb):
         ori_data, codec_data, ds_idx, song_key = batch
-        # ds_idx and song_key are batched tensors/lists — unwrap the scalar
         ds_idx   = int(ds_idx[0])
         song_key = song_key[0] if isinstance(song_key, (list, tuple)) else song_key
 
@@ -203,40 +202,73 @@ class AudioLightningModule(pl.LightningModule):
         self._val_loss_count += 1
         self.validation_step_outputs.append(float(loss))
 
-        if self.trainer.sanity_checking:
-            return {"val_loss": loss}
-
-        # On the first real val run, record dataset_idx -> song_key for all batches
-        # seen. With shuffle=True + limit_val_batches this covers a random cross-
-        # section of songs each run, building up coverage across runs until locked.
-        if self._val_audio_indices is None:
-            if not hasattr(self, '_val_batch_index'):
-                self._val_batch_index = {}
-            self._val_batch_index[ds_idx] = song_key
-
-        # Save audio if this dataset index is in the locked set.
-        # On the first run (indices not yet locked) save everything seen —
-        # on_validation_epoch_end will prune to val_audio_pairs diverse indices.
-        if self.val_audio_dir is not None:
-            save_this = (self._val_audio_indices is None) or (ds_idx in self._val_audio_indices)
-
-            if save_this:
-                epoch_dir = os.path.join(
-                    self.val_audio_dir, f"step_{self.global_step:06d}"
-                )
-                os.makedirs(epoch_dir, exist_ok=True)
-                out = est_sources
-                if out.ndim == 3:
-                    out = out[0]
-                elif out.ndim == 1:
-                    out = out.unsqueeze(0)
-                out = out.float().cpu().clamp(-1.0, 1.0)
-                torchaudio.save(
-                    os.path.join(epoch_dir, f"{song_key}_{ds_idx:04d}.wav"),
-                    out, 44100,
-                )
+        # On the first real val run, collect one ds_idx per song for locking.
+        if not self.trainer.sanity_checking and self._val_locked_refs is None:
+            if not hasattr(self, '_val_seen'):
+                self._val_seen = {}
+            if song_key not in self._val_seen:
+                self._val_seen[song_key] = ds_idx
 
         return {"val_loss": loss}
+
+    def _lock_val_refs(self):
+        """Pick one chunk per song from _val_seen, store file paths for direct loading."""
+        import random
+        from collections import defaultdict
+
+        dataset = self.trainer.datamodule.data_val
+        seen = getattr(self, '_val_seen', {})
+        if not seen:
+            return
+
+        # One per song, up to val_audio_pairs total
+        songs = list(seen.keys())
+        random.shuffle(songs)
+        chosen_songs = songs[:self.val_audio_pairs]
+
+        refs = []
+        for song_key in chosen_songs:
+            ds_idx = seen[song_key]
+            pair_idx, start = dataset.index[ds_idx]
+            lq_path, hq_path = dataset.pairs[pair_idx]
+            seg_samples = dataset.segment_samples
+            refs.append((song_key, lq_path, hq_path, start, seg_samples))
+
+        self._val_locked_refs = refs
+        print(f"[val audio] Locked {len(refs)} reference chunks: {[r[0] for r in refs]}")
+
+    def _save_val_audio(self):
+        """Run locked reference chunks through the model and save LQ/HQ/Restored triplets."""
+        if not self._val_locked_refs or self.val_audio_dir is None:
+            return
+
+        epoch_dir = os.path.join(self.val_audio_dir, f"step_{self.global_step:06d}")
+        os.makedirs(epoch_dir, exist_ok=True)
+
+        self.eval()
+        with torch.no_grad():
+            for song_key, lq_path, hq_path, start, seg_samples in self._val_locked_refs:
+                lq, _ = torchaudio.load(lq_path, frame_offset=start, num_frames=seg_samples)
+                hq, _ = torchaudio.load(hq_path, frame_offset=start, num_frames=seg_samples)
+
+                if lq.shape[0] == 1: lq = lq.repeat(2, 1)
+                if hq.shape[0] == 1: hq = hq.repeat(2, 1)
+
+                from paired_datamodule import normalize_pair
+                lq_norm, hq_norm = normalize_pair(lq, hq)
+
+                inp = lq_norm.unsqueeze(0).to(self.device)
+                out = self(inp)
+                if out.ndim == 3:
+                    out = out[0]
+                out = out.float().cpu().clamp(-1.0, 1.0)
+                lq_save = lq_norm.float().clamp(-1.0, 1.0)
+                hq_save = hq_norm.float().clamp(-1.0, 1.0)
+
+                torchaudio.save(os.path.join(epoch_dir, f"{song_key}_LQ.wav"),       lq_save, 44100)
+                torchaudio.save(os.path.join(epoch_dir, f"{song_key}_HQ.wav"),       hq_save, 44100)
+                torchaudio.save(os.path.join(epoch_dir, f"{song_key}_Restored.wav"), out,     44100)
+        self.train()
 
     def on_validation_epoch_end(self):
         if self._val_loss_count > 0:
@@ -247,40 +279,19 @@ class AudioLightningModule(pl.LightningModule):
         self.log("lr", self.optimizer[0].param_groups[0]["lr"], prog_bar=True)
         self.validation_step_outputs.clear()
 
-        # After the first real val run, lock a diverse set of dataset indices —
-        # one guaranteed per song, remainder filled randomly. These are stable
-        # dataset positions so they survive shuffle and limit_val_batches.
-        if self._val_audio_indices is None and hasattr(self, '_val_batch_index') and not self.trainer.sanity_checking:
-            import random
-            from collections import defaultdict
+        if self.trainer.sanity_checking:
+            return
 
-            song_batches = defaultdict(list)
-            for ds_idx, song_key in self._val_batch_index.items():
-                song_batches[song_key].append(ds_idx)
+        if self._val_locked_refs is None:
+            self._lock_val_refs()
 
-            songs = list(song_batches.keys())
-            n = min(self.val_audio_pairs, sum(len(v) for v in song_batches.values()))
-
-            selected = [random.choice(song_batches[s]) for s in songs]
-            already  = set(selected)
-            remainder = [i for i in self._val_batch_index if i not in already]
-            still_needed = max(0, n - len(selected))
-            selected += random.sample(remainder, min(still_needed, len(remainder)))
-
-            self._val_audio_indices = set(selected)
-            print(f"[val audio] Locked {len(self._val_audio_indices)} dataset indices across {len(songs)} songs: {sorted(self._val_audio_indices)}")
+        self._save_val_audio()
 
     def on_save_checkpoint(self, checkpoint: dict) -> None:
-        # Persist val audio selection state so resume uses the same locked indices.
-        checkpoint["val_audio_indices"] = self._val_audio_indices
-        checkpoint["val_batch_index"]   = getattr(self, "_val_batch_index", None)
+        checkpoint["val_locked_refs"] = self._val_locked_refs
 
     def on_load_checkpoint(self, checkpoint: dict) -> None:
-        # Restore val audio selection state from checkpoint.
-        self._val_audio_indices = checkpoint.get("val_audio_indices", None)
-        saved_batch_index = checkpoint.get("val_batch_index", None)
-        if saved_batch_index is not None:
-            self._val_batch_index = saved_batch_index
+        self._val_locked_refs = checkpoint.get("val_locked_refs", None)
 
         # Strip state_dict keys from older checkpoints that no longer exist in model.
         sd = checkpoint.get("state_dict", {})
