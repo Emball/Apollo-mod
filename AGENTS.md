@@ -26,7 +26,7 @@ Read `README.md` for usage, config reference, data layout, commands, and augment
 
 **Run isolation:** Each fresh run creates `runs/<name>/<timestamp>/`. Resume finds the most recently modified timestamped subfolder with a `checkpoints/` dir and picks the newest `.ckpt` inside.
 
-**Val fixed evaluation set:** On the first real val run, `_lock_val_fixed_indices` randomly samples `limit_val_batches` dataset indices from all chunks seen in that run and locks them into `_val_fixed_indices`. All subsequent val runs skip any chunk whose dataset index is not in this set — the loss is always computed on the same fixed chunks, making it perfectly comparable across checkpoints. Both `_val_fixed_indices` and `_val_locked_refs` are persisted in the checkpoint and restored on resume.
+**Val fixed evaluation set:** On the first real val run, `_lock_val_fixed_indices` groups all seen dataset indices by song, then samples `limit_val_batches / num_songs` chunks from each song (stratified). This ensures equal representation across songs and by extension bit rates. The result is locked into `_val_fixed_indices` — all subsequent val runs skip any chunk not in this set, so the loss is always computed on the exact same fixed chunks and is perfectly comparable across checkpoints. Both `_val_fixed_indices` and `_val_locked_refs` are persisted in the checkpoint and restored on resume.
 
 **Val audio refs:** `_val_locked_refs` stores file paths and sample offsets for `val_audio_pairs` reference chunks (one per song where possible), drawn from the fixed index set. Every val epoch, `_save_val_audio` loads them directly from disk and saves LQ/HQ/Restored triplets.
 
