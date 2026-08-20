@@ -104,6 +104,7 @@ Each fresh run creates `runs/<name>/<timestamp>/`. On resume (`resume: true`), t
 
 ## Augmentation Notes
 
+- `mono_channel`: Apollo processes one channel at a time. This augmentation picks L or R **deterministically by sample index** (even index → L, odd → R), returning a `(1, samples)` tensor for both LQ and HQ. With `prob: 1.0` every sample is single-channel, alternating L/R systematically across the dataset each epoch. This is intentional — it gives the model balanced exposure to both stereo channels without randomly clumping. Do not interpret `prob: 1.0` as "always collapses to mono" — it alternates.
 - Gain and noise never hard-clamp. If a push would clip, both signals scale down together, preserving any pre-existing flat-top clipping as valid training signal.
 - `normalize_pair` scales by joint peak — clipped source files handled correctly.
 - MP3 degradation (LQ only): use cached, not live — live spawns an ffmpeg process per chunk per epoch.
