@@ -36,6 +36,8 @@ Read `README.md` for usage, config reference, data layout, commands, and augment
 
 **Perceptual val metrics:** After each val run, two additional metrics are computed alongside SI-SDR and stored on the module as `_last_val_msstft` and `_last_val_sfr`. `StepPrinter` reads these and emits one consolidated `[val]` line. `msstft` is multi-scale log-STFT loss across three window sizes (2048/1024/512). `sfr` is spectral flatness ratio in the 8-22kHz band — values above 1.05 indicate high-frequency noise injection (early overfitting signal). SI-SDR remains the checkpoint selection and early stopping metric. All three log to TensorBoard.
 
+**CRITICAL — never call `torch.cuda.empty_cache()` in any training or validation hook.** It flushes the CUDA allocator to the driver on every call, destroying the caching allocator's benefits and causing progressive slowdown. The only acceptable location is inside an OOM recovery handler (`except torch.cuda.OutOfMemoryError`). This applies to `training_step`, `validation_step`, `on_train_epoch_end`, `on_validation_epoch_end`, and all callbacks.
+
 **Step printer:** TQDM is disabled. `StepPrinter` in `train.py` prints one line per batch with wall-clock measured it/s. Val time is excluded from the rate calculation so it/s stays accurate before and after val runs. On resume mid-epoch, the timer starts from the first batch of the new session.
 
 **Alignment:** Runs at chunk time. `align_data` accepts an integer offset in samples — positive trims LQ, negative trims HQ. Applied via `frame_offset` at decode time, no extra memory cost. iTunes-encoded MP3s have a consistent 1057-sample encoder delay. Set `false` to disable.
