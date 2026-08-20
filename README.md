@@ -12,6 +12,8 @@ Apollo is a research model from Tsinghua University / Tencent AI Lab (ICASSP 202
 
 This fork reworks it for single-GPU fine-tuning on your own paired audio datasets. The aim is to help the community explore the true potential of the architecture, unlocking the ability for custom finetunes on consumer hardware.
 
+For a detailed breakdown of every change relative to the original codebase, see the [Changes and Improvements](https://github.com/Emball/Apollo-mod/wiki/Changes-and-improvements) wiki page.
+
 ---
 
 ## Installation
