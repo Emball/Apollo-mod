@@ -7,9 +7,9 @@ Community fork of [JusperLee/Apollo](https://github.com/JusperLee/Apollo) — a 
 ## Architecture
 
 - `look2hear/models/apollo.py` — Generator. BSNet + Roformer layers. STFT/iSTFT always in float32.
-- `look2hear/discriminators/frequencydis.py` — Frequency discriminator. Hann windows pre-registered as buffers (not allocated per forward).
+- `look2hear/discriminators/frequencydis.py` — Frequency discriminator. Hann windows cached as plain tensors in `_hann_cache` dict (not `register_buffer` — keeps them out of checkpoint state_dict).
 - `look2hear/system/audio_litmodule.py` — Lightning module. Manual optimization, gradient checkpointing, val audio saving, RAM/CUDA OOM watchdogs.
-- `look2hear/losses/gan_losses.py` — GAN losses. HF boost and hann windows registered as buffers, not allocated per forward.
+- `look2hear/losses/gan_losses.py` — GAN losses. Hann windows and HF weight tensors cached in `_hann_cache`/`_weight_cache` dicts (not buffers — no checkpoint pollution).
 - `paired_datamodule.py` — Loads chunked LQ/HQ WAV pairs. Live + cached augmentation pipeline.
 - `train.py` — Entry point. Auto-chunks `data/` → `chunks/` on first run, then trains. Includes run isolation (timestamped subdirs), resume logic, and alignment.
 - `inference.py` — Entry point. Chunked inference, streams output to disk for mid-run preview. Normalizes input to match training amplitude range.
@@ -23,7 +23,7 @@ data/<name>/
   train/  LQ/  HQ/     ← raw pairs; WAV, MP3, FLAC accepted; filenames must match
   val/    LQ/  HQ/
 
-chunks/<name>/          ← auto-generated; delete to force re-chunk
+chunks/<name>/          ← auto-generated; invalidated automatically when segment_sec/align_data/fixed_delay changes
   train/  LQ/  HQ/
   val/    LQ/  HQ/
 
@@ -87,17 +87,20 @@ Each fresh run creates `runs/<name>/<timestamp>/`. On resume (`resume: true`), t
 ## Val Audio
 
 - Saves LQ + HQ + restored triplets to `runs/<name>/<timestamp>/val_audio/step_NNNNNN/` every val run.
-- `val_audio_pairs` is per-song: `3` gives 3 chunks from each val song.
-- Index is locked after the first real val run (skips sanity check) and re-locked on every resume to get fresh song coverage.
+- `val_audio_pairs` controls total chunks saved (not per-song); the selection guarantees at least one chunk per song where possible.
+- Val dataloader shuffles — `limit_val_batches` (e.g. 25 of 50) draws a random subset each run. Set to roughly half the val set for good song coverage without running everything.
+- **Index locking**: after the first real val run, a set of dataset indices is locked and persisted in the checkpoint. On resume, the same chunks are monitored — no re-randomization. Locked indices only appear in the audio output when they're drawn in the current shuffled val batch.
 - Files named `<SongName>_s<start_sample>_restored/lq/hq.wav`.
 
 ## Performance Notes
 
-- **Discriminator forward**: hann windows are pre-registered as buffers — creating them in `forward()` was causing progressive CUDA allocator slowdown. Same fix in `gan_losses.py`.
-- **Gradient checkpointing discriminator**: previously ran `FrequencyDiscriminator.forward` twice per call (once for output, once for hiddens). Fixed to return both in a single checkpoint pass — halved discriminator cost.
-- **`on_epoch=True` logging**: using this for `val_loss` accumulates GPU tensors until epoch end. Replaced with a manual `_val_loss_sum / _val_loss_count` accumulator that resets per val run.
-- **`persistent_workers=False`** on training DataLoader: persistent workers on Windows gradually grow their memory footprint, causing progressive slowdown. Workers now restart each epoch.
-- **Val DataLoader `num_workers=0`**: val loads are small and fast enough on the main process; worker overhead exceeded savings.
+- **`torch.cuda.empty_cache()` in training loop**: removed. Was the primary cause of <1 it/s on Windows/WDDM. Only called in OOM recovery path now.
+- **Hann window allocation**: previously created 7+ GPU tensors per discriminator forward call. Now cached in `_hann_cache` dicts (plain tensors, not `register_buffer` — avoids checkpoint bloat). Same fix in `gan_losses.py` for HF weight tensors.
+- **Gradient checkpointing**: applied to BSNet layers only. Previously also checkpointed `FrequencyDiscriminator`, which caused a double-forward and killed feature-matching gradients. Discriminator is not checkpointed.
+- **`on_epoch=True` logging**: accumulates GPU tensors until epoch end (PL issue #4556). Replaced with manual `_val_loss_sum / _val_loss_count` scalar accumulator.
+- **Scheduler stepping**: moved from `is_last_batch` guard inside `training_step` to `on_train_epoch_end`. Prevents double-step on resume which was causing the loss jump.
+- **Train DataLoader**: `persistent_workers=True` when `num_workers > 0`, `prefetch_factor=2`. Workers survive across epochs, prefetch overlaps disk I/O with GPU compute.
+- **Val DataLoader `num_workers=0`**: val set is small; worker spawn overhead exceeded I/O savings.
 
 ## Augmentation Notes
 
@@ -108,11 +111,12 @@ Each fresh run creates `runs/<name>/<timestamp>/`. On resume (`resume: true`), t
 
 ## Inference Notes
 
-- `--conf_dir` reads `feature_dim`, `sr`, `win`, `layer`, `segment_sec` from a training yaml.
+- `--conf_dir` reads `feature_dim`, `sr`, `win`, `layer`, `segment_sec` from a training yaml. Explicit CLI args always win over config values.
 - Output written chunk-by-chunk (soundfile append mode) — drag into Audacity to preview mid-run.
-- Input normalized to training amplitude range before inference; rescaled back after.
-- Output is 32-bit float WAV to avoid integer clipping at ±1.0.
+- Input normalized by peak before inference; rescaled back after. Preserves transient headroom — clipped-looking MP3 transients are restored relative to the training distribution.
+- Output is 32-bit float WAV — no integer ceiling, no clipping at ±1.0.
 - MP3/FLAC input accepted.
+- `overlap_sec` must be ≥ 0 and < `chunk_sec`; validated at startup with a clear error.
 
 ## Known Constraints
 
@@ -123,6 +127,15 @@ Each fresh run creates `runs/<name>/<timestamp>/`. On resume (`resume: true`), t
 - torch and torchaudio pinned to `2.1.2+cu121` — pytorch-lightning will otherwise silently upgrade torch.
 - If `.git` is lost after moving the project: `git init && git remote add origin <url> && git fetch && git read-tree HEAD && git checkout-index -a -f`. Use `git show HEAD:<file> > <file>` for individual files.
 
+## Chunk Cache Invalidation
+
+A `.manifest.json` is written to `chunks/<name>/` after each successful chunk run. It records `segment_sec`, `align_data`, and `fixed_delay`. On next train start, if the manifest doesn't match the current config, the chunk directory is deleted and re-chunked automatically. Delete the manifest manually to force a full re-chunk.
+
+## Security
+
+- All `torch.load` calls use `weights_only=True`. Checkpoints must deserialize to a plain dict — arbitrary pickle execution is rejected.
+- Remote model downloads (pretrained weights) are not hash-verified. Only load `.ckpt` files from trusted sources.
+
 ## Version
 
-Current: 0.1.8.2
+Current: 0.2.4.0

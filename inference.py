@@ -175,9 +175,24 @@ def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path):
     else:
         peak = 1.0
 
-    chunk_samples   = int(chunk_sec * sr)
-    overlap_samples = int(overlap_sec * sr)
+    if chunk_sec <= 0:
+        raise ValueError(f"chunk_sec must be > 0, got {chunk_sec}")
+    if overlap_sec < 0:
+        raise ValueError(f"overlap_sec must be >= 0, got {overlap_sec}")
+    if overlap_sec >= chunk_sec:
+        raise ValueError(
+            f"overlap_sec ({overlap_sec}s) must be smaller than chunk_sec ({chunk_sec}s)"
+        )
+
+    chunk_samples   = int(round(chunk_sec * sr))
+    overlap_samples = int(round(overlap_sec * sr))
     hop_samples     = chunk_samples - overlap_samples
+
+    if hop_samples <= 0:
+        raise ValueError(
+            f"Invalid chunk geometry: chunk_samples={chunk_samples}, "
+            f"overlap_samples={overlap_samples}, hop={hop_samples}"
+        )
 
     T         = audio.shape[-1]
     prev_tail = None  # holds the overlap region from the previous chunk
