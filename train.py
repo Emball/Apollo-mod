@@ -463,20 +463,32 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     print_only(f"[data/{split_name}] Chunking {len(matched)} pairs -> {dst_root}")
     print_only(f"[data/{split_name}] {sep}\n")
 
+    import threading
+    from multiprocessing.pool import ThreadPool
+    import multiprocessing as _mp
+
+    lq_offset = fixed_delay if (fixed_delay is not None and fixed_delay > 0) else 0
+    hq_offset = (-fixed_delay) if (fixed_delay is not None and fixed_delay < 0) else 0
+
+    # Parallel workers: I/O-bound so threads are correct (no pickle needed, GIL released on disk writes)
+    n_workers = min(len(matched), (_mp.cpu_count() or 4), 8)
+    print_lock = threading.Lock()
     total = 0
-    for stem in matched:
+
+    def _process_stem(stem):
         lq_path = os.path.join(lq_src, lq_files[stem])
         hq_path = os.path.join(hq_src, hq_files[stem])
-        # Fixed delay: pass as frame_offset at decode time so the decoder skips
-        # the samples rather than decoding the whole file then trimming after.
-        lq_offset = fixed_delay if (fixed_delay is not None and fixed_delay > 0) else 0
-        hq_offset = (-fixed_delay) if (fixed_delay is not None and fixed_delay < 0) else 0
         lq_wav = _load_wav_stereo(lq_path, frame_offset=lq_offset)
         hq_wav = _load_wav_stereo(hq_path, frame_offset=hq_offset)
-        saved  = _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out,
-                                  cached_aug_fn=cached_aug_fn, variants=variants)
-        print_only(f"[data/{split_name}]   {stem}: {len(saved)} chunks")
-        total += len(saved)
+        saved = _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out,
+                                cached_aug_fn=cached_aug_fn, variants=variants)
+        with print_lock:
+            print_only(f"[data/{split_name}]   {stem}: {len(saved)} chunks")
+        return len(saved)
+
+    with ThreadPool(n_workers) as pool:
+        for n in pool.imap_unordered(_process_stem, matched):
+            total += n
 
     print_only(f"[data/{split_name}] Done -- {total} chunk pairs -> {dst_root}\n")
     import json as _json
