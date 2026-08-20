@@ -32,6 +32,8 @@ Read `README.md` for usage, config reference, data layout, commands, and augment
 
 **Planned — hard example mining:** Future enhancement to replace the random fixed-set selection with a difficulty-ranked selection. On first val run, score all chunks by SI-SDR loss, lock the N hardest as the fixed evaluation set. Harder chunks give a more sensitive signal for detecting genuine model improvement vs easy material that saturates early. Implementation deferred — current dataset is homogeneous enough that random selection is sufficient.
 
+**Perceptual val metrics:** After each val run, two additional metrics are computed alongside SI-SDR and stored on the module as `_last_val_msstft` and `_last_val_sfr`. `StepPrinter` reads these and emits one consolidated `[val]` line. `msstft` is multi-scale log-STFT loss across three window sizes (2048/1024/512). `sfr` is spectral flatness ratio in the 8-22kHz band — values above 1.05 indicate high-frequency noise injection (early overfitting signal). SI-SDR remains the checkpoint selection and early stopping metric. All three log to TensorBoard.
+
 **Step printer:** TQDM is disabled. `StepPrinter` in `train.py` prints one line per batch with wall-clock measured it/s. Val time is excluded from the rate calculation so it/s stays accurate before and after val runs. On resume mid-epoch, the timer starts from the first batch of the new session.
 
 **Alignment:** Runs at chunk time. `align_data` accepts an integer offset in samples — positive trims LQ, negative trims HQ. Applied via `frame_offset` at decode time, no extra memory cost. iTunes-encoded MP3s have a consistent 1057-sample encoder delay. Set `false` to disable.

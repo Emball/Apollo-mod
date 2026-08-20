@@ -61,6 +61,14 @@ The val set is used to lock a fixed evaluation sample (`limit_val_batches` chunk
 
 Because only `limit_val_batches` chunks are ever evaluated, the size of your val set beyond that number does not affect the loss calculation and it only affects the quality of the initial draw. The selection is stratified by song: equal chunks are drawn from each song, ensuring no single song or bit rate dominates the evaluation. A larger val set gives the sampler more material to pick from per song, but the evaluation itself is always the locked fixed set.
 
+After each val run the console prints a single line with all three metrics:
+
+```
+ [val] sisdr=-25.341  msstft=0.3421  sfr=0.9912  (42.3s)
+```
+
+`sisdr` is the primary metric used for checkpoint selection and early stopping. `msstft` (multi-scale log-STFT loss, lower is better) and `sfr` (spectral flatness ratio in the 8-22kHz band) are perceptual indicators. A rising `sfr` above ~1.05 flagged as `noise↑` is an early warning of overfitting before it shows in SI-SDR. All three are logged to TensorBoard.
+
 **What to put in your val set:**
 
 - Use your most representative and challenging material. Avoid easy outliers like spoken word skits or instrumentals if your model targets a different task.
