@@ -172,6 +172,20 @@ class AudioLightningModule(pl.LightningModule):
         self._accum_step += 1
 
     def on_train_epoch_end(self):
+        # Flush any partial accumulation window at epoch end so the final
+        # batches of an epoch always contribute to a weight update.
+        if self._accum_loss_g is not None:
+            optimizer_g, optimizer_d = self.optimizers()
+            self.clip_gradients(optimizer_d, gradient_clip_val=5, gradient_clip_algorithm="norm")
+            optimizer_d.step()
+            self.clip_gradients(optimizer_g, gradient_clip_val=5, gradient_clip_algorithm="norm")
+            optimizer_g.step()
+            self.log("train_loss_d", float(self._accum_loss_d), on_step=False, prog_bar=False, logger=True)
+            self.log("train_loss_g", float(self._accum_loss_g), on_step=False, prog_bar=False, logger=True)
+            self._accum_loss_g = None
+            self._accum_loss_d = None
+        self._accum_step = 0
+
         scheduler_g, scheduler_d = self.lr_schedulers()
         scheduler_g.step()
         scheduler_d.step()

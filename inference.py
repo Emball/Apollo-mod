@@ -87,6 +87,10 @@ def ensure_model(shortname: str) -> tuple:
 
 def load_audio(file_path: str, target_sr: int = _SR) -> torch.Tensor:
     audio, sr = torchaudio.load(file_path)
+    if audio.shape[-1] == 0:
+        raise ValueError(f"Audio file contains no samples: {file_path}")
+    if not torch.isfinite(audio).all():
+        raise ValueError(f"Input audio contains NaN or Inf values: {file_path}")
     if sr != target_sr:
         print(f"[inference] Resampling {sr} Hz -> {target_sr} Hz")
         audio = torchaudio.functional.resample(audio, sr, target_sr)

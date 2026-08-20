@@ -456,12 +456,29 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     """
     lq_out = os.path.join(dst_root, "LQ")
     hq_out = os.path.join(dst_root, "HQ")
+    manifest_path = os.path.join(dst_root, ".manifest.json")
 
-    # Skip if already chunked
+    def _manifest_params():
+        return {"segment_sec": _CHUNK_SEC, "overlap": _OVERLAP, "align": str(align), "fixed_delay": str(fixed_delay)}
+
+    def _manifest_valid():
+        if not os.path.isfile(manifest_path):
+            return False
+        try:
+            import json as _json
+            with open(manifest_path, "r") as _f:
+                return _json.load(_f) == _manifest_params()
+        except Exception:
+            return False
+
+    # Skip if already chunked with matching parameters
     if os.path.isdir(lq_out) and any(f.endswith(".wav") for f in os.listdir(lq_out)):
-        n = sum(1 for f in os.listdir(lq_out) if f.endswith(".wav"))
-        print_only(f"[data/{split_name}] Already chunked ({n} pairs) — skipping.")
-        return n
+        if _manifest_valid():
+            n = sum(1 for f in os.listdir(lq_out) if f.endswith(".wav"))
+            print_only(f"[data/{split_name}] Already chunked ({n} pairs) — skipping.")
+            return n
+        else:
+            print_only(f"[data/{split_name}] Chunk parameters changed — re-chunking.")
 
     # Normalize the source layout first
     if not _normalize_data_dir(src_root, split_name):
@@ -516,6 +533,9 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         total += len(saved)
 
     print_only(f"[data/{split_name}] Done — {total} chunk pairs → {dst_root}\n")
+    import json as _json
+    with open(manifest_path, "w") as _f:
+        _json.dump(_manifest_params(), _f, indent=2)
     return total
 
 def prepare_data(cfg: DictConfig) -> None:

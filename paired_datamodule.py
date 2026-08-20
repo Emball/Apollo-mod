@@ -400,12 +400,13 @@ class FullLengthPairDataset(Dataset):
 
         self.index = []
         for pair_idx, (lq_path, hq_path) in enumerate(self.pairs):
-            info = torchaudio.info(lq_path)
-            min_len = info.num_frames
+            lq_info = torchaudio.info(lq_path)
+            hq_info = torchaudio.info(hq_path)
+            min_len = min(lq_info.num_frames, hq_info.num_frames)
             start = 0
             while start + self.segment_samples <= min_len:
                 self.index.append((pair_idx, start))
-                start += self.segment_samples  # non-overlapping — no redundant computation
+                start += self.segment_samples
 
         print(f"Validation dataset: {len(self.pairs)} files → {len(self.index)} segments")
 

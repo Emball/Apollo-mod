@@ -9,7 +9,7 @@ class MultiSrcNegSDR(_Loss):
         self.sdr_type = sdr_type
         self.zero_mean = zero_mean
         self.take_log = take_log
-        self.EPS = 1e-8
+        self.EPS = float(EPS)
 
     def forward(self, ests, targets):
         if targets.size() != ests.size() or targets.ndim != 3:
