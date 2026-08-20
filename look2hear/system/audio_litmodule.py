@@ -6,7 +6,7 @@
 #   - Removed sync_dist=True from all log calls (causes hangs on single GPU)
 #   - Removed all_gather in validation (multi-GPU only)
 #   - Removed WandB-specific logger calls
-#   - val_audio_dir: save restored audio from val dataloader
+#   - val_save_interval / val_audio_dir: save restored audio from val dataloader
 #     every N epochs so what you hear == what the loss measures
 ###
 import os
@@ -38,6 +38,7 @@ class AudioLightningModule(pl.LightningModule):
         loss_func=None,
         metrics=None,
         scheduler=None,
+        val_save_interval=5,
         val_audio_dir=None,
         val_audio_pairs=10,
         gradient_checkpointing=False,
@@ -47,13 +48,13 @@ class AudioLightningModule(pl.LightningModule):
         self.audio_model = model
         self.discriminator = discriminator
         self.optimizer = list(optimizer)
-        self.loss_func = torch.nn.ModuleDict(loss_func) if loss_func is not None else None
+        self.loss_func = loss_func
         self.metrics = metrics
         self.scheduler = list(scheduler)
+        self.val_save_interval = val_save_interval
         self.val_audio_dir = val_audio_dir
         self.val_audio_pairs = val_audio_pairs
-        self._val_audio_indices = None  # always re-locks on first val run, even after resume
-        self._val_batch_index   = {}    # cleared after locking
+        self._val_audio_indices = None
         self.gradient_checkpointing = gradient_checkpointing
         self.grad_accum_steps = max(1, grad_accum_steps)
         self._accum_loss_g = None
@@ -67,9 +68,6 @@ class AudioLightningModule(pl.LightningModule):
         self.validation_step_outputs = []
         self.test_step_outputs = []
         self.automatic_optimization = False
-        self._amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16)
-        self._val_loss_sum = 0.0
-        self._val_loss_count = 0
 
     def _enable_gradient_checkpointing(self):
         """
@@ -81,39 +79,34 @@ class AudioLightningModule(pl.LightningModule):
         import look2hear.models.apollo as _apollo_mod
         import look2hear.discriminators.frequencydis as _dis_mod
 
+        original_bsnet_forward = _apollo_mod.BSNet.forward
 
-
-        original_apollo_forward = _apollo_mod.Apollo.forward
-
-        def checkpointed_apollo_forward(self_apollo, input):
+        def checkpointed_bsnet_forward(self_bsnet, input):
             if not torch.is_grad_enabled():
-                return original_apollo_forward(self_apollo, input)
+                return original_bsnet_forward(self_bsnet, input)
+            return torch_checkpoint.checkpoint(
+                original_bsnet_forward, self_bsnet, input, use_reentrant=False
+            )
 
-            subband_feature = self_apollo.feature_extractor(input)
+        _apollo_mod.BSNet.forward = checkpointed_bsnet_forward
 
-            def _run_net(feat):
-                return self_apollo.net(feat)
+        original_freqdis_forward = _dis_mod.FrequencyDiscriminator.forward
 
-            feature = torch_checkpoint.checkpoint(_run_net, subband_feature, use_reentrant=False)
+        def checkpointed_freqdis_forward(self_dis, x):
+            if not torch.is_grad_enabled():
+                return original_freqdis_forward(self_dis, x)
 
-            B, nch, nsample = input.shape
-            est_spec = []
-            for i in range(self_apollo.nband):
-                this_RI = self_apollo.output[i](feature[:, i]).view(B * nch, 2, self_apollo.band_width[i], -1)
-                est_spec.append(torch.complex(this_RI[:, 0], this_RI[:, 1]))
-            est_spec = torch.cat(est_spec, 1)
-            output = torch.istft(
-                est_spec.to(torch.complex64),
-                n_fft=self_apollo.win,
-                hop_length=self_apollo.stride,
-                window=self_apollo.hann_win,
-                length=nsample,
-            ).view(B, nch, -1).to(input.dtype)
-            return output
+            def _inner(x_):
+                out, _ = original_freqdis_forward(self_dis, x_)
+                return out
 
-        _apollo_mod.Apollo.forward = checkpointed_apollo_forward
+            out = torch_checkpoint.checkpoint(_inner, x, use_reentrant=False)
+            with torch.no_grad():
+                _, hiddens = original_freqdis_forward(self_dis, x.detach())
+            return out, hiddens
 
-        print("[gradient_checkpointing] Enabled: single checkpoint over full BSNet stack.")
+        _dis_mod.FrequencyDiscriminator.forward = checkpointed_freqdis_forward
+        print("[gradient_checkpointing] Enabled for BSNet layers and FrequencyDiscriminator.")
 
     def forward(self, wav):
         return self.audio_model(wav)
@@ -133,7 +126,7 @@ class AudioLightningModule(pl.LightningModule):
         # Mixed precision context
         # Explicit autocast ensures every sub-op (STFT, conv, attention) runs
         # in fp16 rather than relying on implicit casting from Lightning alone.
-        amp_ctx = self._amp_ctx
+        amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16)
 
         with amp_ctx:
             output = self(codec_data)
@@ -156,6 +149,7 @@ class AudioLightningModule(pl.LightningModule):
             [f.detach() for f in fmap] for fmap in targets_feature_maps
         ]
         del est_outputs_d, target_outputs
+        torch.cuda.empty_cache()
 
         # Generator update
         for p in self.discriminator.parameters():
@@ -169,7 +163,6 @@ class AudioLightningModule(pl.LightningModule):
 
         self._accum_loss_g = (self._accum_loss_g or 0.0) + loss_g.detach()
         self.manual_backward(loss_g)
-        del est_outputs, est_feature_maps, targets_feature_maps, output, loss_g, loss_d
 
         for p in self.discriminator.parameters():
             p.requires_grad_(True)
@@ -182,8 +175,8 @@ class AudioLightningModule(pl.LightningModule):
             self.clip_gradients(optimizer_g, gradient_clip_val=5, gradient_clip_algorithm="norm")
             optimizer_g.step()
 
-            self.log("train_loss_d", self._accum_loss_d, on_epoch=False, on_step=True, prog_bar=True, logger=True)
-            self.log("train_loss_g", self._accum_loss_g, on_epoch=False, on_step=True, prog_bar=True, logger=True)
+            self.log("train_loss_d", self._accum_loss_d, on_epoch=True, prog_bar=True, logger=True)
+            self.log("train_loss_g", self._accum_loss_g, on_epoch=True, prog_bar=True, logger=True)
             self._accum_loss_g = None
             self._accum_loss_d = None
 
@@ -198,14 +191,12 @@ class AudioLightningModule(pl.LightningModule):
         est_sources = self(codec_data)
         loss = self.metrics(est_sources, ori_data)
 
-        # Accumulate manually so we can reset per val run, not just per epoch.
-        # on_epoch=True in Lightning only resets at epoch boundaries — with
-        # val_check_interval firing multiple times per epoch the accumulator
-        # would grow unboundedly until epoch end, causing progressive slowdown.
-        self._val_loss_sum   += loss.detach().item()
-        self._val_loss_count += 1
+        self.log("val_loss", loss, on_epoch=True, prog_bar=True, logger=True)
+        self.validation_step_outputs.append(loss)
 
-        # Save restored audio every val run for the fixed subset of pairs chosen at first val.
+        # Save restored audio every val_save_interval epochs so the rendered
+        # audio and the loss number are always from the same computation.
+        # Only saves for the fixed subset of pairs chosen at first val run.
 
         # Build a batch_nb -> song_key map on the first real val epoch so
         # on_validation_epoch_end can select diverse indices.
@@ -217,42 +208,34 @@ class AudioLightningModule(pl.LightningModule):
             # Derive song key from batch_nb via the val dataset's index table
             try:
                 val_dataset = self.trainer.datamodule.data_val
-                batch_size = self.trainer.datamodule.batch_size
-                sample_idx = min(batch_nb * batch_size, len(val_dataset.index) - 1)
-                pair_idx, _ = val_dataset.index[sample_idx]
+                pair_idx, _ = val_dataset.index[batch_nb]
                 lq_path = val_dataset.pairs[pair_idx][0]
-                stem = os.path.splitext(os.path.basename(lq_path))[0]
-                # Strip trailing _chunk#### suffix so all chunks of a song group together
-                import re as _re
-                song_key = _re.sub(r'_\d{4}$', '', stem)
+                fname = os.path.basename(lq_path)
+                parts = fname.rsplit("_", 1)
+                song_key = parts[0] if len(parts) == 2 and parts[1].replace(".wav", "").isdigit() else fname
             except Exception:
                 song_key = str(batch_nb)
             self._val_batch_index[batch_nb] = song_key
 
         if (
             self.val_audio_dir is not None
-            and self._val_audio_indices is not None
+            and self.current_epoch % self.val_save_interval == 0
         ):
-            save_this = batch_nb in self._val_audio_indices
+            # On first val epoch, _val_audio_indices is None — we can't compute
+            # evenly spaced indices until on_validation_epoch_end knows the total.
+            # So we save all batches on epoch 0 and let on_validation_epoch_end
+            # prune to the evenly spaced set. On subsequent epochs the set is fixed.
+            if self._val_audio_indices is None:
+                save_this = True
+            else:
+                save_this = batch_nb in self._val_audio_indices
 
             if save_this:
                 epoch_dir = os.path.join(
-                    self.val_audio_dir, f"step_{self.global_step:06d}"
+                    self.val_audio_dir, f"epoch_{self.current_epoch:04d}"
                 )
                 os.makedirs(epoch_dir, exist_ok=True)
                 sr = 44100
-
-                # Derive a human-readable name from the val dataset
-                try:
-                    val_dataset = self.trainer.datamodule.data_val
-                    batch_size = self.trainer.datamodule.batch_size
-                    sample_idx = min(batch_nb * batch_size, len(val_dataset.index) - 1)
-                    pair_idx, start_sample = val_dataset.index[sample_idx]
-                    lq_path = val_dataset.pairs[pair_idx][0]
-                    song_name = os.path.splitext(os.path.basename(lq_path))[0]
-                    fname_base = f"{song_name}_s{start_sample:06d}"
-                except Exception:
-                    fname_base = f"pair_{batch_nb:04d}"
 
                 out = est_sources
                 if out.ndim == 3:
@@ -260,118 +243,41 @@ class AudioLightningModule(pl.LightningModule):
                 elif out.ndim == 1:
                     out = out.unsqueeze(0)
                 out = out.float().cpu().clamp(-1.0, 1.0)
-                torchaudio.save(os.path.join(epoch_dir, f"{fname_base}_restored.wav"), out, sr)
-
-                # Save LQ and HQ alongside for easy A/B comparison
-                try:
-                    lq_t = codec_data[0]
-                    hq_t = ori_data[0]
-                    if lq_t.ndim == 1: lq_t = lq_t.unsqueeze(0)
-                    if hq_t.ndim == 1: hq_t = hq_t.unsqueeze(0)
-                    torchaudio.save(os.path.join(epoch_dir, f"{fname_base}_lq.wav"), lq_t.float().cpu().clamp(-1.0, 1.0), sr)
-                    torchaudio.save(os.path.join(epoch_dir, f"{fname_base}_hq.wav"), hq_t.float().cpu().clamp(-1.0, 1.0), sr)
-                except Exception:
-                    pass
+                torchaudio.save(
+                    os.path.join(epoch_dir, f"restored_{batch_nb:04d}.wav"),
+                    out, sr,
+                )
 
         return {"val_loss": loss}
 
     def on_validation_epoch_end(self):
-        # Compute val_loss mean from our manual accumulator and reset it.
-        # This fires after every val run (not just at epoch end), so the
-        # accumulator never grows beyond one val run's worth of values.
-        if self._val_loss_count > 0:
-            mean_val_loss = self._val_loss_sum / self._val_loss_count
-            self.log("val_loss", mean_val_loss, prog_bar=True, logger=True)
-        self._val_loss_sum   = 0.0
-        self._val_loss_count = 0
-
-        self.log("lr", self.optimizer[0].param_groups[0]["lr"], prog_bar=True)
+        self.log("lr", self.optimizer[0].param_groups[0]["lr"], on_epoch=True, prog_bar=True)
         self.validation_step_outputs.clear()
 
         # After the first val epoch we know the full dataset size — randomly
         # pick val_audio_pairs indices with at least 1 from each song, then
         # lock them in for all future epochs.
-        if self.trainer.sanity_checking:
-            self._val_batch_index = {}
-            return
-
-        if self._val_audio_indices is None and not self.trainer.sanity_checking:
-            import random, re as _re
+        if self._val_audio_indices is None and hasattr(self, '_val_batch_index') and not self.trainer.sanity_checking:
+            import random
             from collections import defaultdict
 
-            # Build song->batch_nb map directly from the full val dataset,
-            # not from the limited batches that actually ran (limit_val_batches
-            # may have cut off most songs).
-            try:
-                val_dataset = self.trainer.datamodule.data_val
-                batch_size  = self.trainer.datamodule.batch_size
-                song_batches = defaultdict(list)
-                for sample_idx, (pair_idx, _) in enumerate(val_dataset.index):
-                    lq_path  = val_dataset.pairs[pair_idx][0]
-                    stem     = os.path.splitext(os.path.basename(lq_path))[0]
-                    song_key = _re.sub(r'_\d{4}$', '', stem)
-                    batch_nb = sample_idx // batch_size
-                    song_batches[song_key].append(batch_nb)
-            except Exception:
-                # Fallback: use whatever we observed during val steps
-                song_batches = defaultdict(list)
-                for batch_nb, song_key in self._val_batch_index.items():
-                    song_batches[song_key].append(batch_nb)
+            # _val_batch_index maps batch_nb -> filename stem so we can group by song
+            song_batches = defaultdict(list)
+            for batch_nb, song_key in self._val_batch_index.items():
+                song_batches[song_key].append(batch_nb)
 
             songs = list(song_batches.keys())
-            total = sum(len(v) for v in song_batches.values())
+            n = min(self.val_audio_pairs, sum(len(v) for v in song_batches.values()))
 
-            if self.val_audio_pairs == 0:
-                self._val_audio_indices = set(range(total))
-                print(f"[val audio] Saving all {len(self._val_audio_indices)} val pairs across {len(songs)} songs")
-            else:
-                # val_audio_pairs = pairs PER SONG, not total
-                per_song = max(1, self.val_audio_pairs)
-                selected = []
-                for s in songs:
-                    choices = song_batches[s]
-                    selected += random.sample(choices, min(per_song, len(choices)))
-                self._val_audio_indices = set(selected)
-                print(f"[val audio] Locked {len(self._val_audio_indices)} indices ({per_song} per song across {len(songs)} songs): {sorted(self._val_audio_indices)}")
-            self._val_batch_index = {}  # free memory
+            # Guarantee 1 random batch per song, then fill remainder from the full pool
+            selected = [random.choice(song_batches[s]) for s in songs]
+            already = set(selected)
+            remainder = [nb for nb in self._val_batch_index if nb not in already]
+            still_needed = max(0, n - len(selected))
+            selected += random.sample(remainder, min(still_needed, len(remainder)))
 
-    def on_load_checkpoint(self, checkpoint: dict) -> None:
-        # Inject missing buffer keys for checkpoints saved before 0.1.8.1
-        # (discriminator hann windows), before 0.1.8.6 (loss_func buffers),
-        # and before 0.1.8.7 (Roformer reverse_sign buffers).
-        sd = checkpoint.get("state_dict", {})
-        import torch as _torch
-
-        # Discriminator hann buffers (pre-0.1.8.1)
-        for w in [32, 64, 128, 256, 512, 1024, 2048]:
-            key = f"discriminator.hann_{w}"
-            if key not in sd:
-                sd[key] = _torch.hann_window(w).float()
-
-        # Generator loss hann/weights buffers (pre-0.1.8.6).
-        for w in [32, 64, 128, 256, 512, 1024, 2048]:
-            hann_key = f"loss_func.g.hann_{w}"
-            if hann_key not in sd:
-                sd[hann_key] = _torch.hann_window(w).float()
-            weights_key = f"loss_func.g.weights_{w}"
-            if weights_key not in sd:
-                n_bins = w // 2 + 1
-                sd[weights_key] = _torch.ones(1, n_bins, 1)
-
-        # Roformer reverse_sign buffers (pre-0.1.8.7).
-        # Scan all existing keys to find Roformer module paths.
-        rev_sign = _torch.tensor([-1.0, 1.0])
-        roformer_paths = set()
-        for key in list(sd.keys()):
-            # Keys look like audio_model.net.N.band_net.cos_freq etc.
-            if key.endswith(".cos_freq"):
-                roformer_paths.add(key[: -len(".cos_freq")])
-        for path in roformer_paths:
-            rs_key = f"{path}.reverse_sign"
-            if rs_key not in sd:
-                sd[rs_key] = rev_sign.clone()
-
-        checkpoint["state_dict"] = sd
+            self._val_audio_indices = set(selected)
+            print(f"[val audio] Locked indices ({len(self._val_audio_indices)} randomly sampled across {len(songs)} songs): {sorted(self._val_audio_indices)}")
 
     def test_step(self, batch, batch_nb):
         mixtures, targets = batch
