@@ -887,11 +887,12 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         so resume mid-epoch doesn't produce inflated rates.
         """
         def on_train_epoch_start(self, trainer, pl_module):
-            self._epoch_batches  = trainer.num_training_batches
-            self._session_t0     = None   # set on first batch_end of this session
-            self._session_done   = 0      # batches processed this session in this epoch
-            self._val_elapsed    = 0.0    # cumulative time spent in val (excluded from rate)
-            self._val_t0         = None
+            self._epoch_batches    = trainer.num_training_batches
+            self._session_t0       = None   # set on second batch_end of this session
+            self._last_global_step = trainer.global_step
+            self._session_done     = 0      # optimizer steps processed this session
+            self._val_elapsed      = 0.0    # cumulative time spent in val (excluded from rate)
+            self._val_t0           = None
             total = self._epoch_batches
             print(f"\nEpoch {trainer.current_epoch} -- {total} batches", flush=True)
 
@@ -899,10 +900,17 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             now = _time.monotonic()
             if self._session_t0 is None:
                 self._session_t0 = now
+                self._last_global_step = trainer.global_step
+                return  # skip first batch to avoid 0.00 it/s
+
+            # only print when an optimizer step actually occurred
+            if trainer.global_step == self._last_global_step:
+                return
+            self._last_global_step = trainer.global_step
             self._session_done += 1
 
             elapsed = (now - self._session_t0) - self._val_elapsed
-            its     = self._session_done / elapsed if elapsed > 0 else 0.0
+            its     = self._session_done / elapsed if elapsed > 0.1 else 0.0
             done    = batch_idx + 1
             total   = self._epoch_batches
             pct     = 100 * done / total
