@@ -412,7 +412,7 @@ class FullLengthPairDataset(Dataset):
     def __len__(self) -> int:
         return len(self.index)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, int, str]:
         pair_idx, start = self.index[idx]
         lq_path, hq_path = self.pairs[pair_idx]
         lq, _ = torchaudio.load(lq_path, frame_offset=start, num_frames=self.segment_samples)
@@ -420,7 +420,8 @@ class FullLengthPairDataset(Dataset):
         if lq.shape[0] == 1: lq = lq.repeat(2, 1)
         if hq.shape[0] == 1: hq = hq.repeat(2, 1)
         lq_chunk, hq_chunk = normalize_pair(lq, hq)
-        return hq_chunk, lq_chunk
+        song_key = os.path.splitext(os.path.basename(lq_path))[0]
+        return hq_chunk, lq_chunk, idx, song_key
 
 # DataModule
 
@@ -480,7 +481,7 @@ class PairedAudioDataModule(LightningDataModule):
         return DataLoader(
             self.data_val,
             batch_size=self.batch_size,
-            shuffle=False,
+            shuffle=True,
             num_workers=0,
             pin_memory=False,
             persistent_workers=False,

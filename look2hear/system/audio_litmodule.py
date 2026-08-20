@@ -177,60 +177,40 @@ class AudioLightningModule(pl.LightningModule):
         scheduler_d.step()
 
     def validation_step(self, batch, batch_nb):
-        ori_data, codec_data = batch
+        ori_data, codec_data, ds_idx, song_key = batch
+        # ds_idx and song_key are batched tensors/lists — unwrap the scalar
+        ds_idx   = int(ds_idx[0])
+        song_key = song_key[0] if isinstance(song_key, (list, tuple)) else song_key
+
         est_sources = self(codec_data)
         loss = self.metrics(est_sources, ori_data)
 
-        # Accumulate as Python scalar — avoids the on_epoch=True bug where PL
-        # caches GPU tensors across the entire epoch (grows monotonically, causes
-        # progressive slowdown). Logged once per epoch in on_validation_epoch_end.
         self._val_loss_sum   += float(loss)
         self._val_loss_count += 1
         self.validation_step_outputs.append(float(loss))
 
-        # Save restored audio every val_save_interval epochs so the rendered
-        # audio and the loss number are always from the same computation.
-        # Only saves for the fixed subset of pairs chosen at first val run.
+        if self.trainer.sanity_checking:
+            return {"val_loss": loss}
 
-        # Build a batch_nb -> song_key map on the first real val epoch so
-        # on_validation_epoch_end can select diverse indices.
-        # Skip during the sanity check — it only sees 2 batches and would
-        # lock in a useless index before real validation runs.
-        if self._val_audio_indices is None and not self.trainer.sanity_checking:
+        # On the first real val run, record dataset_idx -> song_key for all batches
+        # seen. With shuffle=True + limit_val_batches this covers a random cross-
+        # section of songs each run, building up coverage across runs until locked.
+        if self._val_audio_indices is None:
             if not hasattr(self, '_val_batch_index'):
                 self._val_batch_index = {}
-            # Derive song key from batch_nb via the val dataset's index table
-            try:
-                val_dataset = self.trainer.datamodule.data_val
-                pair_idx, _ = val_dataset.index[batch_nb]
-                lq_path = val_dataset.pairs[pair_idx][0]
-                fname = os.path.basename(lq_path)
-                parts = fname.rsplit("_", 1)
-                song_key = parts[0] if len(parts) == 2 and parts[1].replace(".wav", "").isdigit() else fname
-            except Exception:
-                song_key = str(batch_nb)
-            self._val_batch_index[batch_nb] = song_key
+            self._val_batch_index[ds_idx] = song_key
 
-        if (
-            self.val_audio_dir is not None
-            and self.current_epoch % self.val_save_interval == 0
-        ):
-            # On first val epoch, _val_audio_indices is None — we can't compute
-            # evenly spaced indices until on_validation_epoch_end knows the total.
-            # So we save all batches on epoch 0 and let on_validation_epoch_end
-            # prune to the evenly spaced set. On subsequent epochs the set is fixed.
-            if self._val_audio_indices is None:
-                save_this = True
-            else:
-                save_this = batch_nb in self._val_audio_indices
+        # Save audio if this dataset index is in the locked set.
+        # On the first run (indices not yet locked) save everything seen —
+        # on_validation_epoch_end will prune to val_audio_pairs diverse indices.
+        if self.val_audio_dir is not None:
+            save_this = (self._val_audio_indices is None) or (ds_idx in self._val_audio_indices)
 
             if save_this:
                 epoch_dir = os.path.join(
-                    self.val_audio_dir, f"epoch_{self.current_epoch:04d}"
+                    self.val_audio_dir, f"step_{self.global_step:06d}"
                 )
                 os.makedirs(epoch_dir, exist_ok=True)
-                sr = 44100
-
                 out = est_sources
                 if out.ndim == 3:
                     out = out[0]
@@ -238,8 +218,8 @@ class AudioLightningModule(pl.LightningModule):
                     out = out.unsqueeze(0)
                 out = out.float().cpu().clamp(-1.0, 1.0)
                 torchaudio.save(
-                    os.path.join(epoch_dir, f"restored_{batch_nb:04d}.wav"),
-                    out, sr,
+                    os.path.join(epoch_dir, f"{song_key}_{ds_idx:04d}.wav"),
+                    out, 44100,
                 )
 
         return {"val_loss": loss}
@@ -253,30 +233,28 @@ class AudioLightningModule(pl.LightningModule):
         self.log("lr", self.optimizer[0].param_groups[0]["lr"], prog_bar=True)
         self.validation_step_outputs.clear()
 
-        # After the first val epoch we know the full dataset size — randomly
-        # pick val_audio_pairs indices with at least 1 from each song, then
-        # lock them in for all future epochs.
+        # After the first real val run, lock a diverse set of dataset indices —
+        # one guaranteed per song, remainder filled randomly. These are stable
+        # dataset positions so they survive shuffle and limit_val_batches.
         if self._val_audio_indices is None and hasattr(self, '_val_batch_index') and not self.trainer.sanity_checking:
             import random
             from collections import defaultdict
 
-            # _val_batch_index maps batch_nb -> filename stem so we can group by song
             song_batches = defaultdict(list)
-            for batch_nb, song_key in self._val_batch_index.items():
-                song_batches[song_key].append(batch_nb)
+            for ds_idx, song_key in self._val_batch_index.items():
+                song_batches[song_key].append(ds_idx)
 
             songs = list(song_batches.keys())
             n = min(self.val_audio_pairs, sum(len(v) for v in song_batches.values()))
 
-            # Guarantee 1 random batch per song, then fill remainder from the full pool
             selected = [random.choice(song_batches[s]) for s in songs]
-            already = set(selected)
-            remainder = [nb for nb in self._val_batch_index if nb not in already]
+            already  = set(selected)
+            remainder = [i for i in self._val_batch_index if i not in already]
             still_needed = max(0, n - len(selected))
             selected += random.sample(remainder, min(still_needed, len(remainder)))
 
             self._val_audio_indices = set(selected)
-            print(f"[val audio] Locked indices ({len(self._val_audio_indices)} randomly sampled across {len(songs)} songs): {sorted(self._val_audio_indices)}")
+            print(f"[val audio] Locked {len(self._val_audio_indices)} dataset indices across {len(songs)} songs: {sorted(self._val_audio_indices)}")
 
     def on_save_checkpoint(self, checkpoint: dict) -> None:
         # Persist val audio selection state so resume uses the same locked indices.
