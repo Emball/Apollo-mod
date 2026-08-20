@@ -10,7 +10,6 @@
 #     every N epochs so what you hear == what the loss measures
 ###
 import os
-import threading
 import torchaudio
 from omegaconf import OmegaConf
 import torch
@@ -56,7 +55,6 @@ class AudioLightningModule(pl.LightningModule):
         self.val_audio_dir = val_audio_dir
         self.val_audio_pairs = val_audio_pairs
         self._val_locked_refs = None  # list of (song_key, lq_path, hq_path, start, seg_samples)
-        self._val_audio_thread = None  # background thread for saving val audio
         self.gradient_checkpointing = gradient_checkpointing
         self.grad_accum_steps = max(1, grad_accum_steps)
         self._accum_loss_g = None
@@ -250,53 +248,43 @@ class AudioLightningModule(pl.LightningModule):
     def _save_val_audio(self):
         """
         Run locked reference chunks through the model and save LQ/HQ/Restored triplets.
-        Runs in a daemon background thread so it never blocks training.
-        The previous thread is joined before starting a new one to avoid pile-up.
+        Called from on_validation_epoch_end — training is paused at this point so the
+        full GPU is available. No threading needed.
         """
         if not self._val_locked_refs or self.val_audio_dir is None:
             return
 
-        # Wait for any previous save thread to finish before starting a new one.
-        if self._val_audio_thread is not None and self._val_audio_thread.is_alive():
-            self._val_audio_thread.join()
+        from paired_datamodule import normalize_pair
 
         epoch_dir = os.path.join(self.val_audio_dir, f"step_{self.global_step:06d}")
         os.makedirs(epoch_dir, exist_ok=True)
 
-        # Snapshot the model weights to CPU so the thread doesn't hold the GPU.
-        import copy
-        cpu_model = copy.deepcopy(self.audio_model).cpu().eval()
-        refs = list(self._val_locked_refs)
+        self.audio_model.eval()
+        with torch.no_grad():
+            for song_key, lq_path, hq_path, start, seg_samples in self._val_locked_refs:
+                try:
+                    lq, _ = torchaudio.load(lq_path, frame_offset=start, num_frames=seg_samples)
+                    hq, _ = torchaudio.load(hq_path, frame_offset=start, num_frames=seg_samples)
 
-        def _worker():
-            from paired_datamodule import normalize_pair
-            with torch.no_grad():
-                for song_key, lq_path, hq_path, start, seg_samples in refs:
-                    try:
-                        lq, _ = torchaudio.load(lq_path, frame_offset=start, num_frames=seg_samples)
-                        hq, _ = torchaudio.load(hq_path, frame_offset=start, num_frames=seg_samples)
+                    if lq.shape[0] == 1: lq = lq.repeat(2, 1)
+                    if hq.shape[0] == 1: hq = hq.repeat(2, 1)
 
-                        if lq.shape[0] == 1: lq = lq.repeat(2, 1)
-                        if hq.shape[0] == 1: hq = hq.repeat(2, 1)
+                    lq_norm, hq_norm = normalize_pair(lq, hq)
 
-                        lq_norm, hq_norm = normalize_pair(lq, hq)
+                    inp = lq_norm.unsqueeze(0).to(self.device)
+                    out = self.audio_model(inp)
+                    if out.ndim == 3:
+                        out = out[0]
+                    out     = out.float().cpu().clamp(-1.0, 1.0)
+                    lq_save = lq_norm.float().clamp(-1.0, 1.0)
+                    hq_save = hq_norm.float().clamp(-1.0, 1.0)
 
-                        inp = lq_norm.unsqueeze(0)  # CPU inference
-                        out = cpu_model(inp)
-                        if out.ndim == 3:
-                            out = out[0]
-                        out     = out.float().clamp(-1.0, 1.0)
-                        lq_save = lq_norm.float().clamp(-1.0, 1.0)
-                        hq_save = hq_norm.float().clamp(-1.0, 1.0)
-
-                        torchaudio.save(os.path.join(epoch_dir, f"{song_key}_LQ.wav"),       lq_save, 44100)
-                        torchaudio.save(os.path.join(epoch_dir, f"{song_key}_HQ.wav"),       hq_save, 44100)
-                        torchaudio.save(os.path.join(epoch_dir, f"{song_key}_Restored.wav"), out,     44100)
-                    except Exception as e:
-                        print(f"[val audio] Error saving {song_key}: {e}")
-
-        self._val_audio_thread = threading.Thread(target=_worker, daemon=True)
-        self._val_audio_thread.start()
+                    torchaudio.save(os.path.join(epoch_dir, f"{song_key}_LQ.wav"),       lq_save, 44100)
+                    torchaudio.save(os.path.join(epoch_dir, f"{song_key}_HQ.wav"),       hq_save, 44100)
+                    torchaudio.save(os.path.join(epoch_dir, f"{song_key}_Restored.wav"), out,     44100)
+                except Exception as e:
+                    print(f"[val audio] Error saving {song_key}: {e}")
+        self.audio_model.train()
 
     def on_validation_epoch_end(self):
         if self._val_loss_count > 0:
