@@ -314,7 +314,10 @@ class AudioLightningModule(pl.LightningModule):
         for ds_idx in seen:
             pair_idx, _ = dataset.index[ds_idx]
             _, hq_path  = dataset.pairs[pair_idx]
-            song_key    = os.path.splitext(os.path.basename(hq_path))[0]
+            stem = os.path.splitext(os.path.basename(hq_path))[0]
+            # Strip chunk number suffix (e.g. "Freak_0017" -> "Freak")
+            parts = stem.rsplit("_", 1)
+            song_key = parts[0] if len(parts) == 2 and parts[1].isdigit() else stem
             by_song.setdefault(song_key, []).append(ds_idx)
 
         num_songs   = len(by_song)
