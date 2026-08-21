@@ -116,7 +116,7 @@ class AudioLightningModule(pl.LightningModule):
         self._last_val_sisdr  = None
         self._last_val_msstft = None
         self._last_val_sfr    = None
-        self._perc_thread     = None
+
 
         if gradient_checkpointing:
             self._enable_gradient_checkpointing()
@@ -405,15 +405,12 @@ class AudioLightningModule(pl.LightningModule):
                 except Exception as e:
                     print(f"[val audio] Error saving {song_key}: {e}")
 
-        self.audio_model.train()
-
-        # Compute perceptual metrics in a background thread so training resumes immediately
-        import threading
-        def _compute_perc(pairs, module):
+        # Compute perceptual metrics synchronously -- training is already paused here
+        if perc_pairs:
             msstft_sum = 0.0
             sfr_sum    = 0.0
             count      = 0
-            for e, r, sk in pairs:
+            for e, r, sk in perc_pairs:
                 try:
                     msstft_sum += _ms_log_stft_loss(e, r)
                     sfr_sum    += _spectral_flatness_ratio(e, r)
@@ -421,23 +418,12 @@ class AudioLightningModule(pl.LightningModule):
                 except Exception as _me:
                     print(f"[val metrics] {sk}: {_me}")
             if count > 0:
-                module._last_val_msstft = msstft_sum / count
-                module._last_val_sfr    = sfr_sum    / count
+                self._last_val_msstft = msstft_sum / count
+                self._last_val_sfr    = sfr_sum    / count
 
-        if perc_pairs:
-            t = threading.Thread(target=_compute_perc, args=(perc_pairs, self), daemon=True)
-            t.start()
-            # Join before next val run so we don't pile up threads
-            if hasattr(self, '_perc_thread') and self._perc_thread is not None:
-                self._perc_thread.join(timeout=30)
-            self._perc_thread = t
+        self.audio_model.train()
 
     def on_validation_epoch_end(self):
-        # Wait for previous perceptual metric thread before logging new val results
-        if self._perc_thread is not None:
-            self._perc_thread.join(timeout=30)
-            self._perc_thread = None
-
         self._last_val_sisdr  = None
         self._last_val_msstft = None
         self._last_val_sfr    = None

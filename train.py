@@ -886,31 +886,35 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         Reports wall-clock measured it/s from the first batch of each epoch,
         so resume mid-epoch doesn't produce inflated rates.
         """
+        _WINDOW = 20  # rolling window size for it/s calculation
+
         def on_train_epoch_start(self, trainer, pl_module):
             self._epoch_batches    = trainer.num_training_batches
-            self._session_t0       = None   # set on second batch_end of this session
             self._last_global_step = trainer.global_step
-            self._session_done     = 0      # optimizer steps processed this session
-            self._val_elapsed      = 0.0    # cumulative time spent in val (excluded from rate)
             self._val_t0           = None
+            self._window_times     = []   # timestamps of last _WINDOW optimizer steps
             total = self._epoch_batches
             print(f"\nEpoch {trainer.current_epoch} -- {total} batches", flush=True)
 
         def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
             now = _time.monotonic()
-            if self._session_t0 is None:
-                self._session_t0 = now
-                self._last_global_step = trainer.global_step
-                return  # skip first batch to avoid 0.00 it/s
 
             # only print when an optimizer step actually occurred
             if trainer.global_step == self._last_global_step:
                 return
             self._last_global_step = trainer.global_step
-            self._session_done += 1
 
-            elapsed = (now - self._session_t0) - self._val_elapsed
-            its     = self._session_done / elapsed if elapsed > 0.1 else 0.0
+            # rolling window: keep last _WINDOW step timestamps
+            self._window_times.append(now)
+            if len(self._window_times) > self._WINDOW:
+                self._window_times.pop(0)
+
+            # it/s = steps in window / elapsed time of window
+            if len(self._window_times) >= 2:
+                window_elapsed = self._window_times[-1] - self._window_times[0]
+                its = (len(self._window_times) - 1) / window_elapsed if window_elapsed > 0.05 else 0.0
+            else:
+                its = 0.0
             done    = batch_idx + 1
             total   = self._epoch_batches
             pct     = 100 * done / total
@@ -933,9 +937,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             self._val_t0 = _time.monotonic()
 
         def on_validation_epoch_end(self, trainer, pl_module):
-            val_dur = _time.monotonic() - self._val_t0
-            if hasattr(self, "_val_elapsed"):
-                self._val_elapsed += val_dur
+            val_dur = _time.monotonic() - self._val_t0 if self._val_t0 else 0.0
             if not trainer.sanity_checking:
                 sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
                 msstft = getattr(pl_module, "_last_val_msstft", None)
