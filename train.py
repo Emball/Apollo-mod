@@ -887,16 +887,17 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     class StepPrinter(_Callback):
         """
         Replaces TQDM with a clean line-per-step console output.
-        Reports wall-clock measured it/s from the first batch of each epoch,
-        so resume mid-epoch doesn't produce inflated rates.
+        Reports wall-clock cumulative it/s from the first step of the session,
+        excluding time spent in validation. Rises naturally as CUDA warms up.
         """
-        _WINDOW = 20  # rolling window size for it/s calculation
 
         def on_train_epoch_start(self, trainer, pl_module):
             self._epoch_batches    = trainer.num_training_batches
             self._last_global_step = trainer.global_step
             self._val_t0           = None
-            self._window_times     = []   # timestamps of last _WINDOW optimizer steps
+            self._session_t0       = None   # set on first optimizer step
+            self._session_done     = 0      # optimizer steps this session
+            self._val_elapsed      = 0.0    # cumulative val time excluded from rate
             total = self._epoch_batches
             print(f"\nEpoch {trainer.current_epoch} -- {total} batches", flush=True)
 
@@ -908,17 +909,12 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 return
             self._last_global_step = trainer.global_step
 
-            # rolling window: keep last _WINDOW step timestamps
-            self._window_times.append(now)
-            if len(self._window_times) > self._WINDOW:
-                self._window_times.pop(0)
+            if self._session_t0 is None:
+                self._session_t0 = now
 
-            # it/s = steps in window / elapsed time of window
-            if len(self._window_times) >= 2:
-                window_elapsed = self._window_times[-1] - self._window_times[0]
-                its = (len(self._window_times) - 1) / window_elapsed if window_elapsed > 0.05 else 0.0
-            else:
-                its = 0.0
+            self._session_done += 1
+            elapsed = (now - self._session_t0) - self._val_elapsed
+            its = self._session_done / elapsed if elapsed > 0.1 else 0.0
             done    = batch_idx + 1
             total   = self._epoch_batches
             pct     = 100 * done / total
@@ -939,11 +935,11 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             if not trainer.sanity_checking:
                 print("  [val]", end="", flush=True)
             self._val_t0 = _time.monotonic()
-            # drop stale timestamps so the val pause doesn't get counted as training time
-            self._window_times = []
 
         def on_validation_epoch_end(self, trainer, pl_module):
             val_dur = _time.monotonic() - self._val_t0 if self._val_t0 else 0.0
+            if hasattr(self, '_val_elapsed'):
+                self._val_elapsed += val_dur
             if not trainer.sanity_checking:
                 sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
                 msstft = getattr(pl_module, "_last_val_msstft", None)
@@ -1019,12 +1015,16 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     with open(os.path.join(_run_dir, "best_k_models.json"), "w") as f:
         json.dump(best_k, f, indent=0)
 
-    state_dict = torch.load(checkpoint.best_model_path, map_location="cpu", weights_only=True)
-    system.load_state_dict(state_dict=state_dict["state_dict"])
-    system.cpu()
-
-    to_save = system.audio_model.serialize()
-    torch.save(to_save, os.path.join(_run_dir, "best_model.pth"))
+    best_path = getattr(checkpoint, "best_model_path", "") or ""
+    if best_path and os.path.isfile(best_path):
+        state_dict = torch.load(best_path, map_location="cpu", weights_only=True)
+        system.load_state_dict(state_dict=state_dict["state_dict"])
+        system.cpu()
+        to_save = system.audio_model.serialize()
+        torch.save(to_save, os.path.join(_run_dir, "best_model.pth"))
+        print_only(f"[train] Best model saved to {_run_dir}/best_model.pth")
+    else:
+        print_only("[train] No best checkpoint found -- skipping best_model.pth export.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
