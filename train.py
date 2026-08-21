@@ -939,6 +939,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             if not trainer.sanity_checking:
                 print("  [val]", end="", flush=True)
             self._val_t0 = _time.monotonic()
+            # drop stale timestamps so the val pause doesn't get counted as training time
+            self._window_times = []
 
         def on_validation_epoch_end(self, trainer, pl_module):
             val_dur = _time.monotonic() - self._val_t0 if self._val_t0 else 0.0
