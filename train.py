@@ -712,7 +712,11 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     def _load_weights(path: str, feature_dim: int):
         """Load a .pth or .ckpt file and return an Apollo model with weights applied."""
         if path.endswith(".ckpt"):
-            ckpt = torch.load(path, map_location="cpu", weights_only=True)
+            try:
+                ckpt = torch.load(path, map_location="cpu", weights_only=True)
+            except Exception:
+                print_only("[weights] weights_only=True failed (legacy checkpoint format) -- retrying with weights_only=False")
+                ckpt = torch.load(path, map_location="cpu", weights_only=False)
             raw = ckpt["state_dict"]
             if any(k.startswith("audio_model.") for k in raw.keys()):
                 model_state = {k.replace("audio_model.", ""): v
