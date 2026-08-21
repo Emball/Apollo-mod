@@ -89,6 +89,7 @@ discriminator:
   _target_: look2hear.discriminators.frequencydis.MultiFrequencyDiscriminator
   nch: 2
   window: [32, 64, 128, 256, 512, 1024, 2048]
+  window_weight_boost: false
 
 optimizer:
   type: adamw_8bit

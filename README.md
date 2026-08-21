@@ -141,7 +141,7 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 | Key | Description |
 |---|---|
 | `n_layers_to_freeze` | Freeze the first N BSNet layers. Apollo has 6 total. `4` is recommended for fine-tuning models that are codec-degradation based, but more may be required for more advanced restoration tasks. |
-| `hf_boost` | Extra loss weight on high frequencies introduced to improve reconstruction. `1.0` = flat. Do not exceed `2.0`. |
+| `hf_boost` | Extra loss weight on high frequencies in the generator loss. `1.0` = flat (recommended for mildly degraded audio). Higher values (1.2-1.5) help when the source is severely degraded and HF content is mostly gone, but can cause HF artifact reproduction on cleaner sources. Do not exceed `2.0`. |
 | `val_audio_pairs` | Number of val audio samples saved per val run. |
 | `grad_accum_steps` | Accumulate gradients over N steps to simulate a larger batch without extra VRAM. With a batch size of 1 and `grad_accum_steps` at 2, this simulates a batch size of 2 with the memory footprint of 1, at the cost of speed. |
 
@@ -168,6 +168,12 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 | `noise` | Live | Matched Gaussian noise added to both LQ and HQ. |
 | `pitch_shift` | Cached | Disabled is recommended for codec restoration, as it warps frequency relationships the model is trying to learn. Potentially worth experimenting with for other types of restoration tasks. |
 | `mp3_degradation` | Cached | CBR MP3 re-encode on LQ only introduced to help in cases where the target data of your fine-tune is heavily layered in compression. Live mode spawns an ffmpeg process per chunk per epoch so is generally not recommended. |
+
+### discriminator
+
+| Key | Description |
+|---|---|
+| `window_weight_boost` | When `true`, smaller STFT windows get higher discriminator loss weight, biasing training toward high-frequency detail. Useful for severely degraded sources where HF content is mostly gone. For mildly degraded audio (standard MP3/codec), leave `false` -- the bias can cause the model to reproduce HF artifact patterns rather than restore clean content. |
 
 ### model
 

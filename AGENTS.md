@@ -9,9 +9,9 @@ Read `README.md` for usage, config reference, data layout, commands, and augment
 | File | Role |
 |---|---|
 | `look2hear/models/apollo.py` | Generator. BSNet + Roformer layers. STFT/iSTFT always in float32. |
-| `look2hear/discriminators/frequencydis.py` | Frequency discriminator. Hann windows cached as plain tensors in `_hann_cache` (not `register_buffer` — keeps them out of checkpoint state_dict). Mono input auto-expanded to stereo via `.expand()`. |
+| `look2hear/discriminators/frequencydis.py` | Frequency discriminator. Hann windows cached as plain tensors in `_hann_cache` (not `register_buffer` -- keeps them out of checkpoint state_dict). Mono input auto-expanded to stereo via `.expand()`. `window_weight_boost` config param (default `false`) enables inverse-size window weighting -- only useful for severely degraded sources, causes HF artifact reproduction on mildly degraded audio. |
 | `look2hear/system/audio_litmodule.py` | Lightning module. Manual optimization, gradient checkpointing (BSNet only), val audio saving, RAM/CUDA OOM watchdogs, val index locking. |
-| `look2hear/losses/gan_losses.py` | GAN losses. Hann windows and HF weight tensors in `_hann_cache`/`_weight_cache` dicts (not buffers). |
+| `look2hear/losses/gan_losses.py` | GAN losses. Hann windows and HF weight tensors in `_hann_cache`/`_weight_cache` dicts (not buffers). `hf_boost` config param (default `1.0` = flat) applies extra loss weight to HF bins -- same caveat as `window_weight_boost`: helpful for severely degraded audio, counterproductive for mild degradation. |
 | `paired_datamodule.py` | Loads chunked LQ/HQ WAV pairs. Live + cached augmentation pipeline. Val dataloader shuffles; dataset index passed through batch for stable audio monitoring. |
 | `train.py` | Entry point. Auto-chunks `data/` on first run. Run isolation via timestamped subdirs, resume logic, chunk cache manifest. |
 | `inference.py` | Entry point. Chunked inference, streams output to disk. Auto-selects best checkpoint by val_loss when `--weights` is omitted. |

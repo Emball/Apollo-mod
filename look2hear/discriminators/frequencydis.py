@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 class MultiFrequencyDiscriminator(nn.Module):
-    def __init__(self, nch, window):
+    def __init__(self, nch, window, window_weight_boost=False):
         super(MultiFrequencyDiscriminator, self).__init__()
 
         self.nch = nch
@@ -26,13 +26,17 @@ class MultiFrequencyDiscriminator(nn.Module):
             for _ in range(len(self.window))
         ])
 
-        # Inverse window size weighting -- smaller windows get higher weight
-        # since they resolve high frequency content better.
-        raw_weights = torch.tensor([1.0 / w for w in window], dtype=torch.float32)
-        self.register_buffer(
-            "window_weights",
-            raw_weights / raw_weights.mean()
-        )
+        # Window size weighting. When window_weight_boost=True, smaller windows
+        # get higher weight (inverse proportional to window size), biasing the
+        # discriminator toward high-frequency detail. Useful for severely
+        # degraded audio where HF content is mostly gone. For mildly degraded
+        # audio this can cause HF artifact reproduction -- use False (flat weights).
+        if window_weight_boost:
+            raw_weights = torch.tensor([1.0 / w for w in window], dtype=torch.float32)
+            normalized = raw_weights / raw_weights.mean()
+        else:
+            normalized = torch.ones(len(window), dtype=torch.float32)
+        self.register_buffer("window_weights", normalized)
 
         # Hann windows cached as plain tensors -- NOT register_buffer so they
         # never appear in state_dict or checkpoints (fully deterministic from
