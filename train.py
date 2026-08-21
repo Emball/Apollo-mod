@@ -955,8 +955,12 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     callbacks: List[Callback] = [StepPrinter()]
 
-    val_disabled = cfg.trainer.get("limit_val_batches", 1.0) == 0
+    _lvb = cfg.trainer.get("limit_val_batches", 1.0)
+    val_disabled = (isinstance(_lvb, (int, float)) and float(_lvb) == 0.0)
+    if val_disabled:
+        print_only("[train] limit_val_batches=0 -- skipping early_stopping and checkpoint callbacks")
 
+    checkpoint = None
     if cfg.get("early_stopping") and not val_disabled:
         print_only(f"Instantiating early_stopping")
         callbacks.append(hydra.utils.instantiate(cfg.early_stopping))
@@ -964,8 +968,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         print_only(f"Instantiating checkpoint")
         checkpoint = hydra.utils.instantiate(cfg.checkpoint)
         callbacks.append(checkpoint)
-    else:
-        checkpoint = None
 
     # Instantiate logger
     print_only(f"Instantiating logger <{cfg.logger._target_}>")
