@@ -955,13 +955,17 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     callbacks: List[Callback] = [StepPrinter()]
 
-    if cfg.get("early_stopping"):
+    val_disabled = cfg.trainer.get("limit_val_batches", 1.0) == 0
+
+    if cfg.get("early_stopping") and not val_disabled:
         print_only(f"Instantiating early_stopping")
         callbacks.append(hydra.utils.instantiate(cfg.early_stopping))
-    if cfg.get("checkpoint"):
+    if cfg.get("checkpoint") and not val_disabled:
         print_only(f"Instantiating checkpoint")
         checkpoint = hydra.utils.instantiate(cfg.checkpoint)
         callbacks.append(checkpoint)
+    else:
+        checkpoint = None
 
     # Instantiate logger
     print_only(f"Instantiating logger <{cfg.logger._target_}>")
@@ -1011,11 +1015,12 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         os._exit(1)
     print_only("Training finished!")
 
-    best_k = {k: v.item() for k, v in checkpoint.best_k_models.items()}
-    with open(os.path.join(_run_dir, "best_k_models.json"), "w") as f:
-        json.dump(best_k, f, indent=0)
+    if checkpoint is not None:
+        best_k = {k: v.item() for k, v in checkpoint.best_k_models.items()}
+        with open(os.path.join(_run_dir, "best_k_models.json"), "w") as f:
+            json.dump(best_k, f, indent=0)
 
-    best_path = getattr(checkpoint, "best_model_path", "") or ""
+    best_path = getattr(checkpoint, "best_model_path", "") or "" if checkpoint is not None else ""
     if best_path and os.path.isfile(best_path):
         state_dict = torch.load(best_path, map_location="cpu", weights_only=True)
         system.load_state_dict(state_dict=state_dict["state_dict"])
