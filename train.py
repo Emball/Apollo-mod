@@ -848,7 +848,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     # Instantiate losses
     print_only(f"Instantiating losses")
-    loss_g = hydra.utils.instantiate(cfg.loss_g, hf_boost=cfg.training.hf_boost)
+    loss_g = hydra.utils.instantiate(cfg.loss_g)
     loss_d = hydra.utils.instantiate(cfg.loss_d)
     losses = {"g": loss_g, "d": loss_d}
 
