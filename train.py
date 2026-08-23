@@ -1180,7 +1180,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # so the val fires at the step number the user expects to see on screen.
     _accum = cfg.training.get("grad_accum_steps", 1)
     _vci   = cfg.trainer.get("val_check_interval", None)
-    from omegaconf import open_dict
     if _vci is not None and isinstance(_vci, int) and _accum > 1:
         with open_dict(cfg):
             cfg.trainer.val_check_interval = int(_vci) * int(_accum)
