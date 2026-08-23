@@ -1356,6 +1356,14 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 print_only(f"[resume] Key reconciliation: dropped {len(_unexpected)} unexpected, filled {len(_missing)} missing.")
                 _patched = True
 
+        # If checkpoint has no optimizer state, inject empty stubs so Lightning
+        # doesn't crash trying to restore them. Training will start fresh optimizers.
+        if "optimizer_states" not in _ckpt_data or not _ckpt_data["optimizer_states"]:
+            print_only("[resume] Checkpoint has no optimizer state -- starting optimizers fresh.")
+            _ckpt_data["optimizer_states"] = []
+            _ckpt_data["lr_schedulers"] = []
+            _patched = True
+
         if _patched:
             torch.save(_ckpt_data, ckpt_path)
             print_only("[resume] Checkpoint patched and saved.")
