@@ -187,7 +187,7 @@ def _save_chunks_batch(chunks: list, paths: list) -> None:
 
 def _slice_and_save(
     lq_wav, hq_wav, stem: str, lq_out: str, hq_out: str,
-    cached_aug_fn=None, variants: int = 1,
+    cached_aug_fn=None,
     progress_cb=None,
 ) -> list:
     """Slice a pair into overlapping chunks, write each immediately to avoid
@@ -226,16 +226,13 @@ def _slice_and_save(
         hq_c = hq_wav[:, start:start + _CHUNK_SAMPLES]
         fname = f"{stem}_{idx:04d}.wav"
 
-        _write_chunk(lq_c, os.path.join(lq_out, fname))
-        _write_chunk(hq_c, os.path.join(hq_out, fname))
-
         if cached_aug_fn is not None:
-            for v in range(1, variants + 1):
-                lq_aug, hq_aug = cached_aug_fn(lq_c.clone(), hq_c.clone(), variant_idx=v, total_variants=variants)
-                vname = fname.replace(".wav", f"_v{v}.wav")
-                _write_chunk(lq_aug, os.path.join(lq_out, vname))
-                _write_chunk(hq_aug, os.path.join(hq_out, vname))
-                saved.append(vname)
+            lq_out_c, hq_out_c = cached_aug_fn(lq_c.clone(), hq_c.clone())
+            _write_chunk(lq_out_c, os.path.join(lq_out, fname))
+            _write_chunk(hq_out_c, os.path.join(hq_out, fname))
+        else:
+            _write_chunk(lq_c, os.path.join(lq_out, fname))
+            _write_chunk(hq_c, os.path.join(hq_out, fname))
 
         saved.append(fname)
         if progress_cb:
@@ -436,33 +433,16 @@ def _build_cached_aug_fn(cfg: "DictConfig"):
 
     sr = int(getattr(cfg.datas, "sr", 44100))
 
-    def _stratified_kbps(variant_idx: int, total_variants: int) -> Optional[int]:
-        """
-        Split [kbps_min, kbps_max] into `total_variants` equal-width bins and
-        return the (randomized) bitrate for bin `variant_idx` (1-indexed).
-        Ensures even coverage of the bitrate range across the variant set
-        instead of relying on independent random draws that can clump.
-        Falls back to None (caller does its own random draw) if mp3_degradation
-        is disabled or total_variants <= 1.
-        """
-        if not aug_cfg.mp3_degradation.enabled or total_variants <= 1:
-            return None
-        lo = aug_cfg.mp3_degradation.kbps_min
-        hi = aug_cfg.mp3_degradation.kbps_max
-        if hi <= lo:
-            return lo
-        bin_width = (hi - lo) / total_variants
-        bin_lo = lo + (variant_idx - 1) * bin_width
-        bin_hi = lo + variant_idx * bin_width
-        return int(round(_random.uniform(bin_lo, bin_hi)))
-
-    def _apply(lq, hq, variant_idx: int = 1, total_variants: int = 1):
-        kbps = _stratified_kbps(variant_idx, total_variants)
-        return augment_pair(lq, hq, aug_cfg, sr=sr, forced_kbps=kbps)
+    def _apply(lq, hq):
+        # Single roll per chunk: augment_pair's own prob check decides whether
+        # mp3_degradation fires at all, and if so draws one random bitrate from
+        # [kbps_min, kbps_max]. No duplication, no stratified variants -- variety
+        # across the song comes naturally from each chunk rolling independently.
+        return augment_pair(lq, hq, aug_cfg, sr=sr)
 
     return _apply
 
-def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=None, variants: int = 1, fixed_delay: int = None) -> int:
+def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=None, fixed_delay: int = None) -> int:
     """
     Normalize src_root into LQ/ + HQ/ layout (if not already), then chunk all
     matched pairs into dst_root/LQ and dst_root/HQ.
@@ -677,7 +657,7 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
                     )
 
         saved = _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out,
-                                cached_aug_fn=cached_aug_fn, variants=variants,
+                                cached_aug_fn=cached_aug_fn,
                                 progress_cb=_progress)
         with print_lock:
             songs_done[0] += 1
@@ -726,17 +706,14 @@ def prepare_data(cfg: DictConfig) -> None:
     data_val   = os.path.join(data_root, "val")
 
     cached_aug_fn = _build_cached_aug_fn(cfg)
-    variants      = int(getattr(getattr(cfg.datas, "augmentation", {}), "cached_variants", 1)
-                        if hasattr(getattr(cfg.datas, "augmentation", None) or {}, "cached_variants")
-                        else 1)
     _align_raw    = getattr(cfg.datas, "align_data", False)
     if isinstance(_align_raw, int) and not isinstance(_align_raw, bool) and _align_raw != 0:
         fixed_delay = int(_align_raw)
     else:
         fixed_delay = None
 
-    _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, variants=variants, fixed_delay=fixed_delay)
-    _chunk_split(data_val,   val_chunks,   "val",   cached_aug_fn=None,          variants=1,        fixed_delay=fixed_delay)
+    _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, fixed_delay=fixed_delay)
+    _chunk_split(data_val,   val_chunks,   "val",   cached_aug_fn=None,          fixed_delay=fixed_delay)
 
     # Val bootstrap from train chunks
     # If val is still empty after chunking (no data/val source exists),
