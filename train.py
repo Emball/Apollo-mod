@@ -544,26 +544,38 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
 
     def _convert_inplace_ffmpeg(src: str, trim_samples: int) -> str:
         """Convert src to WAV in-place via ffmpeg-python. Returns new path."""
-        import ffmpeg
+        import ffmpeg, tempfile
+        src_dir = os.path.dirname(src)
+        src_ext = os.path.splitext(src)[1].lower()
         dst = os.path.splitext(src)[0] + ".wav"
-        stream = ffmpeg.input(src)
-        if trim_samples > 0:
-            trim_sec = trim_samples / _SR
-            stream = stream.audio.filter("atrim", start=trim_sec).filter("asetpts", "PTS-STARTPTS")
+        # Write to a temp file in the same directory, then rename atomically.
+        # FFmpeg refuses input==output, so we never write directly to dst.
+        fd, tmp_path = tempfile.mkstemp(suffix=".wav", dir=src_dir)
+        os.close(fd)
         try:
+            stream = ffmpeg.input(src)
+            if trim_samples > 0:
+                trim_sec = trim_samples / _SR
+                stream = stream.audio.filter("atrim", start=trim_sec).filter("asetpts", "PTS-STARTPTS")
             (
                 stream
-                .output(dst, format="wav", acodec="pcm_f32le", ar=_SR, ac=2)
+                .output(tmp_path, format="wav", acodec="pcm_f32le", ar=_SR, ac=2)
                 .overwrite_output()
                 .run(capture_stdout=True, capture_stderr=True)
             )
         except ffmpeg.Error as e:
+            os.unlink(tmp_path)
             stderr = e.stderr.decode(errors="replace") if e.stderr else ""
             raise RuntimeError(f"[ffmpeg] Failed to convert {src}:\n{stderr}") from e
-        src_ext = os.path.splitext(src)[1].lower()
-        if src_ext != ".wav":
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
+        # Remove original if it was non-WAV (different path from dst)
+        if src_ext != ".wav" and os.path.abspath(src) != os.path.abspath(dst):
             os.remove(src)
             print_only(f"[data] Removed original: {os.path.basename(src)}")
+        os.replace(tmp_path, dst)
         return dst
 
     def _convert_inplace_torchaudio(src: str, trim_samples: int) -> str:
@@ -584,11 +596,15 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         return dst
 
     use_ffmpeg = _has_ffmpeg()
+    # Sentinel written after a successful conversion pass so subsequent runs
+    # don't re-convert already-processed WAVs (alignment is already baked in).
+    _conv_sentinel = os.path.join(src_root, ".wav_converted")
+    _already_converted = os.path.isfile(_conv_sentinel)
     needs_conv = {
         s for s in matched
         if os.path.splitext(lq_files[s])[1].lower() != ".wav"
         or os.path.splitext(hq_files[s])[1].lower() != ".wav"
-        or lq_offset > 0 or hq_offset > 0
+        or (not _already_converted and (lq_offset > 0 or hq_offset > 0))
     }
 
     wav_paths: dict[str, tuple[str, str]] = {}
@@ -604,8 +620,8 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
             convert = _convert_inplace_ffmpeg if use_ffmpeg else _convert_inplace_torchaudio
             lq_ext = os.path.splitext(lq_p)[1].lower()
             hq_ext = os.path.splitext(hq_p)[1].lower()
-            new_lq = convert(lq_p, lq_offset) if (lq_ext != ".wav" or lq_offset > 0) else lq_p
-            new_hq = convert(hq_p, hq_offset) if (hq_ext != ".wav" or hq_offset > 0) else hq_p
+            new_lq = convert(lq_p, lq_offset) if lq_ext != ".wav" else lq_p
+            new_hq = convert(hq_p, hq_offset) if hq_ext != ".wav" else hq_p
             with print_lock:
                 done_conv[0] += 1
                 print_only(f"[data/{split_name}]   Converted {done_conv[0]}/{len(needs_conv)}: {stem}")
@@ -623,6 +639,9 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
                     os.path.join(lq_src, lq_files[stem]),
                     os.path.join(hq_src, hq_files[stem]),
                 )
+        # Mark that conversion (including alignment baking) is done for this data dir.
+        with open(_conv_sentinel, "w") as _sf:
+            _sf.write("")
         print_only(f"[data/{split_name}] Conversion done.\n")
     else:
         wav_paths = {
