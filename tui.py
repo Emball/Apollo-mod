@@ -335,12 +335,84 @@ def _find_model_for_config(cfg_path: Path) -> Path | None:
 # Subprocess runner (live output, returns to menu on Ctrl+C)
 # ---------------------------------------------------------------------------
 
-def _run_subprocess(cmd: list[str], label: str) -> bool:
-    """Run a subprocess, stream output. Returns True if completed, False if Ctrl+C."""
+def _run_mid_training_inference(state: dict, cfg_path: Path, pause_file: Path) -> None:
+    """Mini inference flow triggered by Ctrl+I during training."""
+    import re as _re
     console.clear()
     console.print(_banner_panel())
     console.print(Panel(
-        f"[bold cyan]{label}[/]\n[dim]Press Ctrl+C to stop and return to menu[/]",
+        "[bold yellow]Mid-training Inference[/]\n[dim]Training is paused. Pick a file to process.[/]",
+        border_style="yellow",
+        padding=(0, 2),
+    ))
+
+    cfg_stem = cfg_path.stem
+
+    # Pick input
+    input_path = _pick_input_file(state, cfg_stem)
+    if not input_path or input_path == _PROCESS_ALL_SENTINEL:
+        # If cancelled or process-all, just resume
+        pause_file.unlink(missing_ok=True)
+        return
+
+    # Pick output
+    output_path = _pick_output_path(state, cfg_stem, input_path)
+    if not output_path:
+        pause_file.unlink(missing_ok=True)
+        return
+
+    # Find latest checkpoint for this config
+    latest_ckpt = _find_latest_checkpoint(cfg_path)
+    if latest_ckpt is None:
+        console.print("[red]No checkpoint found yet -- cannot run inference.[/]")
+        console.input("[dim]Press Enter to resume training[/]")
+        pause_file.unlink(missing_ok=True)
+        return
+
+    # Build and run inference cmd
+    import re as _re2
+    stem = _re2.sub(r"^\[\d+\]-", "", latest_ckpt.stem)
+    m = _re2.search(r"val_loss=(-?[\d.]+)", stem)
+    sisdr_str = f"sisdr={-float(m.group(1)):.3f}" if m else ""
+
+    try:
+        cfg_data = __import__("yaml").safe_load(cfg_path.read_text())
+        feature_dim = cfg_data.get("model", {}).get("feature_dim", 256)
+    except Exception:
+        feature_dim = 384
+
+    cmd = [
+        _python_bin(), str(ROOT / "inference.py"),
+        "--in_wav",    input_path,
+        "--out_wav",   output_path,
+        "--weights",   str(latest_ckpt),
+        "--conf_dir",  str(cfg_path),
+        "--feature_dim", str(feature_dim),
+    ]
+
+    console.print(f"\n[cyan]Checkpoint:[/] {latest_ckpt.name}  {sisdr_str}")
+    console.print(f"[cyan]Input:[/]      {Path(input_path).name}")
+    console.print(f"[cyan]Output:[/]     {output_path}\n")
+
+    _run_subprocess(cmd, "Mid-training Inference", pause_dir=None)
+
+    console.print("\n[green]Inference done. Resuming training...[/]")
+    import time as _t; _t.sleep(1)
+    pause_file.unlink(missing_ok=True)
+
+
+def _run_subprocess(cmd: list[str], label: str, pause_dir: Path | None = None,
+                    state: dict | None = None, cfg_path: Path | None = None) -> bool:
+    """Run a subprocess, stream output. Returns True if completed, False if Ctrl+C.
+
+    When pause_dir is set, watches for Ctrl+I (ASCII 0x09) to trigger mid-training
+    inference. Writes pause_dir/PAUSED to signal train.py to suspend itself.
+    """
+    console.clear()
+    console.print(_banner_panel())
+    hint = "[dim]Press Ctrl+C to stop  |  Ctrl+I to pause and run inference[/]" if pause_dir else "[dim]Press Ctrl+C to stop and return to menu[/]"
+    console.print(Panel(
+        f"[bold cyan]{label}[/]\n{hint}",
         border_style="cyan",
         padding=(0, 2),
     ))
@@ -348,6 +420,42 @@ def _run_subprocess(cmd: list[str], label: str) -> bool:
 
     proc = None
     interrupted = False
+    pause_file = (pause_dir / "PAUSED") if pause_dir else None
+    _pausing = threading.Event()
+
+    def _watch_for_ctrl_i():
+        """Background thread: read raw stdin bytes, trigger pause on Ctrl+I (0x09)."""
+        if not pause_dir or not sys.stdin.isatty():
+            return
+        try:
+            if IS_WINDOWS:
+                import msvcrt
+                while proc and proc.poll() is None:
+                    if msvcrt.kbhit():
+                        ch = msvcrt.getwch()
+                        if ch == "\t":  # Tab = Ctrl+I on Windows
+                            _pausing.set()
+                            break
+                    import time as _t; _t.sleep(0.05)
+            else:
+                import tty as _tty, termios as _termios
+                fd = sys.stdin.fileno()
+                old = _termios.tcgetattr(fd)
+                try:
+                    _tty.setraw(fd)
+                    while proc and proc.poll() is None:
+                        import select
+                        r, _, _ = select.select([sys.stdin], [], [], 0.1)
+                        if r:
+                            ch = sys.stdin.read(1)
+                            if ch == "\t":  # Ctrl+I
+                                _pausing.set()
+                                break
+                finally:
+                    _termios.tcsetattr(fd, _termios.TCSADRAIN, old)
+        except Exception:
+            pass
+
     try:
         proc = subprocess.Popen(
             cmd,
@@ -361,12 +469,26 @@ def _run_subprocess(cmd: list[str], label: str) -> bool:
         def _stream():
             assert proc and proc.stdout
             for line in proc.stdout:
-                sys.stdout.write(line)
-                sys.stdout.flush()
+                if not _pausing.is_set():
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
 
         t = threading.Thread(target=_stream, daemon=True)
         t.start()
-        proc.wait()
+
+        if pause_dir:
+            ki = threading.Thread(target=_watch_for_ctrl_i, daemon=True)
+            ki.start()
+
+        while proc.poll() is None:
+            if _pausing.is_set() and pause_dir and pause_file and cfg_path and state is not None:
+                pause_file.touch()
+                _run_mid_training_inference(state, cfg_path, pause_file)
+                _pausing.clear()
+                # Reprint header after returning
+                console.print(Rule(style="dim cyan"))
+            import time as _t; _t.sleep(0.05)
+
         t.join(timeout=5)
 
     except KeyboardInterrupt:
@@ -382,14 +504,20 @@ def _run_subprocess(cmd: list[str], label: str) -> bool:
             except subprocess.TimeoutExpired:
                 proc.kill()
         console.print("[dim]Returning to menu...[/]")
+    finally:
+        if pause_file and pause_file.exists():
+            pause_file.unlink(missing_ok=True)
 
     console.print(Rule(style="dim cyan"))
     return not interrupted
 
 
-def _run_with_live_output(cmd: list[str], label: str) -> None:
+def _run_with_live_output(cmd: list[str], label: str,
+                          pause_dir: Path | None = None,
+                          state: dict | None = None,
+                          cfg_path: Path | None = None) -> None:
     """Run a subprocess and wait for Enter before returning to menu."""
-    _run_subprocess(cmd, label)
+    _run_subprocess(cmd, label, pause_dir=pause_dir, state=state, cfg_path=cfg_path)
     console.input("[dim]Press Enter to return to menu[/]")
 
 
@@ -434,7 +562,19 @@ def screen_train(state: dict) -> None:
         _save_state(state)
 
         cmd = [_python_bin(), str(ROOT / "train.py"), "--conf_dir", str(cfg_path)]
-        _run_with_live_output(cmd, f"Training: {cfg_path.stem}")
+        # Derive run dir for pause file -- matches train.py's run isolation logic.
+        # We use the base dir; train.py will pick the right timestamped subfolder.
+        # The pause file goes in the base exp dir so train.py can always find it.
+        try:
+            import yaml as _yaml
+            _cfg_data = _yaml.safe_load(cfg_path.read_text())
+            _exp_dir  = _cfg_data.get("exp", {}).get("dir", "./runs")
+            _exp_name = _cfg_data.get("exp", {}).get("name") or cfg_path.stem
+            _pause_dir = ROOT / _exp_dir / _exp_name
+        except Exception:
+            _pause_dir = None
+        _run_with_live_output(cmd, f"Training: {cfg_path.stem}",
+                              pause_dir=_pause_dir, state=state, cfg_path=cfg_path)
         start = idx
         return
 

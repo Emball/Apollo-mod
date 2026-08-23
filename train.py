@@ -1125,6 +1125,28 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 f"{done}/{total}  {its:.2f} it/s{val_str}",
                 end="", flush=True
             )
+            self.on_train_batch_end_pause_check()
+
+        def on_train_batch_end_pause_check(self):
+            """Poll for PAUSED sentinel file and block until removed.
+            TUI writes the file to the base exp dir (_base_dir); we check both
+            that and _run_dir so it works regardless of timing."""
+            pause_file = None
+            for candidate in [os.path.join(_base_dir, "PAUSED"),
+                               os.path.join(_run_dir,  "PAUSED")]:
+                if os.path.isfile(candidate):
+                    pause_file = candidate
+                    break
+            if pause_file is None:
+                return
+            print("\n[paused] Inference in progress -- training suspended.", flush=True)
+            pause_start = _time.monotonic()
+            while os.path.isfile(pause_file):
+                _time.sleep(0.5)
+            paused_dur = _time.monotonic() - pause_start
+            if hasattr(self, "_val_elapsed"):
+                self._val_elapsed += paused_dur
+            print("[resumed] Training continuing...", flush=True)
 
         def on_train_epoch_end(self, trainer, pl_module):
             print(flush=True)
