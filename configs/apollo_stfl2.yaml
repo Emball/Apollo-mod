@@ -12,8 +12,8 @@ optimizations:
   ram_limit_fraction: 0.95
 training:
   n_layers_to_freeze: 4
-  hf_boost: 1.5
-  val_audio_pairs: 4
+  val_audio_pairs: 3
+  val_rotate_every: auto
   grad_accum_steps: 2
 
 datas:
@@ -112,6 +112,9 @@ scheduler_d:
 loss_g:
   _target_: look2hear.losses.gan_losses.MultiFrequencyGenLoss
   eps: 1e-8
+  band_weight_center_hz: 15000.0   # center of gaussian penalty bump (Hz)
+  band_weight_sigma_hz: 3000.0     # width of bump (1-sigma, Hz)
+  band_weight_gain: 1.5            # peak gain above baseline (0 = flat/disabled)
 
 loss_d:
   _target_: look2hear.losses.gan_losses.MultiFrequencyDisLoss

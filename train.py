@@ -868,7 +868,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         optimizer=[optimizer_g, optimizer_d],
         scheduler=[scheduler_g, scheduler_d],
         val_audio_dir=val_audio_dir,
-        val_audio_pairs=cfg.training.val_audio_pairs,
+        val_audio_pairs=cfg.training.get("val_audio_pairs", 3),
+        val_rotate_every=cfg.training.get("val_rotate_every", "auto"),
         gradient_checkpointing=cfg.system.get("gradient_checkpointing", False),
         grad_accum_steps=cfg.training.get("grad_accum_steps", 1),
     )
@@ -934,22 +935,32 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         def on_validation_epoch_start(self, trainer, pl_module):
             if not trainer.sanity_checking:
                 print("  [val]", end="", flush=True)
-            self._val_t0 = _time.monotonic()
+            self._val_t0     = _time.monotonic()
+            self._val_sanity = trainer.sanity_checking
 
         def on_validation_epoch_end(self, trainer, pl_module):
+            # Do NOT stop the timer here -- AudioLightningModule.on_validation_epoch_end
+            # fires AFTER this callback hook and runs _save_val_audio() + metrics.
+            # Timer stops in on_validation_end which fires after all module hooks.
+            pass
+
+        def on_validation_end(self, trainer, pl_module):
+            # Timer stops here -- after all val hooks including audio saves/metrics.
             val_dur = _time.monotonic() - self._val_t0 if self._val_t0 else 0.0
             if hasattr(self, '_val_elapsed'):
                 self._val_elapsed += val_dur
-            if not trainer.sanity_checking:
+            if not getattr(self, '_val_sanity', True):
                 sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
                 msstft = getattr(pl_module, "_last_val_msstft", None)
                 sfr    = getattr(pl_module, "_last_val_sfr",    None)
+                hfmae  = getattr(pl_module, "_last_val_hfmae",  None)
                 parts = []
                 if sisdr  is not None: parts.append(f"sisdr={float(sisdr):.3f}")
                 if msstft is not None: parts.append(f"msstft={float(msstft):.4f}")
                 if sfr    is not None:
                     flag = "  noise^" if float(sfr) > 1.05 else ""
                     parts.append(f"sfr={float(sfr):.4f}{flag}")
+                if hfmae  is not None: parts.append(f"hf_band_mae={float(hfmae):.4f}")
                 if parts:
                     print(f" [val] {' '.join(parts)}  ({val_dur:.1f}s)", flush=True)
 
@@ -975,6 +986,17 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     logger.log_hyperparams = lambda *a, **kw: None
 
     # Instantiate trainer -- single GPU, no DDP
+    # Fix val_check_interval: the config value is in optimizer steps (what the
+    # display shows), but Lightning counts *batches*. Multiply by grad_accum_steps
+    # so the val fires at the step number the user expects to see on screen.
+    _accum = cfg.training.get("grad_accum_steps", 1)
+    _vci   = cfg.trainer.get("val_check_interval", None)
+    from omegaconf import open_dict
+    if _vci is not None and isinstance(_vci, int) and _accum > 1:
+        with open_dict(cfg):
+            cfg.trainer.val_check_interval = int(_vci) * int(_accum)
+        print_only(f"[trainer] val_check_interval adjusted: {_vci} steps x {_accum} accum = {cfg.trainer.val_check_interval} batches")
+
     print_only(f"Instantiating trainer")
     trainer: Trainer = hydra.utils.instantiate(
         cfg.trainer,
