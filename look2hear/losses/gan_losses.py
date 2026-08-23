@@ -30,6 +30,28 @@ def _gaussian_weight(n_bins: int, center_bin: int, sigma_bins: float,
     return (1.0 + gaussian).view(1, n_bins, 1)
 
 
+def _trapezoid_weight(n_bins: int, lo_bin: int, hi_bin: int,
+                      ramp_bins: float, gain: float,
+                      device: torch.device) -> torch.Tensor:
+    """
+    Trapezoid weight curve over frequency bins.
+    - Below lo_bin: ramps from (1 - gain) up to (1 + gain) over ramp_bins
+    - lo_bin to hi_bin: flat at (1 + gain)
+    - Above hi_bin: ramps from (1 + gain) back down to (1 - gain) over ramp_bins
+    gain > 0 boosts the target band; the flanks go below 1.0 to mildly discourage
+    the model from rewriting content outside the target zone.
+    """
+    bins = torch.arange(n_bins, dtype=torch.float32, device=device)
+    # Ramp up on low edge
+    ramp_up   = ((bins - (lo_bin - ramp_bins)) / ramp_bins).clamp(0.0, 1.0)
+    # Ramp down on high edge
+    ramp_down = ((hi_bin + ramp_bins - bins) / ramp_bins).clamp(0.0, 1.0)
+    shape = torch.minimum(ramp_up, ramp_down)  # 0 outside, 1 inside, ramps at edges
+    # Map shape [0,1] -> weight [1-gain, 1+gain]
+    weight = 1.0 + gain * (2.0 * shape - 1.0)
+    return weight.view(1, n_bins, 1)
+
+
 def hf_band_mae(est: torch.Tensor, ref: torch.Tensor,
                 sr: int = 44100,
                 lo_hz: float = 13000.0,
@@ -75,10 +97,16 @@ class MultiFrequencyDisLoss(_Loss):
 class MultiFrequencyGenLoss(_Loss):
     def __init__(self,
                  eps=1e-8,
-                 # Gaussian band weight parameters
-                 band_weight_center_hz=15000.0,  # center of the penalty bump (Hz)
-                 band_weight_sigma_hz=3000.0,    # width of the bump (Hz, 1-sigma)
-                 band_weight_gain=1.5,           # peak gain above baseline (0 = flat)
+                 # Band weight shape: "gaussian" or "trapezoid"
+                 band_weight_shape="gaussian",
+                 # Gaussian params
+                 band_weight_center_hz=15000.0,
+                 band_weight_sigma_hz=3000.0,
+                 band_weight_gain=1.5,
+                 # Trapezoid params (used when band_weight_shape="trapezoid")
+                 band_weight_lo_hz=4500.0,   # low edge of boosted band
+                 band_weight_hi_hz=18500.0,  # high edge of boosted band
+                 band_weight_ramp_hz=1500.0, # width of the soft ramp at each edge
                  sr=44100,
                  # Legacy flat-boost params kept for config back-compat but ignored
                  hf_boost=1.0,
@@ -88,9 +116,13 @@ class MultiFrequencyGenLoss(_Loss):
         self.eps = eps
         self.all_win = [32, 64, 128, 256, 512, 1024, 2048]
         self._sr = sr
+        self._shape     = band_weight_shape
         self._center_hz = band_weight_center_hz
         self._sigma_hz  = band_weight_sigma_hz
         self._gain      = band_weight_gain
+        self._lo_hz     = band_weight_lo_hz
+        self._hi_hz     = band_weight_hi_hz
+        self._ramp_hz   = band_weight_ramp_hz
 
         # Hann windows cached as plain dicts -- NOT register_buffer so they never
         # pollute state_dict or checkpoints. Fully deterministic; no learned state.
@@ -104,13 +136,21 @@ class MultiFrequencyGenLoss(_Loss):
     def _get_weights(self, win: int, device: torch.device) -> torch.Tensor:
         key = (win, str(device))
         if key not in self._weight_cache:
-            n_bins      = win // 2 + 1
-            hz_per_bin  = self._sr / win
-            center_bin  = self._center_hz / hz_per_bin
-            sigma_bins  = self._sigma_hz  / hz_per_bin
-            self._weight_cache[key] = _gaussian_weight(
-                n_bins, center_bin, sigma_bins, self._gain, device
-            )
+            n_bins     = win // 2 + 1
+            hz_per_bin = self._sr / win
+            if self._shape == "trapezoid":
+                lo_bin   = int(self._lo_hz   / hz_per_bin)
+                hi_bin   = int(self._hi_hz   / hz_per_bin)
+                ramp_bins = self._ramp_hz / hz_per_bin
+                self._weight_cache[key] = _trapezoid_weight(
+                    n_bins, lo_bin, hi_bin, ramp_bins, self._gain, device
+                )
+            else:  # gaussian (default)
+                center_bin = self._center_hz / hz_per_bin
+                sigma_bins = self._sigma_hz  / hz_per_bin
+                self._weight_cache[key] = _gaussian_weight(
+                    n_bins, center_bin, sigma_bins, self._gain, device
+                )
         return self._weight_cache[key]
 
     def _freq_MAE(self, output, target):
