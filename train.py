@@ -1293,6 +1293,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if ckpt_path is None and not val_disabled:
         print_only("\n[baseline] Evaluating pretrained weights before training...")
         try:
+            datamodule.setup("fit")
             baseline_results = trainer.validate(system, datamodule=datamodule, verbose=False)
             if baseline_results:
                 bl = baseline_results[0]
