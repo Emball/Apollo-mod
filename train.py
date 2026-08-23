@@ -225,7 +225,7 @@ def _slice_and_save(
     # --- Pass 2: write all base chunks in one batch ---
     import wave, numpy as np
 
-    def _write_batch(tensors, out_dir, names):
+    def _write_batch(tensors, out_dir, names, progress_cb=None):
         for i, (t, name) in enumerate(zip(tensors, names)):
             pcm  = t.float().clamp(-1.0, 1.0)
             data = (pcm.T.numpy() * 32767.0).astype(np.int16)
@@ -237,8 +237,8 @@ def _slice_and_save(
             if progress_cb:
                 progress_cb(i + 1, total_chunks)
 
-    _write_batch(lq_chunks, lq_out, fnames)
-    _write_batch(hq_chunks, hq_out, fnames)
+    _write_batch(lq_chunks, lq_out, fnames, progress_cb=progress_cb)
+    _write_batch(hq_chunks, hq_out, fnames, progress_cb=None)
 
     saved = list(fnames)
 
@@ -252,8 +252,8 @@ def _slice_and_save(
                 aug_lq.append(lq_aug)
                 aug_hq.append(hq_aug)
                 aug_names.append(vname)
-            _write_batch(aug_lq, lq_out, aug_names)
-            _write_batch(aug_hq, hq_out, aug_names)
+            _write_batch(aug_lq, lq_out, aug_names, progress_cb=None)
+            _write_batch(aug_hq, hq_out, aug_names, progress_cb=None)
             saved.extend(aug_names)
 
     return saved
@@ -550,14 +550,20 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         if trim_samples > 0:
             trim_sec = trim_samples / _SR
             stream = stream.audio.filter("atrim", start=trim_sec).filter("asetpts", "PTS-STARTPTS")
-        (
-            stream
-            .output(dst, format="wav", acodec="pcm_f32le", ar=_SR, ac=2)
-            .overwrite_output()
-            .run(quiet=True)
-        )
-        if os.path.splitext(src)[1].lower() != ".wav":
+        try:
+            (
+                stream
+                .output(dst, format="wav", acodec="pcm_f32le", ar=_SR, ac=2)
+                .overwrite_output()
+                .run(capture_stdout=True, capture_stderr=True)
+            )
+        except ffmpeg.Error as e:
+            stderr = e.stderr.decode(errors="replace") if e.stderr else ""
+            raise RuntimeError(f"[ffmpeg] Failed to convert {src}:\n{stderr}") from e
+        src_ext = os.path.splitext(src)[1].lower()
+        if src_ext != ".wav":
             os.remove(src)
+            print_only(f"[data] Removed original: {os.path.basename(src)}")
         return dst
 
     def _convert_inplace_torchaudio(src: str, trim_samples: int) -> str:
