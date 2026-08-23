@@ -375,7 +375,9 @@ class AudioLightningModule(pl.LightningModule):
         import math
 
         n_songs  = len(all_songs)
-        per_set  = min(self.val_audio_pairs, n_songs)
+        # Cap per_set so we always have at least 2 rotation slots (meaningful rotation).
+        # e.g. 3 songs / 3 per_set = 1 slot = no rotation; reduce to 2 per_set = 2 slots.
+        per_set  = min(self.val_audio_pairs, max(1, n_songs - 1)) if n_songs > 1 else n_songs
 
         # Derive total val runs from trainer config
         try:
@@ -470,8 +472,27 @@ class AudioLightningModule(pl.LightningModule):
                         break
             if matched_key is None:
                 continue
-            ds_idx   = random.choice(by_song[matched_key])
-            pair_idx, start = dataset.index[ds_idx]
+
+            candidates = by_song[matched_key][:]
+            random.shuffle(candidates)
+            chosen = candidates[0]  # fallback: use first even if silent
+
+            # Skip silent chunks (e.g. gaps between stems in concatenated files)
+            _SILENCE_RMS = 0.01
+            for ds_idx in candidates:
+                pair_idx, s = dataset.index[ds_idx]
+                lq_p, _ = dataset.pairs[pair_idx]
+                try:
+                    import torchaudio as _ta
+                    wav, _ = _ta.load(lq_p, frame_offset=s, num_frames=dataset.segment_samples)
+                    if wav.pow(2).mean().sqrt().item() >= _SILENCE_RMS:
+                        chosen = ds_idx
+                        break
+                except Exception:
+                    chosen = ds_idx
+                    break
+
+            pair_idx, start = dataset.index[chosen]
             lq_path, hq_path = dataset.pairs[pair_idx]
             seg_samples = dataset.segment_samples
             refs.append((song_key, lq_path, hq_path, start, seg_samples))
