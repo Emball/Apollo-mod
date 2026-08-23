@@ -1094,17 +1094,18 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
             now = _time.monotonic()
 
-            # only print when an optimizer step actually occurred
-            if trainer.global_step == self._last_global_step:
-                return
-            self._last_global_step = trainer.global_step
-
             if self._session_t0 is None:
                 self._session_t0 = now
 
+            # Count every batch so it/s matches the original batch-level rate
             self._session_done += 1
             elapsed = (now - self._session_t0) - self._val_elapsed
-            its = self._session_done / elapsed if elapsed > 0.1 else 0.0
+            its = self._session_done / elapsed if elapsed > 0 else 0.0
+
+            # Only print on optimizer steps
+            if trainer.global_step == self._last_global_step:
+                return
+            self._last_global_step = trainer.global_step
             done    = batch_idx + 1
             total   = self._epoch_batches
             pct     = 100 * done / total
