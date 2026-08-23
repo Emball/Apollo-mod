@@ -1264,12 +1264,21 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             os.makedirs(ckpt_dir, exist_ok=True)
             step = trainer.global_step
             try:
-                # Use sisdr (displayed positive) matching the checkpoint filename scheme
-                val_loss = trainer.callback_metrics.get("val_loss", None)
-                sisdr_str = f"-val_loss={float(val_loss):.3f}" if val_loss is not None else ""
+                m = trainer.callback_metrics
+                vl     = m.get("val_loss",   None)
+                msstft = m.get("val_msstft", None)
+                sfr    = m.get("val_sfr",    None)
+                hfmae  = m.get("val_hfmae",  None)
+                # Match Lightning filename format exactly
+                parts = [f"{step:06d}"]
+                if vl     is not None: parts.append(f"val_loss={float(vl):.3f}")
+                if msstft is not None: parts.append(f"val_msstft={float(msstft):.4f}")
+                if sfr    is not None: parts.append(f"val_sfr={float(sfr):.3f}")
+                if hfmae  is not None: parts.append(f"val_hfmae={float(hfmae):.4f}")
+                fname = "-".join(parts) + ".ckpt"
             except Exception:
-                sisdr_str = ""
-            out_path = os.path.join(ckpt_dir, f"{step:06d}{sisdr_str}.ckpt")
+                fname = f"{step:06d}.ckpt"
+            out_path = os.path.join(ckpt_dir, fname)
             trainer.save_checkpoint(out_path)
             print_only(f"[interrupt] Saved to {out_path}")
         except Exception as e:

@@ -534,40 +534,44 @@ class AudioLightningModule(pl.LightningModule):
 
         self.audio_model.train()
 
-        # Wait for any previous write thread before launching new one
+        # Compute perceptual metrics synchronously -- cheap CPU ops on tensors
+        # already in memory. Must finish before on_validation_epoch_end returns
+        # so Lightning can log them into checkpoint filenames.
+        msstft_sum = 0.0
+        sfr_sum    = 0.0
+        hfmae_sum  = 0.0
+        count      = 0
+        for song_key, lq_save, hq_save, out in perc_pairs:
+            try:
+                e = out[0:1]      if out.ndim     == 2 else out
+                r = hq_save[0:1]  if hq_save.ndim == 2 else hq_save
+                msstft_sum += _ms_log_stft_loss(e, r)
+                sfr_sum    += _spectral_flatness_ratio(e, r)
+                hfmae_sum  += _hf_band_mae_cpu(e, r)
+                count      += 1
+            except Exception as ex:
+                print(f"[val audio] Metric error {song_key}: {ex}")
+
+        if count > 0:
+            self._last_val_msstft = msstft_sum / count
+            self._last_val_sfr    = sfr_sum    / count
+            self._last_val_hfmae  = hfmae_sum  / count
+
+        # Disk writes go async -- training resumes immediately after metrics are logged.
+        # Join any previous write thread first.
         if self._write_thread is not None and self._write_thread.is_alive():
             self._write_thread.join(timeout=60)
 
-        # Hand off to background thread for disk I/O + metrics
-        module_ref = self  # capture for closure
-
-        def _write_and_measure():
-            msstft_sum = 0.0
-            sfr_sum    = 0.0
-            hfmae_sum  = 0.0
-            count      = 0
+        def _write_files():
             for song_key, lq_save, hq_save, out in perc_pairs:
                 try:
                     torchaudio.save(os.path.join(epoch_dir, f"{song_key}_LQ.wav"),       lq_save, 44100)
                     torchaudio.save(os.path.join(epoch_dir, f"{song_key}_HQ.wav"),       hq_save, 44100)
                     torchaudio.save(os.path.join(epoch_dir, f"{song_key}_Restored.wav"), out,     44100)
-
-                    e = out[0:1]   if out.ndim     == 2 else out
-                    r = hq_save[0:1] if hq_save.ndim == 2 else hq_save
-
-                    msstft_sum += _ms_log_stft_loss(e, r)
-                    sfr_sum    += _spectral_flatness_ratio(e, r)
-                    hfmae_sum  += _hf_band_mae_cpu(e, r)
-                    count      += 1
                 except Exception as ex:
-                    print(f"[val audio] Write/metric error {song_key}: {ex}")
+                    print(f"[val audio] Write error {song_key}: {ex}")
 
-            if count > 0:
-                module_ref._last_val_msstft = msstft_sum / count
-                module_ref._last_val_sfr    = sfr_sum    / count
-                module_ref._last_val_hfmae  = hfmae_sum  / count
-
-        self._write_thread = threading.Thread(target=_write_and_measure, daemon=True)
+        self._write_thread = threading.Thread(target=_write_files, daemon=True)
         self._write_thread.start()
 
     # ------------------------------------------------------------------
@@ -575,7 +579,7 @@ class AudioLightningModule(pl.LightningModule):
     # ------------------------------------------------------------------
 
     def on_validation_epoch_end(self):
-        # Reset metric slots -- will be filled by background thread
+        # Reset metric slots -- filled synchronously in _save_val_audio()
         self._last_val_sisdr  = None
         self._last_val_msstft = None
         self._last_val_sfr    = None
@@ -636,13 +640,18 @@ class AudioLightningModule(pl.LightningModule):
             print(f"[val audio] {len(all_songs)} songs available, "
                   f"rotate every {self._val_rotate_cadence} val runs.")
 
-        # Increment run counter then save audio
+        # Increment run counter then save audio (metrics computed synchronously inside)
         self._val_run_count += 1
         self._save_val_audio()
 
-        # NOTE: val timer in StepPrinter (train.py) calls on_validation_end,
-        # which fires AFTER this method, so all audio/metric work is correctly
-        # included in the excluded val time.
+        # Log perceptual metrics so Lightning can interpolate them into filenames.
+        # _save_val_audio() computes these synchronously so they're ready here.
+        _msstft = self._last_val_msstft
+        _sfr    = self._last_val_sfr
+        _hfmae  = self._last_val_hfmae
+        self.log("val_msstft", float(_msstft) if _msstft is not None else 0.0, prog_bar=False, logger=True)
+        self.log("val_sfr",    float(_sfr)    if _sfr    is not None else 0.0, prog_bar=False, logger=True)
+        self.log("val_hfmae",  float(_hfmae)  if _hfmae  is not None else 0.0, prog_bar=False, logger=True)
 
     # ------------------------------------------------------------------
     # Checkpoint persistence
