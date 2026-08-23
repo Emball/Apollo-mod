@@ -1311,6 +1311,15 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         except Exception as e:
             print_only(f"[baseline] Skipped: {e}")
 
+    if ckpt_path is not None:
+        _ckpt_data = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        if "pytorch-lightning_version" not in _ckpt_data:
+            print_only(f"[resume] Checkpoint missing 'pytorch-lightning_version' -- patching in-place.")
+            _ckpt_data["pytorch-lightning_version"] = pl.__version__
+            torch.save(_ckpt_data, ckpt_path)
+            print_only(f"[resume] Patched with version {pl.__version__}.")
+        del _ckpt_data
+
     try:
         trainer.fit(system, datamodule=datamodule, ckpt_path=ckpt_path)
     except torch.cuda.OutOfMemoryError as e:
