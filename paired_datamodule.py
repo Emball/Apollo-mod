@@ -234,6 +234,7 @@ def augment_pair(
     cfg: AugmentationCfg,
     sr: int = 44100,
     idx: Optional[int] = None,
+    forced_kbps: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Apply random augmentations to an LQ/HQ pair. Shape: (2, samples).
@@ -251,10 +252,13 @@ def augment_pair(
         receive the same noise, the pair relationship is preserved and
         the model learns noise robustness without becoming a denoiser.
 
-    mp3_degradation: applies a random CBR MP3 encode/decode pass to LQ
-        only, simulating an additional lossy encoding stage on top of
-        existing codec degradation. HQ is untouched. Output length is
-        trimmed/padded to original to handle encoder delay.
+    mp3_degradation: applies a CBR MP3 encode/decode pass to LQ (or LQ+HQ
+        if target="both"), simulating an additional lossy encoding stage
+        on top of existing codec degradation. Bitrate is drawn randomly
+        from [kbps_min, kbps_max] unless forced_kbps is given, in which
+        case that exact bitrate is used -- lets callers (e.g. cached
+        augmentation variant generation) stratify coverage across a range
+        rather than relying on independent random draws per call.
 
     gain, polarity: applied identically to both LQ and HQ.
     """
@@ -310,7 +314,9 @@ def augment_pair(
     # forcing the model to focus only on non-codec differences between the streams.
     if cfg.mp3_degradation.enabled and random.random() < cfg.mp3_degradation.prob:
         if _check_ffmpeg():
-            kbps = random.randint(cfg.mp3_degradation.kbps_min, cfg.mp3_degradation.kbps_max)
+            kbps = forced_kbps if forced_kbps is not None else random.randint(
+                cfg.mp3_degradation.kbps_min, cfg.mp3_degradation.kbps_max
+            )
             lq = _mp3_degrade_tensor(lq, kbps, sr)
             if cfg.mp3_degradation.target == "both":
                 hq = _mp3_degrade_tensor(hq, kbps, sr)

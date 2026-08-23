@@ -231,7 +231,7 @@ def _slice_and_save(
 
         if cached_aug_fn is not None:
             for v in range(1, variants + 1):
-                lq_aug, hq_aug = cached_aug_fn(lq_c.clone(), hq_c.clone())
+                lq_aug, hq_aug = cached_aug_fn(lq_c.clone(), hq_c.clone(), variant_idx=v, total_variants=variants)
                 vname = fname.replace(".wav", f"_v{v}.wav")
                 _write_chunk(lq_aug, os.path.join(lq_out, vname))
                 _write_chunk(hq_aug, os.path.join(hq_out, vname))
@@ -436,8 +436,29 @@ def _build_cached_aug_fn(cfg: "DictConfig"):
 
     sr = int(getattr(cfg.datas, "sr", 44100))
 
-    def _apply(lq, hq):
-        return augment_pair(lq, hq, aug_cfg, sr=sr)
+    def _stratified_kbps(variant_idx: int, total_variants: int) -> Optional[int]:
+        """
+        Split [kbps_min, kbps_max] into `total_variants` equal-width bins and
+        return the (randomized) bitrate for bin `variant_idx` (1-indexed).
+        Ensures even coverage of the bitrate range across the variant set
+        instead of relying on independent random draws that can clump.
+        Falls back to None (caller does its own random draw) if mp3_degradation
+        is disabled or total_variants <= 1.
+        """
+        if not aug_cfg.mp3_degradation.enabled or total_variants <= 1:
+            return None
+        lo = aug_cfg.mp3_degradation.kbps_min
+        hi = aug_cfg.mp3_degradation.kbps_max
+        if hi <= lo:
+            return lo
+        bin_width = (hi - lo) / total_variants
+        bin_lo = lo + (variant_idx - 1) * bin_width
+        bin_hi = lo + variant_idx * bin_width
+        return int(round(_random.uniform(bin_lo, bin_hi)))
+
+    def _apply(lq, hq, variant_idx: int = 1, total_variants: int = 1):
+        kbps = _stratified_kbps(variant_idx, total_variants)
+        return augment_pair(lq, hq, aug_cfg, sr=sr, forced_kbps=kbps)
 
     return _apply
 
