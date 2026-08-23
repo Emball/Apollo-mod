@@ -190,71 +190,59 @@ def _slice_and_save(
     cached_aug_fn=None, variants: int = 1,
     progress_cb=None,
 ) -> list:
-    """Slice a pair into overlapping chunks, optionally apply cached augmentations,
-    save all variants as 16-bit PCM WAV. Returns list of written filenames.
+    """Slice a pair into overlapping chunks, write each immediately to avoid
+    accumulating all chunks in memory (critical for long source files).
 
     progress_cb: optional callable(chunks_done, chunks_total) called after each chunk write.
-    Chunks are batched: all slices are computed first, then written in one pass
-    to minimize per-file overhead.
     """
+    import wave, numpy as np
+
     min_len = min(lq_wav.shape[-1], hq_wav.shape[-1])
     lq_wav  = lq_wav[:, :min_len]
     hq_wav  = hq_wav[:, :min_len]
 
-    # Normalize at full-song level before chunking so all chunks from this song
-    # share a consistent gain level. Scale by the joint peak of both streams so
-    # the LQ/HQ amplitude relationship is preserved exactly.
     song_peak = max(lq_wav.abs().max().item(), hq_wav.abs().max().item())
     if song_peak > 0:
         lq_wav = lq_wav / song_peak
         hq_wav = hq_wav / song_peak
 
-    # --- Pass 1: collect all slices in memory (no disk I/O yet) ---
-    lq_chunks, hq_chunks, fnames = [], [], []
+    def _write_chunk(t, path):
+        pcm  = t.float().clamp(-1.0, 1.0)
+        data = (pcm.T.numpy() * 32767.0).astype(np.int16)
+        with wave.open(path, "wb") as wf:
+            wf.setnchannels(pcm.shape[0])
+            wf.setsampwidth(2)
+            wf.setframerate(_SR)
+            wf.writeframes(data.tobytes())
+
+    # Pre-compute total chunk count for progress reporting without storing chunks
+    total_chunks = max(0, (min_len - _CHUNK_SAMPLES) // _HOP_SAMPLES + 1)
+
+    saved = []
     start = 0
     idx   = 0
     while start + _CHUNK_SAMPLES <= min_len:
-        lq_chunks.append(lq_wav[:, start:start + _CHUNK_SAMPLES])
-        hq_chunks.append(hq_wav[:, start:start + _CHUNK_SAMPLES])
-        fnames.append(f"{stem}_{idx:04d}.wav")
-        start += _HOP_SAMPLES
-        idx   += 1
+        lq_c = lq_wav[:, start:start + _CHUNK_SAMPLES]
+        hq_c = hq_wav[:, start:start + _CHUNK_SAMPLES]
+        fname = f"{stem}_{idx:04d}.wav"
 
-    total_chunks = len(fnames)
+        _write_chunk(lq_c, os.path.join(lq_out, fname))
+        _write_chunk(hq_c, os.path.join(hq_out, fname))
 
-    # --- Pass 2: write all base chunks in one batch ---
-    import wave, numpy as np
-
-    def _write_batch(tensors, out_dir, names, progress_cb=None):
-        for i, (t, name) in enumerate(zip(tensors, names)):
-            pcm  = t.float().clamp(-1.0, 1.0)
-            data = (pcm.T.numpy() * 32767.0).astype(np.int16)
-            with wave.open(os.path.join(out_dir, name), "wb") as wf:
-                wf.setnchannels(pcm.shape[0])
-                wf.setsampwidth(2)
-                wf.setframerate(_SR)
-                wf.writeframes(data.tobytes())
-            if progress_cb:
-                progress_cb(i + 1, total_chunks)
-
-    _write_batch(lq_chunks, lq_out, fnames, progress_cb=progress_cb)
-    _write_batch(hq_chunks, hq_out, fnames, progress_cb=None)
-
-    saved = list(fnames)
-
-    # --- Cached augmented variants ---
-    if cached_aug_fn is not None:
-        for v in range(1, variants + 1):
-            aug_lq, aug_hq, aug_names = [], [], []
-            for i, (lq_c, hq_c, fname) in enumerate(zip(lq_chunks, hq_chunks, fnames)):
+        if cached_aug_fn is not None:
+            for v in range(1, variants + 1):
                 lq_aug, hq_aug = cached_aug_fn(lq_c.clone(), hq_c.clone())
                 vname = fname.replace(".wav", f"_v{v}.wav")
-                aug_lq.append(lq_aug)
-                aug_hq.append(hq_aug)
-                aug_names.append(vname)
-            _write_batch(aug_lq, lq_out, aug_names, progress_cb=None)
-            _write_batch(aug_hq, hq_out, aug_names, progress_cb=None)
-            saved.extend(aug_names)
+                _write_chunk(lq_aug, os.path.join(lq_out, vname))
+                _write_chunk(hq_aug, os.path.join(hq_out, vname))
+                saved.append(vname)
+
+        saved.append(fname)
+        if progress_cb:
+            progress_cb(idx + 1, total_chunks)
+
+        start += _HOP_SAMPLES
+        idx   += 1
 
     return saved
 
@@ -647,7 +635,7 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     # --- Phase 2: Parallel WAV chunking ---
     # Sources are now guaranteed WAV. torchaudio WAV load is near-zero-copy
     # (GIL released during I/O). Numpy slicing and wave.write are also GIL-free.
-    n_workers = min(len(matched), os.cpu_count() or 4)
+    n_workers = min(len(matched), 2)  # cap at 2 to avoid OOM on long source files
     total = 0
     chunks_done = [0]
     songs_done = [0]
