@@ -1313,11 +1313,52 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     if ckpt_path is not None:
         _ckpt_data = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        _patched = False
+
         if "pytorch-lightning_version" not in _ckpt_data:
-            print_only(f"[resume] Checkpoint missing 'pytorch-lightning_version' -- patching in-place.")
+            print_only("[resume] Checkpoint missing 'pytorch-lightning_version' -- patching.")
             _ckpt_data["pytorch-lightning_version"] = pl.__version__
+            _patched = True
+
+        if "state_dict" in _ckpt_data:
+            _sd = _ckpt_data["state_dict"]
+            _current_keys = set(_sd.keys())
+            # Detect legacy checkpoint: model keys lack the LightningModule wrapper prefixes.
+            # Legacy: "BN.0.0.weight" -> expected: "audio_model.BN.0.0.weight"
+            _needs_remap = any(
+                k.startswith(("BN.", "net.", "output.", "hann_win"))
+                for k in _current_keys
+            )
+            if _needs_remap:
+                print_only("[resume] Legacy state_dict detected -- remapping key prefixes.")
+                _new_sd = {}
+                _disc_legacy_prefixes = ("window_weights", "discriminators.")
+                for k, v in _sd.items():
+                    if any(k.startswith(p) for p in _disc_legacy_prefixes):
+                        _new_sd[f"discriminator.{k}"] = v
+                    else:
+                        _new_sd[f"audio_model.{k}"] = v
+                _ckpt_data["state_dict"] = _new_sd
+                _patched = True
+                print_only(f"[resume] Remapped {len(_new_sd)} keys.")
+
+            # Reconcile keys against live model: drop unexpected, fill missing with init values.
+            _current_model_keys = set(system.state_dict().keys())
+            _sd_now = _ckpt_data["state_dict"]
+            _unexpected = [k for k in _sd_now if k not in _current_model_keys]
+            _missing    = [k for k in _current_model_keys if k not in _sd_now]
+            if _unexpected or _missing:
+                for k in _unexpected:
+                    del _sd_now[k]
+                _fresh_sd = system.state_dict()
+                for k in _missing:
+                    _sd_now[k] = _fresh_sd[k]
+                print_only(f"[resume] Key reconciliation: dropped {len(_unexpected)} unexpected, filled {len(_missing)} missing.")
+                _patched = True
+
+        if _patched:
             torch.save(_ckpt_data, ckpt_path)
-            print_only(f"[resume] Patched with version {pl.__version__}.")
+            print_only("[resume] Checkpoint patched and saved.")
         del _ckpt_data
 
     try:
