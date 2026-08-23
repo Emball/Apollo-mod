@@ -72,6 +72,7 @@ class Mp3AugCfg:
     prob:     float = 0.5
     kbps_min: int   = 64
     kbps_max: int   = 256
+    target:   str   = "lq"   # "lq" = LQ only (default), "both" = LQ and HQ at same bitrate
 
 @dataclass
 class AugmentationCfg:
@@ -133,6 +134,7 @@ def _parse_aug_cfg(raw) -> AugmentationCfg:
             prob=    _get(mp3_raw, "prob",     0.5),
             kbps_min=_get(mp3_raw, "kbps_min", 64),
             kbps_max=_get(mp3_raw, "kbps_max", 256),
+            target=  _get(mp3_raw, "target",   "lq"),
         ),
         stereo_alternation=SimpleAugCfg(
             enabled=_get(mono_raw, "enabled", True),
@@ -303,11 +305,15 @@ def augment_pair(
             lq = lq / peak
             hq = hq / peak
 
-    # MP3 degradation (LQ only)
+    # MP3 degradation. target="lq" applies to LQ only (default, standard augmentation).
+    # target="both" applies the same bitrate to LQ and HQ so codec artifacts cancel out,
+    # forcing the model to focus only on non-codec differences between the streams.
     if cfg.mp3_degradation.enabled and random.random() < cfg.mp3_degradation.prob:
         if _check_ffmpeg():
             kbps = random.randint(cfg.mp3_degradation.kbps_min, cfg.mp3_degradation.kbps_max)
             lq = _mp3_degrade_tensor(lq, kbps, sr)
+            if cfg.mp3_degradation.target == "both":
+                hq = _mp3_degrade_tensor(hq, kbps, sr)
 
     return lq, hq
 
