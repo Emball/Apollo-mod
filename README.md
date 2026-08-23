@@ -33,7 +33,7 @@ apollo.bat
 chmod +x apollo.sh && ./apollo.sh
 ```
 
-On first run this creates a `.venv` with all dependencies. Subsequent runs activate it directly.
+On first run this creates a `.venv` with all dependencies. Subsequent runs open the TUI directly.
 
 ---
 
@@ -51,36 +51,53 @@ data/apollo_stfl/
     HQ/
 ```
 
-On first run, `train.py` automatically chunks these into fixed-length segments under `chunks/<apollo_name>/`. If chunk parameters change in your config, the cache is invalidated and re-chunked automatically.
+On first run, `train.py` automatically converts any non-WAV sources to 32-bit float WAV in-place via FFmpeg (parallel, fast), then chunks them into fixed-length segments under `chunks/<apollo_name>/`. If chunk parameters change in your config, the cache is invalidated and re-chunked automatically.
 
-16-bit WAV and FLAC are fully supported. MP3 is supported but not recommended as it requires manual delay compensation in your config.
+WAV and FLAC sources are supported natively. MP3 sources are converted automatically -- the encoder delay (`align_data: 1057` for iTunes-encoded files) is baked in during conversion so no manual compensation is needed at training time.
 
 ### Validation Set Guidelines
 
-The val set is used to lock a fixed evaluation sample (`limit_val_batches` chunks) on the first val run. That same fixed set is used for every subsequent val check for the duration of training, giving you a perfectly comparable loss signal across all checkpoints.
+The val set is used to lock a fixed evaluation sample (`limit_val_batches` chunks) on the first val run. That same fixed set is used for every subsequent val check, giving you a perfectly comparable loss signal across all checkpoints. The selection is stratified by song so no single song dominates.
 
-Because only `limit_val_batches` chunks are ever evaluated, the size of your val set beyond that number does not affect the loss calculation and it only affects the quality of the initial draw. The selection is stratified by song: equal chunks are drawn from each song, ensuring no single song or bit rate dominates the evaluation. A larger val set gives the sampler more material to pick from per song, but the evaluation itself is always the locked fixed set.
+A rotating set of `val_audio_pairs` songs (LQ/HQ/Restored triplets) is saved to `runs/<name>/<timestamp>/val_audio/` after each val run. The rotation schedule is computed at training start so every val song gets equal coverage by end of training, and it's checkpointed so resume doesn't change the sequence.
 
-After each val run the console prints a single line with all three metrics:
+After each val run the console prints:
 
 ```
- [val] sisdr=-25.341  msstft=0.3421  sfr=0.9912  (42.3s)
+  [val] sisdr=25.341  msstft=0.3421  sfr=0.991  hfmae=0.0312  (42.3s)
 ```
 
-`sisdr` is the primary metric used for checkpoint selection and early stopping. `msstft` (multi-scale log-STFT loss, lower is better) and `sfr` (spectral flatness ratio in the 8-22kHz band) are perceptual indicators. A rising `sfr` above ~1.05 flagged as `noise↑` is an early warning of overfitting before it shows in SI-SDR. All three are logged to TensorBoard.
+- **sisdr** — primary metric, used for checkpoint ranking and early stopping. Higher is better.
+- **msstft** — multi-scale log-STFT loss. Lower is better. Broad spectral health indicator.
+- **sfr** — spectral flatness ratio in the 8-22kHz band. Rising above ~1.05 (flagged as `noise^`) is an early overfitting signal before it shows in SI-SDR.
+- **hfmae** — mean absolute log-magnitude error in the 13-19kHz transition band. The most direct signal for MP3 rolloff fine-tuning. Lower is better.
+
+All four are logged to TensorBoard.
 
 **What to put in your val set:**
 
-- Use your most representative and challenging material. Avoid easy outliers like spoken word skits or instrumentals if your model targets a different task.
+- Use your most representative and challenging material.
 - Match the degradation type exactly to your training data.
 - A few songs of similar character is better than many songs of mixed difficulty.
-- Aim for at least enough chunks to fill `limit_val_batches`. With a 3-second chunk size and `limit_val_batches: 100`, that is 5 minutes of audio minimum.
+- Aim for at least enough audio to fill `limit_val_batches` chunks. With a 3-second chunk size and `limit_val_batches: 100`, that is 5 minutes minimum.
 
 ---
 
 ## Training
 
 Run `apollo.bat` (Windows) or `./apollo.sh` (Linux/macOS) to open the TUI. Select **Train**, choose your config, and training starts immediately with live output in the terminal. Ctrl+C stops training cleanly, saves a checkpoint, and returns to the menu.
+
+Before training begins, a baseline val pass runs on the pretrained weights so you have a reference point:
+
+```
+[baseline] sisdr=22.140  (pretrained, before any training)
+```
+
+Training lines show speed and the most recent val metrics:
+
+```
+  24.9%  step=400  400/1604  1.38 it/s  sisdr=25.341  msstft=0.3421  sfr=0.991  hfmae=0.0312
+```
 
 To run directly from the command line:
 
@@ -90,13 +107,22 @@ train --conf_dir configs/apollo_name.yaml
 
 Each run creates a timestamped folder under `runs/<name>/<timestamp>/`. Set `resume: true` in your config to continue from the most recent checkpoint automatically.
 
-Validation audio (LQ, HQ and restored triplets) is saved to `runs/<name>/<timestamp>/val_audio/` every val run for a fixed reference set of samples. Comparing these files over the course of training is the best way to monitor progress.
+### Checkpoints
+
+All checkpoints are kept. Each is named with full stats and a rank badge:
+
+```
+[1]-step=001200-sisdr=-24.801-msstft=0.2913-sfr=0.988-hfmae=0.0241.ckpt
+[2]-step=001100-sisdr=-24.650-msstft=0.2934-sfr=0.991-hfmae=0.0258.ckpt
+```
+
+`[1]` = best by SI-SDR. The rank badges are updated after every new checkpoint save.
 
 ---
 
 ## Inference
 
-Open the TUI and select **Inference** to pick a config, model, and input file interactively. The TUI remembers your last-used settings per config.
+Open the TUI and select **Inference** to pick a config, model, and input file interactively. The model picker shows the **Latest checkpoint** (what training resumes from) and the **Best checkpoint** (highest SI-SDR) as separate options. The TUI remembers your last-used settings per config. Batch processing runs all files in the input folder sequentially without prompting between files.
 
 To run directly from the command line:
 
@@ -110,13 +136,13 @@ Or with explicit weights:
 inference --in_wav "degraded.mp3" --out_wav "restored.wav" --weights models/apollo_model_uni.ckpt --feature_dim 384
 ```
 
-When `--conf_dir` is provided without `--weights`, inference automatically selects the best checkpoint from your run folder based on val_loss. Output is written to disk chunk-by-chunk. Output format is 32-bit float WAV.
+Output format is 32-bit float WAV.
 
 ---
 
 ## Config Reference
 
-Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yaml`. Copy and rename for each fine-tune. Below is a comprehensive documentation of every parameter:
+Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yaml`. Copy and rename for each fine-tune. Local configs are not tracked by git.
 
 ### exp
 
@@ -133,53 +159,63 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 | `tf32` | TF32 matmuls. Only benefits Ampere+ GPUs (RTX 3000/4000 series). |
 | `cudnn_benchmark` | Benchmarks cuDNN conv algorithms on first batch. Leave `true` for fixed input shapes. |
 | `expandable_segments` | Reduces CUDA allocator fragmentation. Leave `true`. |
-| `triton_cache` | Caches compiled Triton kernels. Saves 30-60s on startup after first run, but may cause dependency hassles to get working. |
+| `triton_cache` | Caches compiled Triton kernels. Saves 30-60s on startup after first run. |
 | `ram_limit_fraction` | Fraction of system RAM at which the process exits cleanly. Default `0.95`. |
 
 ### training
 
 | Key | Description |
 |---|---|
-| `n_layers_to_freeze` | Freeze the first N BSNet layers. Apollo has 6 total. `4` is recommended for fine-tuning models that are codec-degradation based, but more may be required for more advanced restoration tasks. |
-| `hf_boost` | Extra loss weight on high frequencies in the generator loss. `1.0` = flat (recommended for mildly degraded audio). Higher values (1.2-1.5) help when the source is severely degraded and HF content is mostly gone, but can cause HF artifact reproduction on cleaner sources. Do not exceed `2.0`. |
-| `val_audio_pairs` | Number of val audio samples saved per val run. |
-| `grad_accum_steps` | Accumulate gradients over N steps to simulate a larger batch without extra VRAM. With a batch size of 1 and `grad_accum_steps` at 2, this simulates a batch size of 2 with the memory footprint of 1, at the cost of speed. |
+| `n_layers_to_freeze` | Freeze the first N BSNet layers. Apollo has 6 total. `4` is recommended for codec-degradation fine-tuning. |
+| `val_audio_pairs` | Songs saved per val run as LQ/HQ/Restored triplets. |
+| `val_rotate_every` | `auto` = derive rotation cadence from total configured steps for full song coverage. Integer = switch every N val runs. |
+| `grad_accum_steps` | Accumulate gradients over N steps to simulate a larger batch without extra VRAM. |
 
 ### datas
 
 | Key | Description |
 |---|---|
-| `sr` | Sample rate. Fixed at `44100`. Do not change unless you know what you're doing. |
-| `segment_sec` | Chunk length in seconds. Increasing this value can potentially improve model quality. However, it drastically impacts performance and might cause issues when fine-tuning from the known Apollo base models. |
-| `batch_size` | Chunks per step. `1` is a good starting point to test where your VRAM sits before attempting to increase it. If you have a newer generation GPU with more than 11 GB of memory, starting with `2` for testing is likely the better move. |
-| `num_workers` | DataLoader workers. `2-4` is recommended on 16 GB RAM. Increasing beyond that seems to cause severe lag and memory issues. If you have more RAM, you can likely push it closer to your core count. |
-| `pin_memory` | Set `false` on 16 GB systems. Pinned memory cannot be swapped and causes instability under memory pressure. Worth experimenting with if you have more memory. |
-| `align_data` | Fixed sample offset to compensate for encoder delay. Positive trims LQ, negative trims HQ. iTunes-encoded MP3s use `1057`. Set `false` to disable. Only reliable when the delay is consistent across your entire dataset. |
+| `sr` | Sample rate. Fixed at `44100`. |
+| `segment_sec` | Chunk length in seconds. |
+| `batch_size` | Chunks per step. `1` is a safe starting point. |
+| `num_workers` | DataLoader workers. `2-4` recommended on 16 GB RAM. |
+| `pin_memory` | Set `false` on 16 GB systems. |
+| `align_data` | Fixed sample offset for encoder delay. Baked into WAV at conversion time. iTunes MP3s use `1057`. Set `false` to disable. |
 
 ### Augmentation
 
-`live` augmentations run each epoch in the DataLoader workers, and as such do make a marginal impact on training speed. `cached` augmentations are baked into chunk files at prep time and increase pre-processing duration.
+`live` augmentations run each epoch in the DataLoader workers. `cached` augmentations are baked into chunk files at prep time.
 
 | Augmentation | Type | Notes |
 |---|---|---|
-| `stereo_alternation` | Live | Alternates between L and R channels by sample index. Gives the model balanced stereo exposure without random channel clumping. This improves data variety and model versatility. |
+| `stereo_alternation` | Live | Alternates L/R by sample index. Balanced stereo exposure without random channel collapse. |
 | `gain` | Live | Random gain shift applied identically to LQ and HQ. Never hard-clamps. |
-| `polarity` | Live | Randomly flips signal polarity. Practically free data. |
+| `polarity` | Live | Randomly flips signal polarity. |
 | `noise` | Live | Matched Gaussian noise added to both LQ and HQ. |
-| `pitch_shift` | Cached | Disabled is recommended for codec restoration, as it warps frequency relationships the model is trying to learn. Potentially worth experimenting with for other types of restoration tasks. |
-| `mp3_degradation` | Cached | CBR MP3 re-encode on LQ only introduced to help in cases where the target data of your fine-tune is heavily layered in compression. Live mode spawns an ffmpeg process per chunk per epoch so is generally not recommended. |
+| `pitch_shift` | Cached | Disabled recommended for codec restoration. |
+| `mp3_degradation` | Cached | CBR MP3 re-encode on LQ only. |
+
+### loss_g (gaussian band weight)
+
+| Key | Description |
+|---|---|
+| `band_weight_center_hz` | Center frequency of the penalty bump in Hz. Default `15000`. |
+| `band_weight_sigma_hz` | Width of the bump (1-sigma) in Hz. Default `3000`. |
+| `band_weight_gain` | Peak gain above baseline. `0` = flat loss. `1.5` applies meaningful focus on the transition zone. |
+
+The gaussian weight adds a raised bump of extra penalty centered on the MP3 transition zone without over-boosting already-fine frequencies. More surgical than the old `hf_boost` step function. Start with `gain: 0` for a baseline run, then enable if the model is neglecting the transition zone.
 
 ### discriminator
 
 | Key | Description |
 |---|---|
-| `window_weight_boost` | When `true`, smaller STFT windows get higher discriminator loss weight, biasing training toward high-frequency detail. Useful for severely degraded sources where HF content is mostly gone. For mildly degraded audio (standard MP3/codec), leave `false` -- the bias can cause the model to reproduce HF artifact patterns rather than restore clean content. |
+| `window_weight_boost` | Biases discriminator toward HF detail. Leave `false` for mildly degraded sources. |
 
 ### model
 
 | Key | Description |
 |---|---|
-| `feature_dim` | `256` = base, `384` = universal. Must match your pretrained weights. |
+| `feature_dim` | `256` = base, `384` = universal. Must match pretrained weights. |
 | `layer` | Always `6` for pretrained Apollo weights. |
 | `win` | Always `20` for pretrained Apollo weights. |
 
@@ -187,25 +223,25 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 
 | Key | Description |
 |---|---|
-| `type` | `adamw`, `adamw_8bit` (cuts optimizer VRAM ~75% via bitsandbytes), or `cpu_offload`. |
-| `lr_g` | Generator learning rate. `1e-5` is a safe starting point for fine-tuning. |
-| `lr_d` | Discriminator learning rate. Keep around 10x lower than `lr_g`. |
+| `type` | `adamw`, `adamw_8bit` (recommended, cuts optimizer VRAM ~75%), or `cpu_offload`. |
+| `lr_g` | Generator learning rate. `3e-6` recommended for fine-tuning close to the target distribution. |
+| `lr_d` | Discriminator learning rate. Keep ~10x lower than `lr_g`. |
 
 ### system
 
 | Key | Description |
 |---|---|
-| `gradient_checkpointing` | Recomputes activations during backward pass. Saves 30-40% VRAM at ~30% compute cost. Recommended on consumer GPUs. |
+| `gradient_checkpointing` | Recomputes activations during backward. Saves 30-40% VRAM at ~30% compute cost. |
 
 ### checkpoint and trainer
 
 | Key | Description |
 |---|---|
-| `save_top_k` | Number of checkpoints to keep, ranked by `val_loss`. Set to `5` to avoid unbounded disk growth. |
 | `val_check_interval` | Validate every N training steps. |
-| `limit_val_batches` | Cap val batches per run. `25` is a good balance between speed and coverage. |
+| `limit_val_batches` | Cap val batches per run. `100` gives good coverage at 3s chunk size. |
 | `max_epochs` | Hard epoch cap. Early stopping usually triggers before this. |
-| `precision` | `16-mixed` for fp16 mixed precision. Required on consumer GPUs. |
+| `precision` | `16-mixed` for fp16 mixed precision. |
+| `patience` | Early stopping patience in val runs. |
 
 ---
 
