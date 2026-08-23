@@ -114,21 +114,35 @@ def _banner_panel() -> Panel:
     return Panel(t, border_style="dim cyan", padding=(0, 2))
 
 
+# Visible rows in the list viewport (keeps panel a fixed size)
+_VIEWPORT_SIZE = 18
+
+
 def _menu(
     title: str,
     items: list[str],
     selected: int = 0,
     hint: str = "",
     subtitle: str = "",
+    viewport_top: int = 0,
 ) -> Panel:
+    visible = items[viewport_top : viewport_top + _VIEWPORT_SIZE]
     table = Table.grid(padding=(0, 2))
     table.add_column(no_wrap=True)
-    for i, item in enumerate(items):
-        if i == selected:
-            row = Text(f"▶  {item}", style="bold bright_white on grey23")
+    for i, item in enumerate(visible):
+        abs_i = viewport_top + i
+        if abs_i == selected:
+            row = Text(f"\u25b6  {item}", style="bold bright_white on grey23")
         else:
             row = Text(f"   {item}", style="dim white")
         table.add_row(row)
+
+    # Scroll indicator
+    n = len(items)
+    if n > _VIEWPORT_SIZE:
+        scroll_info = f"  {viewport_top+1}-{min(viewport_top+_VIEWPORT_SIZE, n)} of {n}"
+    else:
+        scroll_info = ""
 
     sub = Text(subtitle, style="dim") if subtitle else Text("")
     body = Table.grid()
@@ -137,9 +151,14 @@ def _menu(
         body.add_row(sub)
         body.add_row(Text(""))
     body.add_row(table)
+    footer_parts = []
     if hint:
+        footer_parts.append(hint)
+    if scroll_info:
+        footer_parts.append(scroll_info)
+    if footer_parts:
         body.add_row(Text(""))
-        body.add_row(Text(hint, style="dim italic"))
+        body.add_row(Text("  ".join(footer_parts), style="dim italic"))
 
     return Panel(
         Align.left(body),
@@ -150,23 +169,41 @@ def _menu(
 
 
 def _navigate(items: list[str], title: str, hint: str = "", subtitle: str = "", start: int = 0) -> int | None:
-    """Show a menu and return selected index, or None if user pressed Escape/q."""
-    sel = max(0, min(start, len(items) - 1))
-    with Live(_menu(title, items, sel, hint=hint, subtitle=subtitle),
+    """Show a viewport-scrolling menu and return selected index, or None on Escape/q."""
+    n = len(items)
+    if n == 0:
+        return None
+    sel = max(0, min(start, n - 1))
+    vt  = max(0, sel - _VIEWPORT_SIZE // 2)  # centre viewport on start item
+
+    def _clamp_vt(s, v):
+        v = max(0, min(v, max(0, n - _VIEWPORT_SIZE)))
+        # keep sel inside viewport
+        if s < v:
+            v = s
+        elif s >= v + _VIEWPORT_SIZE:
+            v = s - _VIEWPORT_SIZE + 1
+        return v
+
+    vt = _clamp_vt(sel, vt)
+
+    with Live(_menu(title, items, sel, hint=hint, subtitle=subtitle, viewport_top=vt),
               console=console, auto_refresh=False, screen=False) as live:
         while True:
             ch = _getch()
             if ch in ("UP", "k"):
-                sel = (sel - 1) % len(items)
+                sel = (sel - 1) % n
+                vt  = _clamp_vt(sel, vt)
             elif ch in ("DOWN", "j"):
-                sel = (sel + 1) % len(items)
+                sel = (sel + 1) % n
+                vt  = _clamp_vt(sel, vt)
             elif ch in ("\r", "\n", " "):
                 return sel
             elif ch in ("\x1b", "q", "Q"):
                 return None
             elif ch == "\x03":  # Ctrl+C
                 raise KeyboardInterrupt
-            live.update(_menu(title, items, sel, hint=hint, subtitle=subtitle), refresh=True)
+            live.update(_menu(title, items, sel, hint=hint, subtitle=subtitle, viewport_top=vt), refresh=True)
     return None
 
 
@@ -269,8 +306,8 @@ def _find_model_for_config(cfg_path: Path) -> Path | None:
 # Subprocess runner (live output, returns to menu on Ctrl+C)
 # ---------------------------------------------------------------------------
 
-def _run_with_live_output(cmd: list[str], label: str) -> None:
-    """Run a subprocess, stream output to terminal, handle Ctrl+C gracefully."""
+def _run_subprocess(cmd: list[str], label: str) -> bool:
+    """Run a subprocess, stream output. Returns True if completed, False if Ctrl+C."""
     console.clear()
     console.print(_banner_panel())
     console.print(Panel(
@@ -281,6 +318,7 @@ def _run_with_live_output(cmd: list[str], label: str) -> None:
     console.print(Rule(style="dim cyan"))
 
     proc = None
+    interrupted = False
     try:
         proc = subprocess.Popen(
             cmd,
@@ -303,6 +341,7 @@ def _run_with_live_output(cmd: list[str], label: str) -> None:
         t.join(timeout=5)
 
     except KeyboardInterrupt:
+        interrupted = True
         if proc and proc.poll() is None:
             console.print("\n[yellow]Ctrl+C caught -- sending stop signal...[/]")
             if IS_WINDOWS:
@@ -316,6 +355,12 @@ def _run_with_live_output(cmd: list[str], label: str) -> None:
         console.print("[dim]Returning to menu...[/]")
 
     console.print(Rule(style="dim cyan"))
+    return not interrupted
+
+
+def _run_with_live_output(cmd: list[str], label: str) -> None:
+    """Run a subprocess and wait for Enter before returning to menu."""
+    _run_subprocess(cmd, label)
     console.input("[dim]Press Enter to return to menu[/]")
 
 
@@ -385,11 +430,16 @@ def _pick_input_file(state: dict, cfg_stem: str) -> str | None:
         f"[ Process all {len(files)} file(s) in /input -> /output ]"
         if files else "[ Process all in /input (folder empty) ]"
     )
-    items = file_names + [process_all_label, "[ Enter custom path ]"]
-    process_all_idx = len(file_names)
-    custom_idx = len(file_names) + 1
+    # Process-all and custom path go at the TOP so they're always reachable
+    # without scrolling, regardless of how many files are in /input.
+    PROCESS_ALL_IDX = 0
+    CUSTOM_IDX      = 1
+    items = [process_all_label, "[ Enter custom path ]"] + file_names
 
-    start = next((i for i, n in enumerate(file_names) if n == Path(last).name), 0)
+    # Offset saved-last-input index by 2 to account for the two header items
+    last_name = Path(last).name
+    file_start = next((i for i, n in enumerate(file_names) if n == last_name), None)
+    start = (file_start + 2) if file_start is not None else 2
 
     idx = _pick(
         "Inference -- select input",
@@ -400,16 +450,16 @@ def _pick_input_file(state: dict, cfg_stem: str) -> str | None:
     if idx is None:
         return None
 
-    if idx == custom_idx:
+    if idx == PROCESS_ALL_IDX:
+        return _PROCESS_ALL_SENTINEL
+
+    if idx == CUSTOM_IDX:
         console.clear()
         console.print(_banner_panel())
         path = console.input("[cyan]Enter path to input file:[/] ").strip().strip('"')
         return path if path else None
 
-    if idx == process_all_idx:
-        return _PROCESS_ALL_SENTINEL
-
-    return str(files[idx])
+    return str(files[idx - 2])
 
 
 def _pick_output_path(state: dict, cfg_stem: str, input_path: str) -> str | None:
@@ -524,10 +574,17 @@ def screen_inference(state: dict) -> None:
                 "--conf_dir", str(cfg_path),
                 "--weights", weights,
             ]
-            _run_with_live_output(
+            completed = _run_subprocess(
                 cmd,
                 f"Inference [{i+1}/{len(batch_files)}]: {in_file.name}",
             )
+            if not completed:
+                # User hit Ctrl+C mid-batch -- stop processing remaining files
+                console.print(f"[yellow]Batch stopped after {i}/{len(batch_files)} files.[/]")
+                console.input("[dim]Press Enter to return to menu[/]")
+                return
+        console.print(f"[green]Batch complete: {len(batch_files)} file(s) processed.[/]")
+        console.input("[dim]Press Enter to return to menu[/]")
         return
 
     # --- Single file mode ---
