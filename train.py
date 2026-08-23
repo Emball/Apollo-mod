@@ -596,15 +596,13 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         return dst
 
     use_ffmpeg = _has_ffmpeg()
-    # Sentinel written after a successful conversion pass so subsequent runs
-    # don't re-convert already-processed WAVs (alignment is already baked in).
-    _conv_sentinel = os.path.join(src_root, ".wav_converted")
-    _already_converted = os.path.isfile(_conv_sentinel)
+    # Only convert files that are genuinely non-WAV. WAVs are always left alone --
+    # alignment is baked in during the original ffmpeg conversion pass and must
+    # not be applied again on subsequent runs.
     needs_conv = {
         s for s in matched
         if os.path.splitext(lq_files[s])[1].lower() != ".wav"
         or os.path.splitext(hq_files[s])[1].lower() != ".wav"
-        or (not _already_converted and (lq_offset > 0 or hq_offset > 0))
     }
 
     wav_paths: dict[str, tuple[str, str]] = {}
@@ -639,9 +637,6 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
                     os.path.join(lq_src, lq_files[stem]),
                     os.path.join(hq_src, hq_files[stem]),
                 )
-        # Mark that conversion (including alignment baking) is done for this data dir.
-        with open(_conv_sentinel, "w") as _sf:
-            _sf.write("")
         print_only(f"[data/{split_name}] Conversion done.\n")
     else:
         wav_paths = {
@@ -654,21 +649,30 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     # (GIL released during I/O). Numpy slicing and wave.write are also GIL-free.
     n_workers = min(len(matched), os.cpu_count() or 4)
     total = 0
+    chunks_done = [0]
+    songs_done = [0]
+    n_songs = len(matched)
+    _REPORT_EVERY = 50  # print a progress line every N chunks across all songs
 
     def _chunk_stem(stem):
         lq_wav = _load_wav_stereo(wav_paths[stem][0])
         hq_wav = _load_wav_stereo(wav_paths[stem][1])
 
         def _progress(done, total_c):
-            if done % 25 == 0 or done == total_c:
-                with print_lock:
-                    print_only(f"[data/{split_name}]   {stem}: {done}/{total_c} chunks")
+            with print_lock:
+                chunks_done[0] += 1
+                if chunks_done[0] % _REPORT_EVERY == 0:
+                    print_only(
+                        f"[data/{split_name}] {songs_done[0]}/{n_songs} songs  "
+                        f"{chunks_done[0]} chunks"
+                    )
 
         saved = _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out,
                                 cached_aug_fn=cached_aug_fn, variants=variants,
                                 progress_cb=_progress)
         with print_lock:
-            print_only(f"[data/{split_name}]   {stem}: done ({len(saved)} chunks)")
+            songs_done[0] += 1
+            print_only(f"[data/{split_name}]   {stem}: done ({len(saved)} chunks)  [{songs_done[0]}/{n_songs}]")
         return len(saved)
 
     with _cf.ThreadPoolExecutor(max_workers=n_workers) as pool:
