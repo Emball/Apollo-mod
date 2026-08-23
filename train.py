@@ -154,19 +154,48 @@ def _align_pair(lq: "torch.Tensor", hq: "torch.Tensor", stem: str, fixed_delay: 
     return lq[:, :min_len], hq[:, :min_len]
 
 def _save_chunk_16bit(tensor, path: str):
-    """Save a chunk as 16-bit PCM WAV regardless of input dtype."""
-    import torchaudio
-    # Clamp to [-1, 1] then convert to int16 range
+    """Save a chunk as 16-bit PCM WAV. Uses wave module for minimal per-call overhead."""
+    import wave, numpy as np
     pcm = tensor.float().clamp(-1.0, 1.0)
-    torchaudio.save(path, pcm, _SR, encoding="PCM_S", bits_per_sample=16)
+    # Interleave channels: (C, T) -> (T, C) -> flat int16
+    data = (pcm.T.numpy() * 32767.0).astype(np.int16)
+    n_ch, n_frames = pcm.shape[0], pcm.shape[1]
+    with wave.open(path, 'wb') as wf:
+        wf.setnchannels(n_ch)
+        wf.setsampwidth(2)
+        wf.setframerate(_SR)
+        wf.writeframes(data.tobytes())
+
+
+def _save_chunks_batch(chunks: list, paths: list) -> None:
+    """Write multiple chunks to disk in one pass per file using wave module.
+    chunks: list of (C, T) float tensors
+    paths: list of output file paths (same length)
+    """
+    import wave, numpy as np
+    for tensor, path in zip(chunks, paths):
+        pcm  = tensor.float().clamp(-1.0, 1.0)
+        data = (pcm.T.numpy() * 32767.0).astype(np.int16)
+        n_ch = pcm.shape[0]
+        with wave.open(path, 'wb') as wf:
+            wf.setnchannels(n_ch)
+            wf.setsampwidth(2)
+            wf.setframerate(_SR)
+            wf.writeframes(data.tobytes())
 
 
 def _slice_and_save(
     lq_wav, hq_wav, stem: str, lq_out: str, hq_out: str,
     cached_aug_fn=None, variants: int = 1,
+    progress_cb=None,
 ) -> list:
     """Slice a pair into overlapping chunks, optionally apply cached augmentations,
-    save all variants as 16-bit PCM WAV. Returns list of written filenames."""
+    save all variants as 16-bit PCM WAV. Returns list of written filenames.
+
+    progress_cb: optional callable(chunks_done, chunks_total) called after each chunk write.
+    Chunks are batched: all slices are computed first, then written in one pass
+    to minimize per-file overhead.
+    """
     min_len = min(lq_wav.shape[-1], hq_wav.shape[-1])
     lq_wav  = lq_wav[:, :min_len]
     hq_wav  = hq_wav[:, :min_len]
@@ -174,36 +203,58 @@ def _slice_and_save(
     # Normalize at full-song level before chunking so all chunks from this song
     # share a consistent gain level. Scale by the joint peak of both streams so
     # the LQ/HQ amplitude relationship is preserved exactly.
-    import torch as _torch
     song_peak = max(lq_wav.abs().max().item(), hq_wav.abs().max().item())
     if song_peak > 0:
         lq_wav = lq_wav / song_peak
         hq_wav = hq_wav / song_peak
 
-    saved = []
+    # --- Pass 1: collect all slices in memory (no disk I/O yet) ---
+    lq_chunks, hq_chunks, fnames = [], [], []
     start = 0
     idx   = 0
     while start + _CHUNK_SAMPLES <= min_len:
-        hq_chunk = hq_wav[:, start:start + _CHUNK_SAMPLES]
-        lq_chunk = lq_wav[:, start:start + _CHUNK_SAMPLES]
-
-        # Variant 0 is always the clean (unaugmented) chunk
-        fname = f"{stem}_{idx:04d}.wav"
-        _save_chunk_16bit(lq_chunk, os.path.join(lq_out, fname))
-        _save_chunk_16bit(hq_chunk, os.path.join(hq_out, fname))
-        saved.append(fname)
-
-        # Additional augmented variants (variant index 1..N)
-        if cached_aug_fn is not None:
-            for v in range(1, variants + 1):
-                lq_aug, hq_aug = cached_aug_fn(lq_chunk.clone(), hq_chunk.clone())
-                vname = f"{stem}_{idx:04d}_v{v}.wav"
-                _save_chunk_16bit(lq_aug, os.path.join(lq_out, vname))
-                _save_chunk_16bit(hq_aug, os.path.join(hq_out, vname))
-                saved.append(vname)
-
+        lq_chunks.append(lq_wav[:, start:start + _CHUNK_SAMPLES])
+        hq_chunks.append(hq_wav[:, start:start + _CHUNK_SAMPLES])
+        fnames.append(f"{stem}_{idx:04d}.wav")
         start += _HOP_SAMPLES
         idx   += 1
+
+    total_chunks = len(fnames)
+
+    # --- Pass 2: write all base chunks in one batch ---
+    import wave, numpy as np
+
+    def _write_batch(tensors, out_dir, names):
+        for i, (t, name) in enumerate(zip(tensors, names)):
+            pcm  = t.float().clamp(-1.0, 1.0)
+            data = (pcm.T.numpy() * 32767.0).astype(np.int16)
+            with wave.open(os.path.join(out_dir, name), "wb") as wf:
+                wf.setnchannels(pcm.shape[0])
+                wf.setsampwidth(2)
+                wf.setframerate(_SR)
+                wf.writeframes(data.tobytes())
+            if progress_cb:
+                progress_cb(i + 1, total_chunks)
+
+    _write_batch(lq_chunks, lq_out, fnames)
+    _write_batch(hq_chunks, hq_out, fnames)
+
+    saved = list(fnames)
+
+    # --- Cached augmented variants ---
+    if cached_aug_fn is not None:
+        for v in range(1, variants + 1):
+            aug_lq, aug_hq, aug_names = [], [], []
+            for i, (lq_c, hq_c, fname) in enumerate(zip(lq_chunks, hq_chunks, fnames)):
+                lq_aug, hq_aug = cached_aug_fn(lq_c.clone(), hq_c.clone())
+                vname = fname.replace(".wav", f"_v{v}.wav")
+                aug_lq.append(lq_aug)
+                aug_hq.append(hq_aug)
+                aug_names.append(vname)
+            _write_batch(aug_lq, lq_out, aug_names)
+            _write_batch(aug_hq, hq_out, aug_names)
+            saved.extend(aug_names)
+
     return saved
 
 def _has_wav_pairs(lq_dir: str, hq_dir: str) -> bool:
@@ -479,8 +530,9 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     lq_offset = fixed_delay if (fixed_delay is not None and fixed_delay > 0) else 0
     hq_offset = (-fixed_delay) if (fixed_delay is not None and fixed_delay < 0) else 0
 
-    # Parallel workers: I/O-bound so threads are correct (no pickle needed, GIL released on disk writes)
-    n_workers = min(len(matched), 4)
+    # Parallel workers: I/O-bound so threads are fine (GIL released on disk writes).
+    # Use all available cores up to number of songs -- diminishing returns beyond that.
+    n_workers = min(len(matched), (os.cpu_count() or 4))
     print_lock = threading.Lock()
     total = 0
 
@@ -489,10 +541,20 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         hq_path = os.path.join(hq_src, hq_files[stem])
         lq_wav = _load_wav_stereo(lq_path, frame_offset=lq_offset)
         hq_wav = _load_wav_stereo(hq_path, frame_offset=hq_offset)
+
+        # Per-chunk progress: print a dot every 10 chunks, flush immediately
+        _done = [0]
+        def _progress(done, total_c):
+            _done[0] = done
+            if done % 10 == 0 or done == total_c:
+                with print_lock:
+                    print_only(f"\r[data/{split_name}]   {stem}: {done}/{total_c} chunks", end="")
+
         saved = _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out,
-                                cached_aug_fn=cached_aug_fn, variants=variants)
+                                cached_aug_fn=cached_aug_fn, variants=variants,
+                                progress_cb=_progress)
         with print_lock:
-            print_only(f"[data/{split_name}]   {stem}: {len(saved)} chunks")
+            print_only(f"\r[data/{split_name}]   {stem}: {len(saved)} chunks done   ")
         return len(saved)
 
     with ThreadPool(n_workers) as pool:
