@@ -243,7 +243,7 @@ def _config_summary(cfg_path: Path) -> str:
                 continue
             for ckpt in ckpt_dir.glob("*.ckpt"):
                 stem = _re.sub(r"^\[\d+\]-", "", ckpt.stem)
-                m = _re.search(r"sisdr=(-?[\d.]+)", stem)
+                m = _re.search(r"val_loss=(-?[\d.]+)", stem)
                 s = _re.search(r"step=(\d+)", stem)
                 if m and s:
                     try:
@@ -283,7 +283,7 @@ def _find_best_checkpoint(cfg_path: Path) -> Path | None:
                 continue
             for ckpt in ckpt_dir.glob("*.ckpt"):
                 stem = _re.sub(r"^\[\d+\]-", "", ckpt.stem)
-                m = _re.search(r"sisdr=(-?[\d.]+)", stem)
+                m = _re.search(r"val_loss=(-?[\d.]+)", stem)
                 if m:
                     try:
                         sisdr = float(m.group(1))
@@ -547,13 +547,13 @@ def screen_inference(state: dict) -> None:
     latest_ckpt = _find_latest_checkpoint(cfg_path)
     if latest_ckpt:
         stem = _re2.sub(r"^\[\d+\]-", "", latest_ckpt.stem)
-        m = _re2.search(r"sisdr=(-?[\d.]+)", stem)
+        m = _re2.search(r"val_loss=(-?[\d.]+)", stem)
         sisdr_str = f"sisdr={-float(m.group(1)):.3f}" if m else ""
         model_options.append(f"Latest checkpoint  {sisdr_str}  ({latest_ckpt.name})")
         model_paths.append(str(latest_ckpt))
     if best_ckpt and (not latest_ckpt or best_ckpt != latest_ckpt):
         stem = _re2.sub(r"^\[\d+\]-", "", best_ckpt.stem)
-        m = _re2.search(r"sisdr=(-?[\d.]+)", stem)
+        m = _re2.search(r"val_loss=(-?[\d.]+)", stem)
         sisdr_str = f"sisdr={-float(m.group(1)):.3f}" if m else ""
         model_options.append(f"Best checkpoint  {sisdr_str}  ({best_ckpt.name})")
         model_paths.append(str(best_ckpt))

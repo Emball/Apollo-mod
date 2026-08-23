@@ -1179,7 +1179,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 if not ckpt_dir or not os.path.isdir(ckpt_dir):
                     return
                 files = [f for f in os.listdir(ckpt_dir) if f.endswith(".ckpt")]
-                pat = re.compile(r"sisdr=(-?[\d.]+)")
+                pat = re.compile(r"val_loss=(-?[\d.]+)")
                 parsed = []
                 for f in files:
                     clean = re.sub(r"^\[\d+\]-", "", f)
@@ -1221,12 +1221,15 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         checkpoint.save_top_k = -1
         # Full stats in filename; all metrics are logged via self.log() so
         # Lightning can interpolate them here.
+        # Lightning interpolates {metric:fmt} as metric=VALUE automatically.
+        # Don't add extra label= text before {metric} tokens or they double up.
+        # Result: step=000200-val_loss=-20.892-val_msstft=0.6058-val_sfr=0.802-val_hfmae=0.8384
         checkpoint.filename = (
-            "step={step:06d}"
-            "-sisdr={val_loss:.3f}"
-            "-msstft={val_msstft:.4f}"
-            "-sfr={val_sfr:.3f}"
-            "-hfmae={val_hfmae:.4f}"
+            "{step:06d}"
+            "-{val_loss:.3f}"
+            "-{val_msstft:.4f}"
+            "-{val_sfr:.3f}"
+            "-{val_hfmae:.4f}"
         )
         callbacks.append(checkpoint)
 
@@ -1263,10 +1266,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             try:
                 # Use sisdr (displayed positive) matching the checkpoint filename scheme
                 val_loss = trainer.callback_metrics.get("val_loss", None)
-                sisdr_str = f"-sisdr={-float(val_loss):.4f}" if val_loss is not None else ""
+                sisdr_str = f"-val_loss={float(val_loss):.3f}" if val_loss is not None else ""
             except Exception:
                 sisdr_str = ""
-            out_path = os.path.join(ckpt_dir, f"step={step:06d}{sisdr_str}.ckpt")
+            out_path = os.path.join(ckpt_dir, f"{step:06d}{sisdr_str}.ckpt")
             trainer.save_checkpoint(out_path)
             print_only(f"[interrupt] Saved to {out_path}")
         except Exception as e:
@@ -1276,13 +1279,11 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     import signal as _signal
     _signal.signal(_signal.SIGINT, _save_and_exit)
 
-    # Run a baseline val pass on the pretrained weights before any training,
-    # so there's a reference point to compare all subsequent checkpoints against.
-    # Only on fresh runs (no ckpt_path resume) to avoid redundancy.
+    # Baseline val pass on pretrained weights before any training begins.
+    # Skipped on resume since the checkpoint already has training history.
     if ckpt_path is None and not val_disabled:
         print_only("\n[baseline] Evaluating pretrained weights before training...")
         try:
-            datamodule.setup("fit")
             baseline_results = trainer.validate(system, datamodule=datamodule, verbose=False)
             if baseline_results:
                 bl = baseline_results[0]
