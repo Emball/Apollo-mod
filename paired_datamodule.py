@@ -384,7 +384,9 @@ class ChunkedPairDataset(Dataset):
         lq_path, hq_path = self.pairs[idx]
         lq = load_wav(lq_path, self.sr)
         hq = load_wav(hq_path, self.sr)
-        lq, hq = normalize_pair(lq, hq)
+        # No per-chunk normalize_pair here -- chunks are already normalized at
+        # the full-song level during _slice_and_save. Normalizing again per-chunk
+        # would re-introduce inconsistent gain riding at chunk boundaries.
         lq, hq = augment_pair(lq, hq, self.aug_cfg, sr=self.sr, idx=idx)
         return hq, lq
 

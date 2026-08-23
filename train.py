@@ -171,6 +171,15 @@ def _slice_and_save(
     lq_wav  = lq_wav[:, :min_len]
     hq_wav  = hq_wav[:, :min_len]
 
+    # Normalize at full-song level before chunking so all chunks from this song
+    # share a consistent gain level. Scale by the joint peak of both streams so
+    # the LQ/HQ amplitude relationship is preserved exactly.
+    import torch as _torch
+    song_peak = max(lq_wav.abs().max().item(), hq_wav.abs().max().item())
+    if song_peak > 0:
+        lq_wav = lq_wav / song_peak
+        hq_wav = hq_wav / song_peak
+
     saved = []
     start = 0
     idx   = 0
