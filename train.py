@@ -1106,16 +1106,23 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             if trainer.global_step == self._last_global_step:
                 return
             self._last_global_step = trainer.global_step
-            done    = batch_idx + 1
-            total   = self._epoch_batches
-            pct     = 100 * done / total
-            metrics = trainer.callback_metrics
-            ld      = float(metrics.get("train_loss_d", 0))
-            lg      = float(metrics.get("train_loss_g", 0))
+            done  = batch_idx + 1
+            total = self._epoch_batches
+            pct   = 100 * done / total
+            # Show last val metrics inline if available
+            sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
+            msstft = getattr(pl_module, "_last_val_msstft", None)
+            sfr    = getattr(pl_module, "_last_val_sfr",    None)
+            hfmae  = getattr(pl_module, "_last_val_hfmae",  None)
+            val_parts = []
+            if sisdr  is not None: val_parts.append(f"sisdr={-float(sisdr):.3f}")
+            if msstft is not None: val_parts.append(f"msstft={float(msstft):.4f}")
+            if sfr    is not None: val_parts.append(f"sfr={float(sfr):.3f}")
+            if hfmae  is not None: val_parts.append(f"hfmae={float(hfmae):.4f}")
+            val_str = "  " + "  ".join(val_parts) if val_parts else ""
             print(
                 f"\r  {pct:5.1f}%  step={trainer.global_step}  "
-                f"{done}/{total}  {its:.2f} it/s  "
-                f"loss_d={ld:.3f}  loss_g={lg:.3f}",
+                f"{done}/{total}  {its:.2f} it/s{val_str}",
                 end="", flush=True
             )
 
@@ -1123,8 +1130,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             print(flush=True)
 
         def on_validation_epoch_start(self, trainer, pl_module):
-            if not trainer.sanity_checking:
-                print("  [val]", end="", flush=True)
             self._val_t0     = _time.monotonic()
             self._val_sanity = trainer.sanity_checking
 
@@ -1145,14 +1150,14 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 sfr    = getattr(pl_module, "_last_val_sfr",    None)
                 hfmae  = getattr(pl_module, "_last_val_hfmae",  None)
                 parts = []
-                if sisdr  is not None: parts.append(f"sisdr={float(sisdr):.3f}")
+                if sisdr  is not None: parts.append(f"sisdr={-float(sisdr):.3f}")
                 if msstft is not None: parts.append(f"msstft={float(msstft):.4f}")
                 if sfr    is not None:
-                    flag = "  noise^" if float(sfr) > 1.05 else ""
-                    parts.append(f"sfr={float(sfr):.4f}{flag}")
-                if hfmae  is not None: parts.append(f"hf_band_mae={float(hfmae):.4f}")
+                    flag = " noise^" if float(sfr) > 1.05 else ""
+                    parts.append(f"sfr={float(sfr):.3f}{flag}")
+                if hfmae  is not None: parts.append(f"hfmae={float(hfmae):.4f}")
                 if parts:
-                    print(f" [val] {' '.join(parts)}  ({val_dur:.1f}s)", flush=True)
+                    print(f"\n  [val] {' '.join(parts)}  ({val_dur:.1f}s)", flush=True)
 
     callbacks: List[Callback] = [StepPrinter()]
 
@@ -1168,6 +1173,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if cfg.get("checkpoint") and not val_disabled:
         print_only(f"Instantiating checkpoint")
         checkpoint = hydra.utils.instantiate(cfg.checkpoint)
+        # Override filename to use sisdr displayed positive (higher = better).
+        # val_loss is negative SI-SDR; we negate it for the filename so the number
+        # is meaningful and consistent with what's printed to the console.
+        checkpoint.filename = "step={step:06d}-sisdr={val_loss:.4f}"
         callbacks.append(checkpoint)
 
     # Instantiate logger
@@ -1201,11 +1210,12 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             os.makedirs(ckpt_dir, exist_ok=True)
             step = trainer.global_step
             try:
+                # Use sisdr (displayed positive) matching the checkpoint filename scheme
                 val_loss = trainer.callback_metrics.get("val_loss", None)
-                loss_str = f"-{val_loss:.4f}" if val_loss is not None else ""
+                sisdr_str = f"-sisdr={-float(val_loss):.4f}" if val_loss is not None else ""
             except Exception:
-                loss_str = ""
-            out_path = os.path.join(ckpt_dir, f"{step:06d}{loss_str}.ckpt")
+                sisdr_str = ""
+            out_path = os.path.join(ckpt_dir, f"step={step:06d}{sisdr_str}.ckpt")
             trainer.save_checkpoint(out_path)
             print_only(f"[interrupt] Saved to {out_path}")
         except Exception as e:
@@ -1214,6 +1224,22 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     import signal as _signal
     _signal.signal(_signal.SIGINT, _save_and_exit)
+
+    # Run a baseline val pass on the pretrained weights before any training,
+    # so there's a reference point to compare all subsequent checkpoints against.
+    # Only on fresh runs (no ckpt_path resume) to avoid redundancy.
+    if ckpt_path is None and not val_disabled:
+        print_only("\n[baseline] Evaluating pretrained weights before training...")
+        try:
+            datamodule.setup("fit")
+            baseline_results = trainer.validate(system, datamodule=datamodule, verbose=False)
+            if baseline_results:
+                bl = baseline_results[0]
+                bl_sisdr = bl.get("val_loss", None)
+                if bl_sisdr is not None:
+                    print_only(f"[baseline] sisdr={-float(bl_sisdr):.3f}  (pretrained, before any training)")
+        except Exception as e:
+            print_only(f"[baseline] Skipped: {e}")
 
     try:
         trainer.fit(system, datamodule=datamodule, ckpt_path=ckpt_path)
