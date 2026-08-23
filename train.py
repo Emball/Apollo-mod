@@ -1159,7 +1159,51 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 if parts:
                     print(f"\n  [val] {' '.join(parts)}  ({val_dur:.1f}s)", flush=True)
 
-    callbacks: List[Callback] = [StepPrinter()]
+    class RankBadger(_Callback):
+        """
+        After each checkpoint save, renames all checkpoints in the dir to
+        prepend [rank] where rank 1 = best (highest sisdr = least negative val_loss).
+        Runs in a background thread so it never blocks training.
+        """
+
+        def on_save_checkpoint(self, trainer, pl_module, checkpoint_dict):
+            import threading
+            threading.Thread(target=self._rebadge, args=(trainer,), daemon=True).start()
+
+        def _rebadge(self, trainer):
+            import re, time as _t
+            _t.sleep(0.5)  # let the file finish flushing
+            try:
+                cb = trainer.checkpoint_callback
+                ckpt_dir = cb.dirpath if cb is not None else None
+                if not ckpt_dir or not os.path.isdir(ckpt_dir):
+                    return
+                files = [f for f in os.listdir(ckpt_dir) if f.endswith(".ckpt")]
+                pat = re.compile(r"sisdr=(-?[\d.]+)")
+                parsed = []
+                for f in files:
+                    clean = re.sub(r"^\[\d+\]-", "", f)
+                    m = pat.search(clean)
+                    if m:
+                        parsed.append((float(m.group(1)), f, clean))
+                if not parsed:
+                    return
+                # Sort ascending by val_loss (most negative = lowest sisdr = worst)
+                parsed.sort(key=lambda x: x[0])
+                for rank, (_, old_name, clean_name) in enumerate(parsed, start=1):
+                    new_name = f"[{rank}]-{clean_name}"
+                    if old_name != new_name:
+                        try:
+                            os.rename(
+                                os.path.join(ckpt_dir, old_name),
+                                os.path.join(ckpt_dir, new_name),
+                            )
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+    callbacks: List[Callback] = [StepPrinter(), RankBadger()]
 
     _lvb = cfg.trainer.get("limit_val_batches", 1.0)
     val_disabled = (isinstance(_lvb, (int, float)) and float(_lvb) == 0.0)
@@ -1173,10 +1217,17 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if cfg.get("checkpoint") and not val_disabled:
         print_only(f"Instantiating checkpoint")
         checkpoint = hydra.utils.instantiate(cfg.checkpoint)
-        # Override filename to use sisdr displayed positive (higher = better).
-        # val_loss is negative SI-SDR; we negate it for the filename so the number
-        # is meaningful and consistent with what's printed to the console.
-        checkpoint.filename = "step={step:06d}-sisdr={val_loss:.4f}"
+        # Keep every checkpoint -- ranking badge added by RankBadger.
+        checkpoint.save_top_k = -1
+        # Full stats in filename; all metrics are logged via self.log() so
+        # Lightning can interpolate them here.
+        checkpoint.filename = (
+            "step={step:06d}"
+            "-sisdr={val_loss:.3f}"
+            "-msstft={val_msstft:.4f}"
+            "-sfr={val_sfr:.3f}"
+            "-hfmae={val_hfmae:.4f}"
+        )
         callbacks.append(checkpoint)
 
     # Instantiate logger

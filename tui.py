@@ -234,24 +234,28 @@ def _config_summary(cfg_path: Path) -> str:
         if not runs_path.exists():
             return "no runs yet"
         # find best checkpoint across all timestamped runs
-        best_loss = None
-        best_step = None
+        import re as _re
+        best_sisdr = None
+        best_step  = None
         for run_dir in sorted(runs_path.iterdir()):
             ckpt_dir = run_dir / "checkpoints"
             if not ckpt_dir.exists():
                 continue
             for ckpt in ckpt_dir.glob("*.ckpt"):
-                if "val_loss=" in ckpt.stem:
+                stem = _re.sub(r"^\[\d+\]-", "", ckpt.stem)
+                m = _re.search(r"sisdr=(-?[\d.]+)", stem)
+                s = _re.search(r"step=(\d+)", stem)
+                if m and s:
                     try:
-                        loss = float(ckpt.stem.split("val_loss=")[1])
-                        step = int(ckpt.stem.split("step=")[1].split("-")[0])
-                        if best_loss is None or loss < best_loss:
-                            best_loss = loss
-                            best_step = step
+                        sisdr = float(m.group(1))
+                        step  = int(s.group(1))
+                        if best_sisdr is None or sisdr > best_sisdr:
+                            best_sisdr = sisdr
+                            best_step  = step
                     except Exception:
                         pass
-        if best_loss is not None:
-            return f"best val={best_loss:.4f}  step={best_step}"
+        if best_sisdr is not None:
+            return f"best sisdr={-best_sisdr:.3f}  step={best_step}"
         return "checkpoint found (no loss in name)"
     except Exception:
         return ""
@@ -262,7 +266,8 @@ def _config_summary(cfg_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 def _find_best_checkpoint(cfg_path: Path) -> Path | None:
-    """Find best checkpoint for a config by val_loss in filename."""
+    """Find best checkpoint (highest sisdr) for a config."""
+    import re as _re
     try:
         import yaml
         cfg = yaml.safe_load(cfg_path.read_text())
@@ -270,22 +275,46 @@ def _find_best_checkpoint(cfg_path: Path) -> Path | None:
         runs_path = RUNS_DIR / name
         if not runs_path.exists():
             return None
-        best_loss = None
-        best_ckpt = None
+        best_sisdr = None
+        best_ckpt  = None
         for run_dir in sorted(runs_path.iterdir()):
             ckpt_dir = run_dir / "checkpoints"
             if not ckpt_dir.exists():
                 continue
             for ckpt in ckpt_dir.glob("*.ckpt"):
-                if "val_loss=" in ckpt.stem:
+                stem = _re.sub(r"^\[\d+\]-", "", ckpt.stem)
+                m = _re.search(r"sisdr=(-?[\d.]+)", stem)
+                if m:
                     try:
-                        loss = float(ckpt.stem.split("val_loss=")[1])
-                        if best_loss is None or loss < best_loss:
-                            best_loss = loss
-                            best_ckpt = ckpt
+                        sisdr = float(m.group(1))
+                        if best_sisdr is None or sisdr > best_sisdr:
+                            best_sisdr = sisdr
+                            best_ckpt  = ckpt
                     except Exception:
                         pass
         return best_ckpt
+    except Exception:
+        return None
+
+
+def _find_latest_checkpoint(cfg_path: Path) -> Path | None:
+    """Find the most recently saved checkpoint for a config (by mtime)."""
+    try:
+        import yaml
+        cfg = yaml.safe_load(cfg_path.read_text())
+        name = cfg.get("exp", {}).get("name") or cfg_path.stem
+        runs_path = RUNS_DIR / name
+        if not runs_path.exists():
+            return None
+        all_ckpts = []
+        for run_dir in sorted(runs_path.iterdir()):
+            ckpt_dir = run_dir / "checkpoints"
+            if not ckpt_dir.exists():
+                continue
+            all_ckpts.extend(ckpt_dir.glob("*.ckpt"))
+        if not all_ckpts:
+            return None
+        return max(all_ckpts, key=lambda p: p.stat().st_mtime)
     except Exception:
         return None
 
@@ -514,9 +543,19 @@ def screen_inference(state: dict) -> None:
     model_options = []
     model_paths = []
 
-    if best_ckpt:
-        loss_str = f"val_loss={best_ckpt.stem.split('val_loss=')[1]}" if "val_loss=" in best_ckpt.stem else ""
-        model_options.append(f"Best checkpoint  {loss_str}  ({best_ckpt.name})")
+    import re as _re2
+    latest_ckpt = _find_latest_checkpoint(cfg_path)
+    if latest_ckpt:
+        stem = _re2.sub(r"^\[\d+\]-", "", latest_ckpt.stem)
+        m = _re2.search(r"sisdr=(-?[\d.]+)", stem)
+        sisdr_str = f"sisdr={-float(m.group(1)):.3f}" if m else ""
+        model_options.append(f"Latest checkpoint  {sisdr_str}  ({latest_ckpt.name})")
+        model_paths.append(str(latest_ckpt))
+    if best_ckpt and (not latest_ckpt or best_ckpt != latest_ckpt):
+        stem = _re2.sub(r"^\[\d+\]-", "", best_ckpt.stem)
+        m = _re2.search(r"sisdr=(-?[\d.]+)", stem)
+        sisdr_str = f"sisdr={-float(m.group(1)):.3f}" if m else ""
+        model_options.append(f"Best checkpoint  {sisdr_str}  ({best_ckpt.name})")
         model_paths.append(str(best_ckpt))
     if model_file:
         model_options.append(f"Model file  ({model_file.name})")
