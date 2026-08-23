@@ -524,62 +524,113 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     print_only(f"[data/{split_name}] Chunking {len(matched)} pairs -> {dst_root}")
     print_only(f"[data/{split_name}] {sep}\n")
 
-    import tempfile, threading, concurrent.futures as _cf
+    import threading, concurrent.futures as _cf
 
     lq_offset = fixed_delay if (fixed_delay is not None and fixed_delay > 0) else 0
     hq_offset = (-fixed_delay) if (fixed_delay is not None and fixed_delay < 0) else 0
-
-    # MP3 decode is CPU-bound (torchaudio C extension holds GIL during decode).
-    # Pre-convert any non-WAV sources to temporary WAVs via torchaudio save so
-    # subsequent loads are trivial memmap reads. Then chunk in a ProcessPool so
-    # decode truly runs in parallel across cores.
-
-    tmp_dir = tempfile.mkdtemp(prefix="apollo_chunk_")
-
-    def _ensure_wav(path: str, offset: int, tag: str) -> str:
-        """Return path to a WAV version of the file; converts in-place to tmp if needed."""
-        import torchaudio
-        ext = os.path.splitext(path)[1].lower()
-        if ext == ".wav" and offset == 0:
-            return path
-        out_path = os.path.join(tmp_dir, f"{tag}_{os.path.splitext(os.path.basename(path))[0]}.wav")
-        if not os.path.exists(out_path):
-            wav, sr = torchaudio.load(path, frame_offset=offset)
-            wav = wav.float()
-            if sr != _SR:
-                wav = torchaudio.functional.resample(wav, sr, _SR)
-            torchaudio.save(out_path, wav, _SR)
-        return out_path
-
-    # Pre-decode pass: convert all source files to WAV in a thread pool
-    # (threads are fine here since we're writing to separate files and torchaudio
-    # releases the GIL during the actual file I/O portion of save).
-    n_io_workers = min(len(matched) * 2, (os.cpu_count() or 4) * 2)
-    wav_paths: dict[str, tuple[str, str]] = {}
-    completed = [0]
     print_lock = threading.Lock()
 
-    def _predecode(stem):
-        lq_p = _ensure_wav(os.path.join(lq_src, lq_files[stem]), lq_offset, f"lq_{stem}")
-        hq_p = _ensure_wav(os.path.join(hq_src, hq_files[stem]), hq_offset, f"hq_{stem}")
-        with print_lock:
-            completed[0] += 1
-            print_only(f"[data/{split_name}] Decoding {completed[0]}/{len(matched)}: {stem}")
-        return stem, lq_p, hq_p
+    # --- Phase 1: In-place WAV conversion ---
+    # Non-WAV files are converted to 32-bit float WAV in the data directory.
+    # Alignment trim is baked into the WAV during conversion so chunking never
+    # needs to know about offsets. FFmpeg subprocesses are fully parallel.
 
-    with _cf.ThreadPoolExecutor(max_workers=n_io_workers) as ex:
-        for stem, lq_p, hq_p in ex.map(_predecode, matched):
-            wav_paths[stem] = (lq_p, hq_p)
+    def _has_ffmpeg() -> bool:
+        try:
+            import ffmpeg
+            return True
+        except ImportError:
+            return False
 
-    print_only(f"[data/{split_name}] Decode done -- chunking {len(matched)} songs...\n")
+    def _convert_inplace_ffmpeg(src: str, trim_samples: int) -> str:
+        """Convert src to WAV in-place via ffmpeg-python. Returns new path."""
+        import ffmpeg
+        dst = os.path.splitext(src)[0] + ".wav"
+        stream = ffmpeg.input(src)
+        if trim_samples > 0:
+            trim_sec = trim_samples / _SR
+            stream = stream.audio.filter("atrim", start=trim_sec).filter("asetpts", "PTS-STARTPTS")
+        (
+            stream
+            .output(dst, format="wav", acodec="pcm_f32le", ar=_SR, ac=2)
+            .overwrite_output()
+            .run(quiet=True)
+        )
+        if os.path.splitext(src)[1].lower() != ".wav":
+            os.remove(src)
+        return dst
 
-    # Chunk pass: ThreadPool is fine here because sources are now WAV files.
-    # torchaudio WAV load is a near-zero-copy read (releases GIL during I/O),
-    # and numpy slicing + wave.write also release the GIL -- true parallelism.
+    def _convert_inplace_torchaudio(src: str, trim_samples: int) -> str:
+        """Fallback: convert via torchaudio (GIL-bound for MP3)."""
+        import torchaudio
+        dst = os.path.splitext(src)[0] + ".wav"
+        wav, sr = torchaudio.load(src, frame_offset=trim_samples)
+        wav = wav.float()
+        if sr != _SR:
+            wav = torchaudio.functional.resample(wav, sr, _SR)
+        if wav.shape[0] == 1:
+            wav = wav.repeat(2, 1)
+        elif wav.shape[0] > 2:
+            wav = wav[:2]
+        torchaudio.save(dst, wav, _SR)
+        if os.path.splitext(src)[1].lower() != ".wav":
+            os.remove(src)
+        return dst
+
+    use_ffmpeg = _has_ffmpeg()
+    needs_conv = {
+        s for s in matched
+        if os.path.splitext(lq_files[s])[1].lower() != ".wav"
+        or os.path.splitext(hq_files[s])[1].lower() != ".wav"
+        or lq_offset > 0 or hq_offset > 0
+    }
+
+    wav_paths: dict[str, tuple[str, str]] = {}
+
+    if needs_conv:
+        method = "FFmpeg" if use_ffmpeg else "torchaudio (install ffmpeg-python for faster conversion)"
+        print_only(f"[data/{split_name}] Converting {len(needs_conv)} source(s) to WAV via {method}...")
+        done_conv = [0]
+
+        def _convert_stem(stem):
+            lq_p = os.path.join(lq_src, lq_files[stem])
+            hq_p = os.path.join(hq_src, hq_files[stem])
+            convert = _convert_inplace_ffmpeg if use_ffmpeg else _convert_inplace_torchaudio
+            lq_ext = os.path.splitext(lq_p)[1].lower()
+            hq_ext = os.path.splitext(hq_p)[1].lower()
+            new_lq = convert(lq_p, lq_offset) if (lq_ext != ".wav" or lq_offset > 0) else lq_p
+            new_hq = convert(hq_p, hq_offset) if (hq_ext != ".wav" or hq_offset > 0) else hq_p
+            with print_lock:
+                done_conv[0] += 1
+                print_only(f"[data/{split_name}]   Converted {done_conv[0]}/{len(needs_conv)}: {stem}")
+            return stem, new_lq, new_hq
+
+        n_conv = min(len(needs_conv), os.cpu_count() or 4)
+        with _cf.ThreadPoolExecutor(max_workers=n_conv) as ex:
+            for stem, lq_p, hq_p in ex.map(_convert_stem, sorted(needs_conv)):
+                wav_paths[stem] = (lq_p, hq_p)
+
+        # Stems that were already WAV with no offset -- no conversion needed
+        for stem in matched:
+            if stem not in wav_paths:
+                wav_paths[stem] = (
+                    os.path.join(lq_src, lq_files[stem]),
+                    os.path.join(hq_src, hq_files[stem]),
+                )
+        print_only(f"[data/{split_name}] Conversion done.\n")
+    else:
+        wav_paths = {
+            s: (os.path.join(lq_src, lq_files[s]), os.path.join(hq_src, hq_files[s]))
+            for s in matched
+        }
+
+    # --- Phase 2: Parallel WAV chunking ---
+    # Sources are now guaranteed WAV. torchaudio WAV load is near-zero-copy
+    # (GIL released during I/O). Numpy slicing and wave.write are also GIL-free.
     n_workers = min(len(matched), os.cpu_count() or 4)
     total = 0
 
-    def _process_stem_thread(stem):
+    def _chunk_stem(stem):
         lq_wav = _load_wav_stereo(wav_paths[stem][0])
         hq_wav = _load_wav_stereo(wav_paths[stem][1])
 
@@ -589,30 +640,15 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
                     print_only(f"[data/{split_name}]   {stem}: {done}/{total_c} chunks")
 
         saved = _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out,
-                                cached_aug_fn=None, variants=1,
+                                cached_aug_fn=cached_aug_fn, variants=variants,
                                 progress_cb=_progress)
         with print_lock:
             print_only(f"[data/{split_name}]   {stem}: done ({len(saved)} chunks)")
         return len(saved)
 
     with _cf.ThreadPoolExecutor(max_workers=n_workers) as pool:
-        for n in pool.map(_process_stem_thread, matched):
+        for n in pool.map(_chunk_stem, matched):
             total += n
-
-    # If cached augmentation was requested, run it in the main process after chunking.
-    # This is rare (cached aug is disabled by default) and correctness > speed here.
-    if cached_aug_fn is not None and variants > 1:
-        print_only(f"[data/{split_name}] Applying {variants - 1} cached augmentation variant(s)...")
-        for stem in matched:
-            lq_wav = _load_wav_stereo(wav_paths[stem][0])
-            hq_wav = _load_wav_stereo(wav_paths[stem][1])
-            _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out,
-                            cached_aug_fn=cached_aug_fn, variants=variants,
-                            progress_cb=None)
-
-    # Clean up temp WAVs
-    import shutil
-    shutil.rmtree(tmp_dir, ignore_errors=True)
 
     print_only(f"[data/{split_name}] Done -- {total} chunk pairs -> {dst_root}\n")
     import json as _json
