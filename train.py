@@ -184,6 +184,7 @@ def _save_chunks_batch(chunks: list, paths: list) -> None:
             wf.writeframes(data.tobytes())
 
 
+
 def _slice_and_save(
     lq_wav, hq_wav, stem: str, lq_out: str, hq_out: str,
     cached_aug_fn=None, variants: int = 1,
@@ -523,43 +524,95 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     print_only(f"[data/{split_name}] Chunking {len(matched)} pairs -> {dst_root}")
     print_only(f"[data/{split_name}] {sep}\n")
 
-    import threading
-    from multiprocessing.pool import ThreadPool
-    import multiprocessing as _mp
+    import tempfile, threading, concurrent.futures as _cf
 
     lq_offset = fixed_delay if (fixed_delay is not None and fixed_delay > 0) else 0
     hq_offset = (-fixed_delay) if (fixed_delay is not None and fixed_delay < 0) else 0
 
-    # Parallel workers: I/O-bound so threads are fine (GIL released on disk writes).
-    # Use all available cores up to number of songs -- diminishing returns beyond that.
-    n_workers = min(len(matched), (os.cpu_count() or 4))
+    # MP3 decode is CPU-bound (torchaudio C extension holds GIL during decode).
+    # Pre-convert any non-WAV sources to temporary WAVs via torchaudio save so
+    # subsequent loads are trivial memmap reads. Then chunk in a ProcessPool so
+    # decode truly runs in parallel across cores.
+
+    tmp_dir = tempfile.mkdtemp(prefix="apollo_chunk_")
+
+    def _ensure_wav(path: str, offset: int, tag: str) -> str:
+        """Return path to a WAV version of the file; converts in-place to tmp if needed."""
+        import torchaudio
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".wav" and offset == 0:
+            return path
+        out_path = os.path.join(tmp_dir, f"{tag}_{os.path.splitext(os.path.basename(path))[0]}.wav")
+        if not os.path.exists(out_path):
+            wav, sr = torchaudio.load(path, frame_offset=offset)
+            wav = wav.float()
+            if sr != _SR:
+                wav = torchaudio.functional.resample(wav, sr, _SR)
+            torchaudio.save(out_path, wav, _SR)
+        return out_path
+
+    # Pre-decode pass: convert all source files to WAV in a thread pool
+    # (threads are fine here since we're writing to separate files and torchaudio
+    # releases the GIL during the actual file I/O portion of save).
+    n_io_workers = min(len(matched) * 2, (os.cpu_count() or 4) * 2)
+    wav_paths: dict[str, tuple[str, str]] = {}
+    completed = [0]
     print_lock = threading.Lock()
+
+    def _predecode(stem):
+        lq_p = _ensure_wav(os.path.join(lq_src, lq_files[stem]), lq_offset, f"lq_{stem}")
+        hq_p = _ensure_wav(os.path.join(hq_src, hq_files[stem]), hq_offset, f"hq_{stem}")
+        with print_lock:
+            completed[0] += 1
+            print_only(f"[data/{split_name}] Decoding {completed[0]}/{len(matched)}: {stem}")
+        return stem, lq_p, hq_p
+
+    with _cf.ThreadPoolExecutor(max_workers=n_io_workers) as ex:
+        for stem, lq_p, hq_p in ex.map(_predecode, matched):
+            wav_paths[stem] = (lq_p, hq_p)
+
+    print_only(f"[data/{split_name}] Decode done -- chunking {len(matched)} songs...\n")
+
+    # Chunk pass: ThreadPool is fine here because sources are now WAV files.
+    # torchaudio WAV load is a near-zero-copy read (releases GIL during I/O),
+    # and numpy slicing + wave.write also release the GIL -- true parallelism.
+    n_workers = min(len(matched), os.cpu_count() or 4)
     total = 0
 
-    def _process_stem(stem):
-        lq_path = os.path.join(lq_src, lq_files[stem])
-        hq_path = os.path.join(hq_src, hq_files[stem])
-        lq_wav = _load_wav_stereo(lq_path, frame_offset=lq_offset)
-        hq_wav = _load_wav_stereo(hq_path, frame_offset=hq_offset)
+    def _process_stem_thread(stem):
+        lq_wav = _load_wav_stereo(wav_paths[stem][0])
+        hq_wav = _load_wav_stereo(wav_paths[stem][1])
 
-        # Per-chunk progress: print a dot every 10 chunks, flush immediately
-        _done = [0]
         def _progress(done, total_c):
-            _done[0] = done
-            if done % 10 == 0 or done == total_c:
+            if done % 25 == 0 or done == total_c:
                 with print_lock:
-                    print_only(f"\r[data/{split_name}]   {stem}: {done}/{total_c} chunks", end="")
+                    print_only(f"[data/{split_name}]   {stem}: {done}/{total_c} chunks")
 
         saved = _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out,
-                                cached_aug_fn=cached_aug_fn, variants=variants,
+                                cached_aug_fn=None, variants=1,
                                 progress_cb=_progress)
         with print_lock:
-            print_only(f"\r[data/{split_name}]   {stem}: {len(saved)} chunks done   ")
+            print_only(f"[data/{split_name}]   {stem}: done ({len(saved)} chunks)")
         return len(saved)
 
-    with ThreadPool(n_workers) as pool:
-        for n in pool.imap_unordered(_process_stem, matched):
+    with _cf.ThreadPoolExecutor(max_workers=n_workers) as pool:
+        for n in pool.map(_process_stem_thread, matched):
             total += n
+
+    # If cached augmentation was requested, run it in the main process after chunking.
+    # This is rare (cached aug is disabled by default) and correctness > speed here.
+    if cached_aug_fn is not None and variants > 1:
+        print_only(f"[data/{split_name}] Applying {variants - 1} cached augmentation variant(s)...")
+        for stem in matched:
+            lq_wav = _load_wav_stereo(wav_paths[stem][0])
+            hq_wav = _load_wav_stereo(wav_paths[stem][1])
+            _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out,
+                            cached_aug_fn=cached_aug_fn, variants=variants,
+                            progress_cb=None)
+
+    # Clean up temp WAVs
+    import shutil
+    shutil.rmtree(tmp_dir, ignore_errors=True)
 
     print_only(f"[data/{split_name}] Done -- {total} chunk pairs -> {dst_root}\n")
     import json as _json
