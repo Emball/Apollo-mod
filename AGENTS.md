@@ -21,6 +21,7 @@ The GitHub wiki (`Changes-and-improvements` page, repo `Emball/Apollo-mod.wiki.g
 | `eval_checkpoints.py` | Standalone utility. Evaluates all checkpoints against the val set, prints a ranked table. `--rename` rewrites filenames with accurate loss values. |
 | `configs/apollo.yaml` | Base config (`feature_dim=256`). |
 | `configs/apollo_uni.yaml` | Universal config (`feature_dim=384`). |
+| `degrade_audio.bat` | Windows batch script for synthetic degradation pipeline. Single file or `/bulk` folder mode. Chain: WMA 128k → LAME q5 → FhG 192k → LAME q5 → FhG 192k → LAME q2 → FhG 192k (10 steps total). Requires FFmpeg on PATH and `acmenc.exe` at `C:\Portable\acmenc\`. Output written to `<outdir>\<basename>_degraded.mp3`; temp files cleaned on success. |
 
 ---
 
