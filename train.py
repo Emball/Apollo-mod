@@ -24,12 +24,11 @@ def apply_optimizations(cfg: DictConfig) -> None:
     """Apply hardware/compiler optimisations declared in cfg.optimizations."""
     opt = cfg.get("optimizations", {})
 
-    # TF32 matmuls (Ampere+, negligible quality loss)
-    tf32 = opt.get("tf32", True)
-    torch.set_float32_matmul_precision("high" if tf32 else "highest")
-    if tf32:
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+    # TF32 disabled -- GAN spectral loss landscapes are sensitive to accumulated
+    # numerical error. Keep highest precision regardless of config.
+    torch.set_float32_matmul_precision("highest")
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
 
     # cuDNN benchmark (fastest conv algo for fixed input shapes)
     cudnn_benchmark = opt.get("cudnn_benchmark", True)

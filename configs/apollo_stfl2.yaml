@@ -43,7 +43,7 @@ datas:
         prob: 0.5
         semitones_max: 1.5
       noise:
-        enabled: true
+        enabled: false  # disabled -- corrupts discriminator HF gradient signal
         prob: 0.5
         sigma: 0.002
       mp3_degradation:

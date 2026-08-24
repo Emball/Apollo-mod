@@ -220,56 +220,39 @@ class AudioLightningModule(pl.LightningModule):
             optimizer_g.zero_grad()
             optimizer_d.zero_grad()
 
-        amp_ctx = torch.amp.autocast("cuda", dtype=torch.float16)
+        # --- Generator forward (under Lightning's AMP context) ---
+        output = self(codec_data)
 
-        with amp_ctx:
-            output = self(codec_data)
-
-        # Discriminator update
-        for p in self.discriminator.parameters():
-            p.requires_grad_(True)
-
-        with amp_ctx:
-            est_outputs_d, _          = self.discriminator(output.detach(), sample_rate=44100)
-            target_outputs, targets_feature_maps = self.discriminator(ori_data, sample_rate=44100)
-            loss_d = self.loss_func["d"](target_outputs, est_outputs_d) / self.grad_accum_steps
+        # --- Discriminator update ---
+        # Matches original: discriminator first, output detached so D grads
+        # don't flow into the generator.
+        est_outputs_d, _ = self.discriminator(output.detach(), sample_rate=44100)
+        target_outputs, _ = self.discriminator(ori_data, sample_rate=44100)
+        loss_d = self.loss_func["d"](target_outputs, est_outputs_d) / self.grad_accum_steps
 
         self._accum_loss_d = (self._accum_loss_d or 0.0) + loss_d.detach()
         self.manual_backward(loss_d)
 
-        # Detach targets_feature_maps -- fixed reference for feature matching
-        targets_feature_maps = [
-            [f.detach() for f in fmap] for fmap in targets_feature_maps
-        ]
-        del est_outputs_d, target_outputs
+        # Clip discriminator gradients using Lightning's method (respects AMP scaler)
+        if is_last_accum:
+            self.clip_gradients(optimizer_d, gradient_clip_val=5, gradient_clip_algorithm="norm")
+            optimizer_d.step()
 
-        # Generator update
-        for p in self.discriminator.parameters():
-            p.requires_grad_(False)
-
-        with amp_ctx:
-            est_outputs, est_feature_maps = self.discriminator(output, sample_rate=44100)
-            loss_g = self.loss_func["g"](
-                est_outputs, est_feature_maps, targets_feature_maps, output, ori_data
-            ) / self.grad_accum_steps
+        # --- Generator update ---
+        # Fresh discriminator forward on real audio for targets_feature_maps --
+        # matches original: separate pass, live gradients, not reused from D step.
+        est_outputs, est_feature_maps = self.discriminator(output, sample_rate=44100)
+        _, targets_feature_maps = self.discriminator(ori_data, sample_rate=44100)
+        loss_g = self.loss_func["g"](
+            est_outputs, est_feature_maps, targets_feature_maps, output, ori_data
+        ) / self.grad_accum_steps
 
         self._accum_loss_g = (self._accum_loss_g or 0.0) + loss_g.detach()
         self.manual_backward(loss_g)
-        del loss_g, loss_d, est_outputs, est_feature_maps, targets_feature_maps, output
 
-        for p in self.discriminator.parameters():
-            p.requires_grad_(True)
-
+        # Clip generator gradients using Lightning's method (respects AMP scaler)
         if is_last_accum:
-            scaler = getattr(self.trainer.precision_plugin, "scaler", None)
-            if scaler is not None:
-                scaler.unscale_(optimizer_d)
-            torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), 5.0)
-            optimizer_d.step()
-
-            if scaler is not None:
-                scaler.unscale_(optimizer_g)
-            torch.nn.utils.clip_grad_norm_(self.audio_model.parameters(), 5.0)
+            self.clip_gradients(optimizer_g, gradient_clip_val=5, gradient_clip_algorithm="norm")
             optimizer_g.step()
 
             self.log("train_loss_d", float(self._accum_loss_d), on_step=True, prog_bar=True, logger=True)
@@ -284,14 +267,9 @@ class AudioLightningModule(pl.LightningModule):
         if self._accum_loss_g is not None:
             try:
                 optimizer_g, optimizer_d = self.optimizers()
-                _scaler = getattr(self.trainer.precision_plugin, "scaler", None)
-                if _scaler is not None:
-                    _scaler.unscale_(optimizer_d)
-                torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), 5.0)
+                self.clip_gradients(optimizer_d, gradient_clip_val=5, gradient_clip_algorithm="norm")
                 optimizer_d.step()
-                if _scaler is not None:
-                    _scaler.unscale_(optimizer_g)
-                torch.nn.utils.clip_grad_norm_(self.audio_model.parameters(), 5.0)
+                self.clip_gradients(optimizer_g, gradient_clip_val=5, gradient_clip_algorithm="norm")
                 optimizer_g.step()
                 self.log("train_loss_d", float(self._accum_loss_d), on_step=False, prog_bar=False, logger=True)
                 self.log("train_loss_g", float(self._accum_loss_g), on_step=False, prog_bar=False, logger=True)
