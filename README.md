@@ -59,20 +59,20 @@ WAV and FLAC sources are supported natively. MP3 sources are converted automatic
 
 The val set is used to lock a fixed evaluation sample (`limit_val_batches` chunks) on the first val run. That same fixed set is used for every subsequent val check, giving you a perfectly comparable loss signal across all checkpoints. The selection is stratified by song so no single song dominates.
 
-A rotating set of `val_audio_pairs` songs (LQ/HQ/Restored triplets) is saved to `runs/<name>/<timestamp>/val_audio/` after each val run. The rotation schedule is computed at training start so every val song gets equal coverage by end of training, and it's checkpointed so resume doesn't change the sequence.
+A rotating set of `val_songs` songs (LQ/HQ/Restored triplets) is saved to `runs/<name>/<timestamp>/val_audio/` after each val run. The rotation schedule is computed at training start so every val song gets equal coverage by end of training, and it's checkpointed so resume doesn't change the sequence. Each song's chunk is locked once and reused for every val run, so the same audio is compared across the whole training run rather than a different random chunk each time.
 
 After each val run the console prints:
 
 ```
-  [val] sisdr=25.341  msstft=0.3421  sfr=0.991  hfmae=0.0312  (42.3s)
+  [val] msstft=0.3421  sfr=0.991  hfmae=0.0312  sisdr=25.341  (42.3s)
 ```
 
-- **sisdr** — primary metric, used for checkpoint ranking and early stopping. Higher is better.
 - **msstft** — multi-scale log-STFT loss. Lower is better. Broad spectral health indicator.
 - **sfr** — spectral flatness ratio in the 8-22kHz band. Rising above ~1.05 (flagged as `noise^`) is an early overfitting signal before it shows in SI-SDR.
 - **hfmae** — mean absolute log-magnitude error in the 13-19kHz transition band. The most direct signal for MP3 rolloff fine-tuning. Lower is better.
+- **sisdr** — waveform fidelity. Higher is better, but noisy and architecture-inherent -- treat as a secondary signal, not the primary one.
 
-All four are logged to TensorBoard.
+All four are logged to TensorBoard and shown in this order (perceptual signals first, sisdr last) since they're a better indicator of actual audio quality than sisdr alone. `val_loss` (sisdr, negated) is still what Lightning's `ModelCheckpoint` monitors to trigger saves, since it needs a single scalar -- but checkpoint *ranking* uses all four, see below.
 
 **What to put in your val set:**
 
@@ -96,7 +96,7 @@ Before training begins, a baseline val pass runs on the pretrained weights so yo
 Training lines show speed and the most recent val metrics:
 
 ```
-  24.9%  step=400  400/1604  1.38 it/s  sisdr=25.341  msstft=0.3421  sfr=0.991  hfmae=0.0312
+  24.9%  step=400  400/1604  1.38 it/s  msstft=0.3421  sfr=0.991  hfmae=0.0312  sisdr=25.341
 ```
 
 To run directly from the command line:
@@ -116,13 +116,13 @@ All checkpoints are kept. Each is named with full stats and a rank badge:
 [2]-step=001100-sisdr=-24.650-msstft=0.2934-sfr=0.991-hfmae=0.0258.ckpt
 ```
 
-`[1]` = best by SI-SDR. The rank badges are updated after every new checkpoint save.
+`[1]` = best by a weighted composite of all four val metrics (msstft 0.40, hfmae 0.35, sfr 0.15, sisdr 0.10), not SI-SDR alone -- SI-SDR is noisy and only a minor tiebreaker in the ranking. The rank badges are updated after every new checkpoint save.
 
 ---
 
 ## Inference
 
-Open the TUI and select **Inference** to pick a config, model, and input file interactively. The model picker shows the **Latest checkpoint** (what training resumes from) and the **Best checkpoint** (highest SI-SDR) as separate options. The TUI remembers your last-used settings per config. Batch processing runs all files in the input folder sequentially without prompting between files.
+Open the TUI and select **Inference** to pick a config, model, and input file interactively. The model picker shows the **Latest checkpoint** (what training resumes from) and the **Best checkpoint** (rank `[1]` by the weighted composite score) as separate options. The TUI remembers your last-used settings per config. Batch processing runs all files in the input folder sequentially without prompting between files.
 
 To run directly from the command line:
 
@@ -167,7 +167,7 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 | Key | Description |
 |---|---|
 | `n_layers_to_freeze` | Freeze the first N BSNet layers. Apollo has 6 total. `4` is recommended for codec-degradation fine-tuning. |
-| `val_audio_pairs` | Songs saved per val run as LQ/HQ/Restored triplets. |
+| `val_songs` | Number of songs saved per val run as LQ/HQ/Restored triplets. |
 | `val_rotate_every` | `auto` = derive rotation cadence from total configured steps for full song coverage. Integer = switch every N val runs. |
 | `grad_accum_steps` | Accumulate gradients over N steps to simulate a larger batch without extra VRAM. |
 
@@ -195,15 +195,19 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 | `pitch_shift` | Cached | Disabled recommended for codec restoration. |
 | `mp3_degradation` | Cached | CBR MP3 re-encode on LQ only. |
 
-### loss_g (gaussian band weight)
+### loss_g (band weight)
 
 | Key | Description |
 |---|---|
-| `band_weight_center_hz` | Center frequency of the penalty bump in Hz. Default `15000`. |
-| `band_weight_sigma_hz` | Width of the bump (1-sigma) in Hz. Default `3000`. |
-| `band_weight_gain` | Peak gain above baseline. `0` = flat loss. `1.5` applies meaningful focus on the transition zone. |
+| `band_weight_shape` | `gaussian` (default) or `trapezoid`. |
+| `band_weight_center_hz` | Gaussian only. Center frequency of the penalty bump in Hz. Default `15000`. |
+| `band_weight_sigma_hz` | Gaussian only. Width of the bump (1-sigma) in Hz. Default `3000`. |
+| `band_weight_lo_hz` | Trapezoid only. Low edge of the boosted band in Hz. Default `4500`. |
+| `band_weight_hi_hz` | Trapezoid only. High edge of the boosted band in Hz. Default `18500`. |
+| `band_weight_ramp_hz` | Trapezoid only. Width of the soft ramp at each edge in Hz. Default `1500`. |
+| `band_weight_gain` | Peak gain above baseline. `0` = flat loss regardless of shape. `1.5` applies meaningful focus on the target band. |
 
-The gaussian weight adds a raised bump of extra penalty centered on the MP3 transition zone without over-boosting already-fine frequencies. More surgical than the old `hf_boost` step function. Start with `gain: 0` for a baseline run, then enable if the model is neglecting the transition zone.
+The gaussian shape adds a raised bump of extra penalty centered on a single frequency without over-boosting already-fine content nearby -- good for a general HF-quality push. The trapezoid shape targets a specific flat band with soft edges -- better when you know the exact transition range of the encoder you're targeting (e.g. an MP3 rolloff zone) and want even penalty across it rather than a single peak. Both are more surgical than the old `hf_boost` step function. Start with `gain: 0` for a baseline run, then enable if the model is neglecting the target zone.
 
 ### discriminator
 

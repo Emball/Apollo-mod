@@ -2,6 +2,8 @@
 
 Read `README.md` for usage, config reference, data layout, commands, and augmentation options. This file covers internal architecture, constraints, and non-obvious behavior that isn't user-facing.
 
+The GitHub wiki (`Changes-and-improvements` page, repo `Emball/Apollo-mod.wiki.git`) documents every meaningful change made in this fork relative to upstream `JusperLee/Apollo`, with rationale. Sync it alongside this file when changes to documented behavior land.
+
 ---
 
 ## Architecture
@@ -32,17 +34,17 @@ Read `README.md` for usage, config reference, data layout, commands, and augment
 
 **Val fixed evaluation set:** On the first real val run, `_lock_val_fixed_indices` groups all seen dataset indices by song, then samples `limit_val_batches / num_songs` chunks from each song (stratified). The result is locked into `_val_fixed_indices` -- all subsequent val runs skip any chunk not in this set, so the loss is always computed on the exact same fixed chunks. Both `_val_fixed_indices` and the rotation schedule are persisted in the checkpoint and restored on resume.
 
-**Val audio rotation:** Saves exactly `val_audio_pairs` songs × 3 files (LQ/HQ/Restored) = N×3 files per val run. At training start a rotation schedule is computed so that every val song gets equal coverage by end of training. `val_rotate_every: auto` derives the cadence from total configured steps; an integer overrides it manually. The schedule is checkpointed and resume-stable. File writes run in a background thread so training resumes immediately.
+**Val audio rotation:** Saves exactly `val_songs` songs × 3 files (LQ/HQ/Restored) = N×3 files per val run. At training start a rotation schedule is computed so that every val song gets equal coverage by end of training. Each song's chunk is picked once at schedule-build time (`_lock_val_refs`) -- one specific non-silent chunk, never re-picked -- and stored in `_val_locked_refs`, so the same audio is always compared across val steps for a given song. `val_rotate_every: auto` derives the cadence from total configured steps; an integer overrides it manually. The schedule and locked refs are checkpointed and resume-stable. File writes run in a background thread so training resumes immediately. Old configs using `val_audio_pairs` still work via fallback.
 
 **Val perceptual metrics:** Four metrics computed after each val run: `sisdr` (primary, used for checkpoint selection and early stopping), `msstft` (multi-scale log-STFT loss, 3 window sizes), `sfr` (spectral flatness ratio 8-22kHz -- rising above 1.05 is an early overfitting signal), `hf_band_mae` (mean absolute log-magnitude error in the 13-19kHz transition band -- primary signal for MP3 rolloff fine-tuning). All four are logged to TensorBoard. The background write thread is joined in `on_validation_epoch_end` before Lightning reads metrics for checkpoint naming, so all four appear in filenames.
 
-**Checkpoint filenames:** Format is `[rank]-step={step:06d}-sisdr={val_loss:.3f}-msstft={val_msstft:.4f}-sfr={val_sfr:.3f}-hfmae={val_hfmae:.4f}.ckpt`. `[rank]` is prepended by the `RankBadger` callback after each save (1 = best sisdr). All checkpoints are kept (`save_top_k=-1` enforced in code).
+**Checkpoint filenames:** Format is `[rank]-step={step:06d}-sisdr={val_loss:.3f}-msstft={val_msstft:.4f}-sfr={val_sfr:.3f}-hfmae={val_hfmae:.4f}.ckpt`. `[rank]` is prepended by the `RankBadger` callback after each save. Rank is a weighted composite (msstft=0.40, hfmae=0.35, sfr=0.15, sisdr=0.10) of min-max normalized metrics across the current checkpoint set -- not sisdr alone. Rank 1 = lowest composite score = best. All checkpoints are kept (`save_top_k=-1` enforced in code).
 
 **Baseline eval:** On fresh runs (no resume), `trainer.validate()` is called on the pretrained weights before `trainer.fit()`. Prints `[baseline] sisdr=XX.XXX` so improvement is immediately visible against the starting point.
 
-**StepPrinter:** TQDM is disabled. Prints one line per optimizer step. `it/s` counts every batch (including accumulation batches) for consistency with pre-accumulation baselines. Val time is excluded from the rate. Last val metrics are shown inline on every training line once available.
+**StepPrinter:** TQDM is disabled. Prints one line per optimizer step. `it/s` counts every batch (including accumulation batches) for consistency with pre-accumulation baselines. Val time is excluded from the rate. Last val metrics are shown inline on every training line once available, ordered `msstft, sfr, hfmae, sisdr` (perceptual signals first, sisdr last since it's the noisiest and least perceptually meaningful).
 
-**Gaussian band weight:** `MultiFrequencyGenLoss` applies a raised gaussian penalty curve over STFT bins. Controlled by `band_weight_center_hz`, `band_weight_sigma_hz`, and `band_weight_gain`. `gain=0` is perfectly flat. Replaces the old `hf_boost` + `hf_threshold_ratio` step function. Config keys `hf_boost` and `hf_threshold_ratio` are accepted for back-compat but ignored.
+**Band weight:** `MultiFrequencyGenLoss` applies a penalty curve over STFT bins, shape controlled by `band_weight_shape`: `"gaussian"` (default, raised curve peaking at `band_weight_center_hz` with width `band_weight_sigma_hz`) or `"trapezoid"` (flat-topped between `band_weight_lo_hz`/`band_weight_hi_hz` with `band_weight_ramp_hz` soft edges -- useful for targeting a specific rolloff/transition band). `band_weight_gain=0` is perfectly flat regardless of shape. Replaces the old `hf_boost` + `hf_threshold_ratio` step function. Config keys `hf_boost` and `hf_threshold_ratio` are accepted for back-compat but ignored.
 
 **Alignment:** `align_data` accepts an integer offset in samples -- positive trims LQ, negative trims HQ. Baked into WAV files at conversion time via FFmpeg, never applied at chunk or training time. iTunes-encoded MP3s have a consistent 1057-sample encoder delay. Set `false` to disable.
 
