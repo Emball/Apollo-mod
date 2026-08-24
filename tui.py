@@ -654,6 +654,57 @@ def _pick_output_path(state: dict, cfg_stem: str, input_path: str) -> str | None
     return path if path else None
 
 
+def _pick_ensemble(state: dict, cfg_stem: str) -> tuple:
+    """Pick ensemble / spectral merge options.
+
+    Returns (extra_flags: list[str], label: str) where extra_flags are the
+    CLI args to append to the inference command, and label is a short
+    human-readable description of what was chosen.
+    """
+    import json as _json
+
+    options = [
+        "No ensemble  (model output only)",
+        "Low-end preserve  (max_fft below 700 Hz)",
+        "Low-end preserve + transition blend  (max_fft <700 Hz, avg 15-22 kHz, weight 0.6)",
+        "Custom  (enter JSON band spec)",
+    ]
+
+    last_idx = state.get("inference", {}).get(cfg_stem, {}).get("last_ensemble_idx", 0)
+    idx = _pick("Inference -- ensemble / spectral merge", options,
+                hint="Enter=select  Esc=back (skip ensemble)", start=last_idx)
+    if idx is None:
+        return [], "no ensemble"
+
+    state.setdefault("inference", {}).setdefault(cfg_stem, {})["last_ensemble_idx"] = idx
+
+    if idx == 0:
+        return [], "no ensemble"
+    if idx == 1:
+        return ["--low_end_preserve"], "low-end preserve"
+    if idx == 2:
+        bands = [
+            {"lo": 0,     "hi": 700,   "mode": "max_fft", "weight": 1.0},
+            {"lo": 15000, "hi": 22050, "mode": "avg",     "weight": 0.6},
+        ]
+        return ["--ensemble", _json.dumps(bands)], "low-end + transition blend"
+
+    # Custom JSON input
+    console.clear()
+    console.print(_banner_panel())
+    console.print("[dim]Band spec format: [{\"lo\":Hz,\"hi\":Hz,\"mode\":\"max_fft|min_fft|avg|original|enhanced\",\"weight\":0-1}][/]")
+    raw = console.input("[cyan]Enter JSON band spec:[/] ").strip()
+    if not raw:
+        return [], "no ensemble"
+    try:
+        bands = _json.loads(raw)
+        return ["--ensemble", _json.dumps(bands)], "custom ensemble"
+    except Exception as e:
+        console.print(f"[red]Invalid JSON: {e}[/]")
+        console.input("Press Enter.")
+        return [], "no ensemble"
+
+
 def screen_inference(state: dict) -> None:
     configs = _list_configs()
     if not configs:
@@ -731,6 +782,10 @@ def screen_inference(state: dict) -> None:
     if not input_path:
         return
 
+    # Pick ensemble options (applies to both single and batch)
+    ensemble_flags, ensemble_label = _pick_ensemble(state, cfg_stem)
+    _save_state(state)
+
     # --- Batch mode: process all files in /input ---
     if input_path == _PROCESS_ALL_SENTINEL:
         INPUT_DIR.mkdir(exist_ok=True)
@@ -752,10 +807,10 @@ def screen_inference(state: dict) -> None:
                 "--out_wav", str(out_file),
                 "--conf_dir", str(cfg_path),
                 "--weights", weights,
-            ]
+            ] + ensemble_flags
             completed = _run_subprocess(
                 cmd,
-                f"Inference [{i+1}/{len(batch_files)}]: {in_file.name}",
+                f"Inference [{i+1}/{len(batch_files)}]: {in_file.name}  [{ensemble_label}]",
             )
             if not completed:
                 # User hit Ctrl+C mid-batch -- stop processing remaining files
@@ -785,8 +840,8 @@ def screen_inference(state: dict) -> None:
         "--out_wav", output_path,
         "--conf_dir", str(cfg_path),
         "--weights", weights,
-    ]
-    _run_with_live_output(cmd, f"Inference: {cfg_path.stem}")
+    ] + ensemble_flags
+    _run_with_live_output(cmd, f"Inference: {cfg_path.stem}  [{ensemble_label}]")
 
 
 # -- Edit Config -------------------------------------------------------------
