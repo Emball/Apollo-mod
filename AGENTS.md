@@ -51,6 +51,13 @@ The GitHub wiki (`Changes-and-improvements` page, repo `Emball/Apollo-mod.wiki.g
 
 **Augmentation internals:** `normalize_pair` scales by joint peak -- pre-existing flat-top clipping is preserved as valid training signal. `stereo_alternation` picks L or R by sample index (even → L, odd → R) -- `prob: 1.0` alternates systematically.
 
-**Inference normalization:** Input normalized by peak before chunked inference, rescaled back after. Preserves transient headroom.
+**Inference normalization:** Input normalized by LQ peak before chunked inference, rescaled back after. Original audio is retained at full amplitude as the blend source for spectral ensemble operations.
+
+**Spectral ensemble:** `inference.py` supports per-band blending of the original (unprocessed) and enhanced (model output) signals in the STFT domain. Bands are defined as `{"lo": HZ, "hi": HZ, "mode": str, "weight": float}`. Modes: `max_fft` (bin-wise max magnitude), `min_fft` (bin-wise min), `avg` (arithmetic average), `enhanced` (model only), `original` (bypass model). `weight` blends between the mode result and pure enhanced-only (1.0 = full mode, 0.0 = enhanced). Bins not covered by any band default to enhanced-only. Phase is always taken from the enhanced output. Implementation uses overlap-add STFT (n_fft=4096, hop=n_fft//4, Hann window) to avoid block-boundary artifacts.
+
+Default presets:
+- `--low_end_preserve` (toggle): max_fft blend below `--low_end_hz` (default 700 Hz), enhanced above. Apollo inherently struggles below ~700 Hz; this preserves original low-end energy while allowing HF restoration.
+- `--ensemble JSON`: full custom band spec overrides all presets.
+- `--aux_weights` / `--aux_conf_dir` / `--aux_ensemble`: runs a second model and merges its output at specified bands into the primary result. Enables per-range checkpoint specialization.
 
 **CRITICAL -- never call `torch.cuda.empty_cache()` in any training or validation hook.** Only acceptable inside an OOM recovery handler (`except torch.cuda.OutOfMemoryError`).
