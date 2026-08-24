@@ -1170,9 +1170,18 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     class RankBadger(_Callback):
         """
         After each checkpoint save, renames all checkpoints in the dir to
-        prepend [rank] where rank 1 = best (highest sisdr = least negative val_loss).
-        Runs in a background thread so it never blocks training.
+        prepend [rank] based on a weighted composite of the perceptual
+        metrics -- not sisdr alone. sisdr is noisy (architecture-inherent
+        variance) and demoted to a minor tiebreaker; msstft and hfmae carry
+        the most signal for perceived restoration quality.
+
+        Weights: msstft=0.40, hfmae=0.35, sfr=0.15, sisdr=0.10.
+        Each metric is min-max normalized across the current checkpoint set
+        before weighting, oriented so 0.0 = best and 1.0 = worst. Rank 1 =
+        lowest composite score. Runs in a background thread.
         """
+
+        _WEIGHTS = {"sisdr": 0.10, "msstft": 0.40, "sfr": 0.15, "hfmae": 0.35}
 
         def on_save_checkpoint(self, trainer, pl_module, checkpoint_dict):
             import threading
@@ -1187,18 +1196,58 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 if not ckpt_dir or not os.path.isdir(ckpt_dir):
                     return
                 files = [f for f in os.listdir(ckpt_dir) if f.endswith(".ckpt")]
-                pat = re.compile(r"val_loss=(-?[\d.]+)")
+
+                pats = {
+                    "sisdr":  re.compile(r"sisdr=(-?[\d.]+)"),
+                    "msstft": re.compile(r"msstft=(-?[\d.]+)"),
+                    "sfr":    re.compile(r"sfr=(-?[\d.]+)"),
+                    "hfmae":  re.compile(r"hfmae=(-?[\d.]+)"),
+                }
+
                 parsed = []
                 for f in files:
                     clean = re.sub(r"^\[\d+\]-", "", f)
-                    m = pat.search(clean)
-                    if m:
-                        parsed.append((float(m.group(1)), f, clean))
+                    vals = {}
+                    for key, pat in pats.items():
+                        m = pat.search(clean)
+                        if m:
+                            vals[key] = float(m.group(1))
+                    if vals:
+                        parsed.append((vals, f, clean))
                 if not parsed:
                     return
-                # Sort ascending by val_loss (most negative = lowest sisdr = worst)
-                parsed.sort(key=lambda x: x[0])
-                for rank, (_, old_name, clean_name) in enumerate(parsed, start=1):
+
+                # Min-max normalize each metric across the current set.
+                # sisdr: higher is better -> invert so higher normalizes to 0 (best).
+                # msstft/sfr/hfmae: lower is better -> normalizes directly, 0 = best.
+                norm_ranges = {}
+                for key in self._WEIGHTS:
+                    present = [v[key] for v, _, _ in parsed if key in v]
+                    if not present:
+                        continue
+                    lo, hi = min(present), max(present)
+                    norm_ranges[key] = (lo, hi)
+
+                def composite(vals):
+                    total_w = 0.0
+                    score = 0.0
+                    for key, weight in self._WEIGHTS.items():
+                        if key not in vals or key not in norm_ranges:
+                            continue
+                        lo, hi = norm_ranges[key]
+                        span = hi - lo
+                        n = 0.0 if span == 0 else (vals[key] - lo) / span
+                        if key == "sisdr":
+                            n = 1.0 - n  # invert: higher sisdr -> lower (better) score
+                        score += weight * n
+                        total_w += weight
+                    # Renormalize if some metrics were missing for this file
+                    return score / total_w if total_w > 0 else float("inf")
+
+                scored = [(composite(v), f, c) for v, f, c in parsed]
+                # Sort ascending -- lowest composite score = best = rank 1
+                scored.sort(key=lambda x: x[0])
+                for rank, (_, old_name, clean_name) in enumerate(scored, start=1):
                     new_name = f"[{rank}]-{clean_name}"
                     if old_name != new_name:
                         try:
