@@ -1101,10 +1101,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             sfr    = getattr(pl_module, "_last_val_sfr",    None)
             hfmae  = getattr(pl_module, "_last_val_hfmae",  None)
             val_parts = []
-            if sisdr  is not None: val_parts.append(f"sisdr={-float(sisdr):.3f}")
             if msstft is not None: val_parts.append(f"msstft={float(msstft):.4f}")
             if sfr    is not None: val_parts.append(f"sfr={float(sfr):.3f}")
             if hfmae  is not None: val_parts.append(f"hfmae={float(hfmae):.4f}")
+            if sisdr  is not None: val_parts.append(f"sisdr={-float(sisdr):.3f}")
             val_str = "  " + "  ".join(val_parts) if val_parts else ""
             print(
                 f"\r  {pct:5.1f}%  step={trainer.global_step}  "
@@ -1158,12 +1158,12 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 sfr    = getattr(pl_module, "_last_val_sfr",    None)
                 hfmae  = getattr(pl_module, "_last_val_hfmae",  None)
                 parts = []
-                if sisdr  is not None: parts.append(f"sisdr={-float(sisdr):.3f}")
                 if msstft is not None: parts.append(f"msstft={float(msstft):.4f}")
                 if sfr    is not None:
                     flag = " noise^" if float(sfr) > 1.05 else ""
                     parts.append(f"sfr={float(sfr):.3f}{flag}")
                 if hfmae  is not None: parts.append(f"hfmae={float(hfmae):.4f}")
+                if sisdr  is not None: parts.append(f"sisdr={-float(sisdr):.3f}")
                 if parts:
                     print(f"\n  [val] {' '.join(parts)}  ({val_dur:.1f}s)", flush=True)
 
