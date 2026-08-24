@@ -260,10 +260,15 @@ class AudioLightningModule(pl.LightningModule):
             p.requires_grad_(True)
 
         if is_last_accum:
-            self.clip_gradients(optimizer_d, gradient_clip_val=5, gradient_clip_algorithm="norm")
+            scaler = getattr(self.trainer.precision_plugin, "scaler", None)
+            if scaler is not None:
+                scaler.unscale_(optimizer_d)
+            torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), 5.0)
             optimizer_d.step()
 
-            self.clip_gradients(optimizer_g, gradient_clip_val=5, gradient_clip_algorithm="norm")
+            if scaler is not None:
+                scaler.unscale_(optimizer_g)
+            torch.nn.utils.clip_grad_norm_(self.audio_model.parameters(), 5.0)
             optimizer_g.step()
 
             self.log("train_loss_d", float(self._accum_loss_d), on_step=True, prog_bar=True, logger=True)
@@ -278,9 +283,14 @@ class AudioLightningModule(pl.LightningModule):
         if self._accum_loss_g is not None:
             try:
                 optimizer_g, optimizer_d = self.optimizers()
-                self.clip_gradients(optimizer_d, gradient_clip_val=5, gradient_clip_algorithm="norm")
+                _scaler = getattr(self.trainer.precision_plugin, "scaler", None)
+                if _scaler is not None:
+                    _scaler.unscale_(optimizer_d)
+                torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), 5.0)
                 optimizer_d.step()
-                self.clip_gradients(optimizer_g, gradient_clip_val=5, gradient_clip_algorithm="norm")
+                if _scaler is not None:
+                    _scaler.unscale_(optimizer_g)
+                torch.nn.utils.clip_grad_norm_(self.audio_model.parameters(), 5.0)
                 optimizer_g.step()
                 self.log("train_loss_d", float(self._accum_loss_d), on_step=False, prog_bar=False, logger=True)
                 self.log("train_loss_g", float(self._accum_loss_g), on_step=False, prog_bar=False, logger=True)
