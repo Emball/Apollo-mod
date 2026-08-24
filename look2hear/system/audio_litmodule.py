@@ -674,6 +674,17 @@ class AudioLightningModule(pl.LightningModule):
         self.log("val_sfr",    float(_sfr)    if _sfr    is not None else 0.0, prog_bar=False, logger=True)
         self.log("val_hfmae",  float(_hfmae)  if _hfmae  is not None else 0.0, prog_bar=False, logger=True)
 
+        # Weighted composite for checkpoint monitoring -- same weights as RankBadger.
+        # msstft=0.40, hfmae=0.35, sfr=0.15, sisdr=0.10. Lower = better.
+        # sisdr is stored as negative val_loss (higher raw = better), so invert.
+        _sisdr = self._last_val_sisdr
+        _w_msstft = 0.40 * (float(_msstft) if _msstft is not None else 0.0)
+        _w_hfmae  = 0.35 * (float(_hfmae)  if _hfmae  is not None else 0.0)
+        _w_sfr    = 0.15 * (float(_sfr)    if _sfr    is not None else 0.0)
+        _w_sisdr  = 0.10 * (-float(_sisdr)  if _sisdr  is not None else 0.0)  # negate: higher sisdr = lower (better)
+        _composite = _w_msstft + _w_hfmae + _w_sfr + _w_sisdr
+        self.log("val_composite", _composite, prog_bar=False, logger=True)
+
     # ------------------------------------------------------------------
     # Checkpoint persistence
     # ------------------------------------------------------------------

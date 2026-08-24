@@ -1270,10 +1270,16 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     checkpoint = None
     if cfg.get("early_stopping") and not val_disabled:
         print_only(f"Instantiating early_stopping")
-        callbacks.append(hydra.utils.instantiate(cfg.early_stopping))
+        es = hydra.utils.instantiate(cfg.early_stopping)
+        es.monitor = "val_composite"
+        es.mode    = "min"
+        callbacks.append(es)
     if cfg.get("checkpoint") and not val_disabled:
         print_only(f"Instantiating checkpoint")
         checkpoint = hydra.utils.instantiate(cfg.checkpoint)
+        # Monitor the weighted composite (msstft/hfmae/sfr/sisdr) not val_loss alone.
+        checkpoint.monitor = "val_composite"
+        checkpoint.mode    = "min"
         # Keep every checkpoint -- ranking badge added by RankBadger.
         checkpoint.save_top_k = -1
         # Full stats in filename; all metrics are logged via self.log() so
