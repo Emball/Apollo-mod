@@ -114,7 +114,7 @@ class AudioLightningModule(pl.LightningModule):
         scheduler=None,
         val_save_interval=5,
         val_audio_dir=None,
-        val_audio_pairs=3,          # songs per saved set (3 => 9 files: LQ/HQ/Restored each)
+        val_songs=3,                # number of songs to save audio for per val run
         val_rotate_every="auto",    # "auto" = derive from total steps; int = manual cadence
         gradient_checkpointing=False,
         grad_accum_steps=1,
@@ -128,7 +128,7 @@ class AudioLightningModule(pl.LightningModule):
         self.scheduler        = list(scheduler)
         self.val_save_interval = val_save_interval
         self.val_audio_dir    = val_audio_dir
-        self.val_audio_pairs  = val_audio_pairs
+        self.val_songs        = val_songs
         self.val_rotate_every = val_rotate_every
 
         # Val fixed-index lock (for loss computation)
@@ -367,7 +367,7 @@ class AudioLightningModule(pl.LightningModule):
     def _build_rotation_schedule(self, all_songs: list) -> list:
         """
         Build the full rotation schedule for the entire training run.
-        Each slot is a list of `val_audio_pairs` song keys.
+        Each slot is a list of val_songs song keys.
         Slots are constructed so every song appears as equally often as possible.
         The cadence (slots between rotations) is derived from total configured
         steps when val_rotate_every="auto", otherwise uses the integer value.
@@ -378,7 +378,7 @@ class AudioLightningModule(pl.LightningModule):
         n_songs  = len(all_songs)
         # Cap per_set so we always have at least 2 rotation slots (meaningful rotation).
         # e.g. 3 songs / 3 per_set = 1 slot = no rotation; reduce to 2 per_set = 2 slots.
-        per_set  = min(self.val_audio_pairs, max(1, n_songs - 1)) if n_songs > 1 else n_songs
+        per_set  = min(self.val_songs, max(1, n_songs - 1)) if n_songs > 1 else n_songs
 
         # Derive total val runs from trainer config
         try:
@@ -652,7 +652,7 @@ class AudioLightningModule(pl.LightningModule):
                 except Exception:
                     total_val_runs = 50
                 n_songs  = len(all_songs)
-                per_set  = min(self.val_audio_pairs, n_songs)
+                per_set  = min(self.val_songs, n_songs)
                 n_slots  = math.ceil(n_songs / per_set)
                 self._val_rotate_cadence = max(1, total_val_runs // n_slots)
             else:

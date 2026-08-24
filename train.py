@@ -1043,7 +1043,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         optimizer=[optimizer_g, optimizer_d],
         scheduler=[scheduler_g, scheduler_d],
         val_audio_dir=val_audio_dir,
-        val_audio_pairs=cfg.training.get("val_audio_pairs", 3),
+        val_songs=cfg.training.get("val_songs", cfg.training.get("val_audio_pairs", 3)),
         val_rotate_every=cfg.training.get("val_rotate_every", "auto"),
         gradient_checkpointing=cfg.system.get("gradient_checkpointing", False),
         grad_accum_steps=cfg.training.get("grad_accum_steps", 1),
