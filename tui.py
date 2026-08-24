@@ -1047,6 +1047,15 @@ def _dir_size(path: Path) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Evaluate
+# ---------------------------------------------------------------------------
+
+def screen_evaluate(state: dict) -> None:
+    from evaluate import screen_evaluate as _screen_evaluate
+    _screen_evaluate(state, console, _pick, _run_with_live_output, ROOT)
+
+
+# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
@@ -1056,6 +1065,7 @@ def main() -> None:
     MAIN_ITEMS = [
         "Train",
         "Inference",
+        "Evaluate",
         "Edit Config",
         "Utilities",
         "Exit",
@@ -1073,8 +1083,10 @@ def main() -> None:
         elif idx == 1:
             screen_inference(state)
         elif idx == 2:
-            screen_edit_config(state)
+            screen_evaluate(state)
         elif idx == 3:
+            screen_edit_config(state)
+        elif idx == 4:
             screen_utilities(state)
 
 

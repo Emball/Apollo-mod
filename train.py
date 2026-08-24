@@ -1097,6 +1097,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             pct   = 100 * done / total
             # Show last val metrics inline if available
             sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
+            sdr    = getattr(pl_module, "_last_val_sdr",    None)
             msstft = getattr(pl_module, "_last_val_msstft", None)
             sfr    = getattr(pl_module, "_last_val_sfr",    None)
             hfmae  = getattr(pl_module, "_last_val_hfmae",  None)
@@ -1104,6 +1105,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             if msstft is not None: val_parts.append(f"msstft={float(msstft):.4f}")
             if sfr    is not None: val_parts.append(f"sfr={float(sfr):.3f}")
             if hfmae  is not None: val_parts.append(f"hfmae={float(hfmae):.4f}")
+            if sdr    is not None: val_parts.append(f"sdr={float(sdr):.3f}")
             if sisdr  is not None: val_parts.append(f"sisdr={-float(sisdr):.3f}")
             val_str = "  " + "  ".join(val_parts) if val_parts else ""
             print(
@@ -1154,6 +1156,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 self._val_elapsed += val_dur
             if not getattr(self, '_val_sanity', True):
                 sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
+                sdr    = getattr(pl_module, "_last_val_sdr",    None)
                 msstft = getattr(pl_module, "_last_val_msstft", None)
                 sfr    = getattr(pl_module, "_last_val_sfr",    None)
                 hfmae  = getattr(pl_module, "_last_val_hfmae",  None)
@@ -1163,6 +1166,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                     flag = " noise^" if float(sfr) > 1.05 else ""
                     parts.append(f"sfr={float(sfr):.3f}{flag}")
                 if hfmae  is not None: parts.append(f"hfmae={float(hfmae):.4f}")
+                if sdr    is not None: parts.append(f"sdr={float(sdr):.3f}")
                 if sisdr  is not None: parts.append(f"sisdr={-float(sisdr):.3f}")
                 if parts:
                     print(f"\n  [val] {' '.join(parts)}  ({val_dur:.1f}s)", flush=True)
@@ -1181,7 +1185,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         lowest composite score. Runs in a background thread.
         """
 
-        _WEIGHTS = {"sisdr": 0.10, "msstft": 0.40, "sfr": 0.15, "hfmae": 0.35}
+        _WEIGHTS = {"sisdr": 0.10, "msstft": 0.40, "sfr": 0.15, "hfmae": 0.30, "sdr": 0.05}
 
         def on_save_checkpoint(self, trainer, pl_module, checkpoint_dict):
             import threading
@@ -1202,6 +1206,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                     "msstft": re.compile(r"msstft=(-?[\d.]+)"),
                     "sfr":    re.compile(r"sfr=(-?[\d.]+)"),
                     "hfmae":  re.compile(r"hfmae=(-?[\d.]+)"),
+                    "sdr":    re.compile(r"(?<![a-z])sdr=(-?[\d.]+)"),
                 }
 
                 parsed = []
@@ -1293,6 +1298,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             "-{val_msstft:.4f}"
             "-{val_sfr:.3f}"
             "-{val_hfmae:.4f}"
+            "-{val_sdr:.3f}"
         )
         callbacks.append(checkpoint)
 

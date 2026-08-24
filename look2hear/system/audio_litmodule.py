@@ -156,6 +156,7 @@ class AudioLightningModule(pl.LightningModule):
 
         # Last val metric values (read by StepPrinter in train.py)
         self._last_val_sisdr  = None
+        self._last_val_sdr    = None
         self._last_val_msstft = None
         self._last_val_sfr    = None
         self._last_val_hfmae  = None
@@ -570,7 +571,10 @@ class AudioLightningModule(pl.LightningModule):
         msstft_sum = 0.0
         sfr_sum    = 0.0
         hfmae_sum  = 0.0
+        sdr_sum    = 0.0
         count      = 0
+        import look2hear.losses as _ll
+        _sdr_fn = _ll.MultiSrcNegSDR("snr", zero_mean=True)
         for song_key, lq_save, hq_save, out in perc_pairs:
             try:
                 e = out[0:1]      if out.ndim     == 2 else out
@@ -578,6 +582,7 @@ class AudioLightningModule(pl.LightningModule):
                 msstft_sum += _ms_log_stft_loss(e, r)
                 sfr_sum    += _spectral_flatness_ratio(e, r)
                 hfmae_sum  += _hf_band_mae_cpu(e, r)
+                sdr_sum    += -float(_sdr_fn(e.unsqueeze(0), r.unsqueeze(0)).mean())
                 count      += 1
             except Exception as ex:
                 print(f"[val audio] Metric error {song_key}: {ex}")
@@ -586,6 +591,7 @@ class AudioLightningModule(pl.LightningModule):
             self._last_val_msstft = msstft_sum / count
             self._last_val_sfr    = sfr_sum    / count
             self._last_val_hfmae  = hfmae_sum  / count
+            self._last_val_sdr    = sdr_sum    / count
 
         # Disk writes go async -- training resumes immediately after metrics are logged.
         # Join any previous write thread first.
@@ -611,6 +617,7 @@ class AudioLightningModule(pl.LightningModule):
     def on_validation_epoch_end(self):
         # Reset metric slots -- filled synchronously in _save_val_audio()
         self._last_val_sisdr  = None
+        self._last_val_sdr    = None
         self._last_val_msstft = None
         self._last_val_sfr    = None
         self._last_val_hfmae  = None
@@ -680,9 +687,11 @@ class AudioLightningModule(pl.LightningModule):
         _msstft = self._last_val_msstft
         _sfr    = self._last_val_sfr
         _hfmae  = self._last_val_hfmae
+        _sdr = self._last_val_sdr
         self.log("val_msstft", float(_msstft) if _msstft is not None else 0.0, prog_bar=False, logger=True)
         self.log("val_sfr",    float(_sfr)    if _sfr    is not None else 0.0, prog_bar=False, logger=True)
         self.log("val_hfmae",  float(_hfmae)  if _hfmae  is not None else 0.0, prog_bar=False, logger=True)
+        self.log("val_sdr",    float(_sdr)    if _sdr    is not None else 0.0, prog_bar=False, logger=True)
 
         # Weighted composite for checkpoint monitoring -- same weights as RankBadger.
         # msstft=0.40, hfmae=0.35, sfr=0.15, sisdr=0.10. Lower = better.
