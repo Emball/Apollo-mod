@@ -142,6 +142,7 @@ class AudioLightningModule(pl.LightningModule):
         #   Checkpointed so resume picks up the right slot.
         self._val_rotation_schedule: list = []
         self._val_run_count: int          = 0
+        self._val_locked_refs: dict       = {}  # song_key -> (lq_path, hq_path, start, seg_samples)
 
         # Gradient accumulation state
         self.grad_accum_steps = max(1, grad_accum_steps)
@@ -439,17 +440,21 @@ class AudioLightningModule(pl.LightningModule):
     # Val audio reference building
     # ------------------------------------------------------------------
 
-    def _build_val_refs_for_slot(self, slot_songs: list) -> list:
+    def _lock_val_refs(self) -> None:
         """
-        Given a list of song keys (stems), find one locked chunk per song
-        and return refs: list of (song_key, lq_path, hq_path, start, seg_samples).
+        Called once when the rotation schedule is first built.
+        Picks one stable non-silent chunk per song from the fixed index set
+        and stores it in _val_locked_refs. These refs never change for the
+        lifetime of the run, so the same audio is always compared across
+        val steps for a given song.
         """
         import random
+        import torchaudio as _ta
 
         dataset = self.trainer.datamodule.data_val
         fixed   = self._val_fixed_indices or set()
+        _SILENCE_RMS = 0.01
 
-        # Build song -> [ds_idx] map from fixed indices
         by_song = {}
         for ds_idx in fixed:
             pair_idx, _ = dataset.index[ds_idx]
@@ -459,44 +464,38 @@ class AudioLightningModule(pl.LightningModule):
             key   = parts[0] if len(parts) == 2 and parts[1].isdigit() else stem
             by_song.setdefault(key, []).append(ds_idx)
 
-        refs = []
-        for song_key in slot_songs:
-            # Find the best-matching key in by_song (exact or prefix match)
-            matched_key = None
-            if song_key in by_song:
-                matched_key = song_key
-            else:
-                for k in by_song:
-                    if k.startswith(song_key) or song_key.startswith(k):
-                        matched_key = k
-                        break
-            if matched_key is None:
-                continue
-
-            candidates = by_song[matched_key][:]
-            random.shuffle(candidates)
-            chosen = candidates[0]  # fallback: use first even if silent
-
-            # Skip silent chunks (e.g. gaps between stems in concatenated files)
-            _SILENCE_RMS = 0.01
-            for ds_idx in candidates:
+        locked = {}
+        for song_key, candidates in by_song.items():
+            shuffled = candidates[:]
+            random.shuffle(shuffled)
+            chosen = shuffled[0]
+            for ds_idx in shuffled:
                 pair_idx, s = dataset.index[ds_idx]
                 lq_p, _ = dataset.pairs[pair_idx]
                 try:
-                    import torchaudio as _ta
                     wav, _ = _ta.load(lq_p, frame_offset=s, num_frames=dataset.segment_samples)
                     if wav.pow(2).mean().sqrt().item() >= _SILENCE_RMS:
                         chosen = ds_idx
                         break
                 except Exception:
-                    chosen = ds_idx
-                    break
-
+                    pass
             pair_idx, start = dataset.index[chosen]
             lq_path, hq_path = dataset.pairs[pair_idx]
-            seg_samples = dataset.segment_samples
-            refs.append((song_key, lq_path, hq_path, start, seg_samples))
+            locked[song_key] = (lq_path, hq_path, start, dataset.segment_samples)
 
+        self._val_locked_refs = locked
+        print(f"[val audio] Locked {len(locked)} stable chunk refs.")
+
+    def _build_val_refs_for_slot(self, slot_songs: list) -> list:
+        """
+        Given a list of song keys for this slot, return the pre-locked refs.
+        Each song always uses the exact same chunk across all val runs.
+        """
+        refs = []
+        for song_key in slot_songs:
+            if song_key in self._val_locked_refs:
+                lq_path, hq_path, start, seg_samples = self._val_locked_refs[song_key]
+                refs.append((song_key, lq_path, hq_path, start, seg_samples))
         return refs
 
     # ------------------------------------------------------------------
@@ -639,6 +638,7 @@ class AudioLightningModule(pl.LightningModule):
                     all_songs.append(key)
 
             self._val_rotation_schedule = self._build_rotation_schedule(all_songs)
+            self._lock_val_refs()
 
             # Resolve and cache the cadence integer
             if str(self.val_rotate_every).lower() == "auto":
@@ -683,12 +683,14 @@ class AudioLightningModule(pl.LightningModule):
         checkpoint["val_rotation_schedule"]  = self._val_rotation_schedule
         checkpoint["val_run_count"]          = self._val_run_count
         checkpoint["val_rotate_cadence"]     = getattr(self, "_val_rotate_cadence", 5)
+        checkpoint["val_locked_refs"]        = self._val_locked_refs
 
     def on_load_checkpoint(self, checkpoint: dict) -> None:
         self._val_fixed_indices     = checkpoint.get("val_fixed_indices",     None)
         self._val_rotation_schedule = checkpoint.get("val_rotation_schedule", [])
         self._val_run_count         = checkpoint.get("val_run_count",         0)
         self._val_rotate_cadence    = checkpoint.get("val_rotate_cadence",    5)
+        self._val_locked_refs       = checkpoint.get("val_locked_refs",       {})
 
         # Strip state_dict keys from older checkpoints that no longer exist in model
         sd = checkpoint.get("state_dict", {})
