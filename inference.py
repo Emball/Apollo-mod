@@ -1,5 +1,5 @@
-# @claude last-modified: 2026-08-13T00:00:00Z
-# @claude last-commit: feat: --conf_dir reads model params and chunk size from config
+# @claude last-modified: 2026-08-24T00:00:00Z
+# @claude last-commit: feat: spectral merge ensemble -- low_end_preserve, custom bands, aux checkpoint
 """
 inference.py -- Apollo audio enhancement script
 
@@ -14,6 +14,21 @@ Usage:
 
     # Pretrained shortnames (no conf_dir needed)
     python inference.py --in_wav input.wav --out_wav output.wav --weights lew_v2
+
+    # Low-end preservation (max_fft blend below 700 Hz)
+    python inference.py --in_wav input.wav --out_wav output.wav --weights my.ckpt \\
+        --conf_dir configs/apollo_stfl.yaml --low_end_preserve
+
+    # Custom band ensemble (JSON list of band specs)
+    python inference.py --in_wav input.wav --out_wav output.wav --weights my.ckpt \\
+        --conf_dir configs/apollo_stfl.yaml \\
+        --ensemble '[{"lo":0,"hi":700,"mode":"max_fft","weight":1.0},{"lo":15000,"hi":22050,"mode":"avg","weight":0.7}]'
+
+    # Dual-checkpoint ensemble (primary + aux with per-band routing)
+    python inference.py --in_wav input.wav --out_wav output.wav --weights primary.ckpt \\
+        --conf_dir configs/apollo_stfl.yaml \\
+        --aux_weights secondary.ckpt --aux_conf_dir configs/apollo_stfl2.yaml \\
+        --aux_ensemble '[{"lo":8000,"hi":22050,"mode":"max_fft","weight":0.5}]'
 """
 import argparse
 import os
@@ -26,6 +41,103 @@ import look2hear.models.apollo
 _SR          = 44100  # Apollo's native sample rate
 _CHUNK_SEC   = 4      # default chunk size -- matches training segment_sec
 _OVERLAP_SEC = 0.5    # crossfade overlap at chunk boundaries
+
+# Default ensemble applied when --low_end_preserve is set.
+# max_fft below 700 Hz: take whichever of original or enhanced has more energy
+# per bin. Preserves the original low-end character while keeping all restored
+# HF content from the model.
+_LOW_END_BANDS_DEFAULT = [
+    {"lo": 0, "hi": 700, "mode": "max_fft", "weight": 1.0},
+]
+
+
+def _spectral_merge(original: "torch.Tensor", enhanced: "torch.Tensor",
+                    sr: int, bands: list) -> "torch.Tensor":
+    """Blend original and enhanced audio in the STFT domain according to band specs.
+
+    Args:
+        original:  [2, T] float32 -- un-normalized source audio
+        enhanced:  [2, T] float32 -- model output (same scale as original)
+        sr:        sample rate
+        bands:     list of dicts, each with keys:
+                     lo    -- low frequency Hz (inclusive)
+                     hi    -- high frequency Hz (inclusive)
+                     mode  -- 'max_fft' | 'min_fft' | 'avg' | 'original' | 'enhanced'
+                     weight -- float 0-1; blends between mode result (1.0) and pure
+                               enhanced (0.0). Default 1.0.
+
+    Returns:
+        [2, T] float32 merged tensor.
+
+    Phase always comes from the enhanced output. Only magnitude is blended.
+    STFT window size 4096 gives ~0.09 Hz/bin resolution at 44100 Hz.
+    Bins not covered by any band default to enhanced-only.
+    """
+    import numpy as np
+
+    n_fft    = 4096
+    hop      = n_fft // 4
+    window   = torch.hann_window(n_fft)
+
+    def _stft(x):
+        # x: [2, T] -> [2, F, frames] complex
+        return torch.stft(x, n_fft=n_fft, hop_length=hop,
+                          win_length=n_fft, window=window,
+                          return_complex=True, pad_mode="reflect")
+
+    def _istft(X, length):
+        return torch.istft(X, n_fft=n_fft, hop_length=hop,
+                           win_length=n_fft, window=window,
+                           length=length, return_complex=False)
+
+    T = enhanced.shape[-1]
+    S_orig = _stft(original[..., :T])  # [2, F, frames]
+    S_enh  = _stft(enhanced)            # [2, F, frames]
+
+    mag_orig = S_orig.abs()
+    mag_enh  = S_enh.abs()
+    phase    = S_enh / (mag_enh + 1e-8)  # unit-phase from enhanced
+
+    # Start with enhanced magnitude everywhere
+    mag_out = mag_enh.clone()
+
+    # Hz -> bin index
+    bin_hz = sr / n_fft  # Hz per FFT bin
+    n_bins = n_fft // 2 + 1
+
+    for band in bands:
+        lo_hz = float(band.get("lo", 0))
+        hi_hz = float(band.get("hi", sr / 2))
+        mode  = str(band.get("mode", "enhanced")).lower()
+        w     = float(band.get("weight", 1.0))
+        w     = max(0.0, min(1.0, w))
+
+        lo_bin = max(0, int(lo_hz / bin_hz))
+        hi_bin = min(n_bins - 1, int(hi_hz / bin_hz) + 1)
+        if lo_bin >= hi_bin:
+            continue
+
+        m_o = mag_orig[:, lo_bin:hi_bin, :]
+        m_e = mag_enh[:, lo_bin:hi_bin, :]
+
+        if mode == "max_fft":
+            m_blend = torch.maximum(m_o, m_e)
+        elif mode == "min_fft":
+            m_blend = torch.minimum(m_o, m_e)
+        elif mode == "avg":
+            m_blend = (m_o + m_e) * 0.5
+        elif mode == "original":
+            m_blend = m_o
+        else:  # "enhanced" or unknown
+            m_blend = m_e
+
+        # weight blends between pure enhanced (0) and the mode result (1)
+        mag_out[:, lo_bin:hi_bin, :] = w * m_blend + (1.0 - w) * m_e
+
+    # Reconstruct with enhanced phase
+    S_out = mag_out * phase
+    out   = _istft(S_out, length=T)
+    return out
 
 _MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 
@@ -154,23 +266,36 @@ def load_model(weights, sr, win, feature_dim, layer):
     return model
 
 
-def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path):
+def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path,
+                 bands=None, aux_model=None, aux_bands=None):
     """Process audio in chunks and write each chunk to disk immediately.
-    
+
     Writes sequentially so the output WAV can be previewed in Audacity
     while inference is still running -- just drag the file in and hit play.
+
+    bands:     list of band specs for _spectral_merge (blends original + enhanced).
+               None = enhanced-only (no merge).
+    aux_model: optional second Apollo model for dual-checkpoint ensemble.
+    aux_bands: band specs applied to the aux model output relative to the
+               primary enhanced signal. None = same as bands.
+
     Returns None (output already on disk).
     """
     import soundfile as sf
     import numpy as np
+
+    # Keep a copy of the un-normalized original for spectral merge.
+    original = audio.squeeze(0).clone()  # [2, T]
 
     # Normalize to match training: divide by peak so the model sees [-1, 1] input.
     # Store the scale so we can restore the original level after inference.
     peak = audio.abs().max().item()
     if peak > 0:
         audio = audio / peak
+        original_norm = original / peak
     else:
         peak = 1.0
+        original_norm = original
 
     if chunk_sec <= 0:
         raise ValueError(f"chunk_sec must be > 0, got {chunk_sec}")
@@ -209,6 +334,20 @@ def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path):
                 enhanced = model(chunk)
             # enhanced: [1, 2, T_chunk] -- restore original level after inference
             enhanced = enhanced.squeeze(0).cpu() * peak  # [2, T_chunk]
+
+            # Spectral merge with original (primary bands)
+            if bands:
+                orig_chunk = original_norm[..., start:end] * peak
+                enhanced = _spectral_merge(orig_chunk, enhanced, sr, bands)
+
+            # Dual-checkpoint: blend aux model output into specified bands
+            if aux_model is not None:
+                with torch.no_grad():
+                    aux_out = aux_model(chunk)
+                aux_out = aux_out.squeeze(0).cpu() * peak
+                _aux_bands = aux_bands if aux_bands else bands
+                if _aux_bands:
+                    enhanced = _spectral_merge(aux_out, enhanced, sr, _aux_bands)
 
             chunk_len = enhanced.shape[-1]
 
@@ -303,7 +442,20 @@ def main(
     overlap_sec=_OVERLAP_SEC,
     device_str="auto",
     chunked=True,
+    low_end_preserve=False,
+    low_end_hz=700.0,
+    ensemble=None,
+    aux_weights=None,
+    aux_conf_dir=None,
+    aux_ensemble=None,
 ):
+    """
+    ensemble: list of band dicts (already parsed from JSON), or None.
+    If low_end_preserve is True and ensemble is None, _LOW_END_BANDS_DEFAULT
+    (with low_end_hz as the crossover) is used.
+    aux_weights/aux_conf_dir: optional second model for dual-checkpoint blend.
+    aux_ensemble: band specs for blending the aux model output. None = same as primary bands.
+    """
     # Config fills only args the user didn't explicitly provide (still None).
     # Explicit CLI args always win -- config is a fallback, not an override.
     if conf_dir is not None:
@@ -323,6 +475,13 @@ def main(
     if layer       is None: layer       = 6
     if chunk_sec   is None: chunk_sec   = _CHUNK_SEC
 
+    # Resolve bands
+    if ensemble is None and low_end_preserve:
+        ensemble = [{"lo": 0, "hi": float(low_end_hz), "mode": "max_fft", "weight": 1.0}]
+
+    if ensemble:
+        print(f"[inference] Spectral merge bands: {ensemble}")
+
     print(f"[inference] Config: feature_dim={feature_dim}, sr={sr}, win={win}, "
           f"layer={layer}, chunk_sec={chunk_sec}")
 
@@ -338,6 +497,24 @@ def main(
     model = load_model(weights=weights, sr=sr, win=win, feature_dim=feature_dim, layer=layer)
     model = model.to(device).eval()
 
+    # Aux model (optional second checkpoint for dual-checkpoint ensemble)
+    aux_model = None
+    if aux_weights:
+        print(f"[inference] Loading aux model: {aux_weights}")
+        aux_sr = sr; aux_win = win; aux_fd = feature_dim; aux_layer = layer
+        if aux_conf_dir is not None:
+            aux_cfg = load_config(aux_conf_dir)
+            am = aux_cfg.get("model", {})
+            if "sr"          in am: aux_sr    = int(am.sr)
+            if "win"         in am: aux_win   = int(am.win)
+            if "feature_dim" in am: aux_fd    = int(am.feature_dim)
+            if "layer"       in am: aux_layer = int(am.layer)
+        aux_model = load_model(weights=aux_weights, sr=aux_sr, win=aux_win,
+                               feature_dim=aux_fd, layer=aux_layer)
+        aux_model = aux_model.to(device).eval()
+        if aux_ensemble:
+            print(f"[inference] Aux ensemble bands: {aux_ensemble}")
+
     audio = load_audio(input_wav, target_sr=sr)
     duration = audio.shape[-1] / sr
     print(f"[inference] Input: {input_wav}  ({duration:.1f}s, {audio.shape[-2]}ch)")
@@ -345,19 +522,31 @@ def main(
     if chunked and audio.shape[-1] > int(chunk_sec * sr):
         print(f"[inference] Chunked inference ({chunk_sec}s chunks, {overlap_sec}s overlap)")
         print(f"[inference] Writing sequentially -- you can preview in Audacity now")
-        _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path=output_wav)
+        _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path=output_wav,
+                     bands=ensemble, aux_model=aux_model, aux_bands=aux_ensemble)
         print(f"[inference] Done -> {output_wav}")
     else:
+        original = audio.squeeze(0).clone()
         peak = audio.abs().max().item()
         if peak > 0:
             audio = audio / peak
         with torch.no_grad():
             enhanced = model(audio.to(device))
-        enhanced = enhanced.cpu() * peak
-        save_audio(output_wav, enhanced, sr=sr)
+        enhanced = enhanced.squeeze(0).cpu() * peak
+        if ensemble:
+            enhanced = _spectral_merge(original, enhanced, sr, ensemble)
+        if aux_model is not None:
+            with torch.no_grad():
+                aux_out = aux_model(audio.to(device))
+            aux_out = aux_out.squeeze(0).cpu() * peak
+            _ab = aux_ensemble if aux_ensemble else ensemble
+            if _ab:
+                enhanced = _spectral_merge(aux_out, enhanced, sr, _ab)
+        save_audio(output_wav, enhanced.unsqueeze(0), sr=sr)
 
 
 if __name__ == "__main__":
+    import json as _json
     parser = argparse.ArgumentParser(description="Apollo audio enhancement")
     parser.add_argument("--in_wav",      type=str, required=True,
                         help="Path to input audio file")
@@ -385,7 +574,27 @@ if __name__ == "__main__":
                         help="'auto', 'cuda', 'cpu', 'cuda:1', ... (default: auto)")
     parser.add_argument("--no_chunked",  action="store_true",
                         help="Disable chunked inference (may OOM on long files)")
+    # Ensemble / spectral merge flags
+    parser.add_argument("--low_end_preserve", action="store_true",
+                        help="Blend original below --low_end_hz using max_fft (preserves low-end "
+                             "character and original codec artifacts in that range)")
+    parser.add_argument("--low_end_hz", type=float, default=700.0,
+                        help="Crossover frequency for --low_end_preserve (default: 700 Hz)")
+    parser.add_argument("--ensemble",   type=str, default=None,
+                        help='JSON list of band specs, e.g. \'[{"lo":0,"hi":700,"mode":"max_fft","weight":1.0}]\'. '
+                             'Modes: max_fft, min_fft, avg, original, enhanced. '
+                             'weight: 0=pure enhanced, 1=pure mode result.')
+    parser.add_argument("--aux_weights",   type=str, default=None,
+                        help="Optional second checkpoint for dual-checkpoint ensemble")
+    parser.add_argument("--aux_conf_dir",  type=str, default=None,
+                        help="Config for the aux checkpoint (reads feature_dim, sr, etc.)")
+    parser.add_argument("--aux_ensemble",  type=str, default=None,
+                        help="JSON band specs for blending the aux model output. "
+                             "Omit to use the same bands as --ensemble.")
     args = parser.parse_args()
+
+    ensemble_parsed     = _json.loads(args.ensemble)    if args.ensemble    else None
+    aux_ensemble_parsed = _json.loads(args.aux_ensemble) if args.aux_ensemble else None
 
     # Pass None for args the user didn't explicitly set so main() can fill
     # them from --conf_dir without clobbering explicit CLI values.
@@ -402,4 +611,10 @@ if __name__ == "__main__":
         overlap_sec=args.overlap_sec,
         device_str=args.device,
         chunked=not args.no_chunked,
+        low_end_preserve=args.low_end_preserve,
+        low_end_hz=args.low_end_hz,
+        ensemble=ensemble_parsed,
+        aux_weights=args.aux_weights,
+        aux_conf_dir=args.aux_conf_dir,
+        aux_ensemble=aux_ensemble_parsed,
     )
