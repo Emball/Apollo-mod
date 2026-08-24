@@ -10,10 +10,11 @@ optimizations:
   expandable_segments: true
   triton_cache: true
   ram_limit_fraction: 0.95  # kill process cleanly at this fraction of total system RAM
+
 training:
   n_layers_to_freeze: 4
-  hf_boost: 1.5
   val_songs: 5
+  val_rotate_every: auto
   grad_accum_steps: 1
 
 datas:
@@ -92,7 +93,7 @@ discriminator:
   window_weight_boost: false
 
 optimizer:
-  type: adamw_8bit
+  type: AdamW
   lr_g: 0.00001
   lr_d: 0.000001
   weight_decay: 0.01
@@ -112,6 +113,10 @@ scheduler_d:
 loss_g:
   _target_: look2hear.losses.gan_losses.MultiFrequencyGenLoss
   eps: 1e-8
+  band_weight_shape: gaussian
+  band_weight_center_hz: 15000.0
+  band_weight_sigma_hz: 3000.0
+  band_weight_gain: 1.5
 
 loss_d:
   _target_: look2hear.losses.gan_losses.MultiFrequencyDisLoss
@@ -139,9 +144,9 @@ checkpoint:
   monitor: val_loss
   mode: min
   verbose: true
-  save_top_k: 5
+  save_top_k: -1
   save_last: false
-  filename: '{step:06d}-{val_loss:.4f}'
+  filename: 'step={step:06d}-sisdr={val_loss:.3f}-msstft={val_msstft:.4f}-sfr={val_sfr:.3f}-hfmae={val_hfmae:.4f}'
 
 logger:
   _target_: pytorch_lightning.loggers.TensorBoardLogger
