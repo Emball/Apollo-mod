@@ -72,6 +72,20 @@ Feature matching loss uses fresh feature maps from the generator step, not stale
 
 ---
 
+## README Guidelines
+
+Write from the user's perspective, not the implementation's. If the user can't act on the information and it doesn't change what they do, leave it out. Implementation details (what library, how it's parallelized, internal mechanics) belong in AGENTS or the wiki, not the README.
+
+No m-dashes. No filler qualifiers ("fast", "automatically", "cleanly"). Say what the thing does, stop.
+
+## README Guidelines
+
+Write from the user's perspective, not the implementation's. If the user can't act on the information and it doesn't change what they do, it doesn't belong in the README. Implementation details (what library, what algorithm, parallelism, internal mechanics) go in AGENTS or the wiki.
+
+Tone: direct, no filler. No m-dashes. No phrases like "automatically," "seamlessly," or "fast" that describe the implementation flattering itself. Say what happens, not how impressive it is that it happens.
+
+If something just works, say it works. Don't explain how.
+
 ## Current Branch State
 
 | Branch | Contains |
