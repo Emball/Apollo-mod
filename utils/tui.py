@@ -33,7 +33,9 @@ from rich.text import Text
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-ROOT = Path(__file__).parent.resolve()
+ROOT = Path(__file__).parent.parent.resolve()  # repo root (parent of utils/)
+sys.path.insert(0, str(ROOT / "core"))          # for lazy imports of evaluate, degrade_audio
+sys.path.insert(0, str(ROOT / "utils"))         # for degrade_audio co-located in utils/
 CONFIGS_DIR = ROOT / "configs"
 RUNS_DIR = ROOT / "runs"
 INPUT_DIR = ROOT / "input"
@@ -382,7 +384,7 @@ def _run_mid_training_inference(state: dict, cfg_path: Path, pause_file: Path) -
         feature_dim = 384
 
     cmd = [
-        _python_bin(), str(ROOT / "inference.py"),
+        _python_bin(), str(ROOT / "core" / "inference.py"),
         "--in_wav",    input_path,
         "--out_wav",   output_path,
         "--weights",   str(latest_ckpt),
@@ -561,7 +563,7 @@ def screen_train(state: dict) -> None:
         state.setdefault("train", {})["last_config"] = cfg_path.name
         _save_state(state)
 
-        cmd = [_python_bin(), str(ROOT / "train.py"), "--conf_dir", str(cfg_path)]
+        cmd = [_python_bin(), str(ROOT / "core" / "train.py"), "--conf_dir", str(cfg_path)]
         # Derive run dir for pause file -- matches train.py's run isolation logic.
         # We use the base dir; train.py will pick the right timestamped subfolder.
         # The pause file goes in the base exp dir so train.py can always find it.
@@ -802,7 +804,7 @@ def screen_inference(state: dict) -> None:
         for i, in_file in enumerate(batch_files):
             out_file = OUTPUT_DIR / f"{in_file.stem}_restored.wav"
             cmd = [
-                _python_bin(), str(ROOT / "inference.py"),
+                _python_bin(), str(ROOT / "core" / "inference.py"),
                 "--in_wav", str(in_file),
                 "--out_wav", str(out_file),
                 "--conf_dir", str(cfg_path),
@@ -835,7 +837,7 @@ def screen_inference(state: dict) -> None:
 
     # Build command
     cmd = [
-        _python_bin(), str(ROOT / "inference.py"),
+        _python_bin(), str(ROOT / "core" / "inference.py"),
         "--in_wav", input_path,
         "--out_wav", output_path,
         "--conf_dir", str(cfg_path),
@@ -1035,7 +1037,7 @@ def _util_update() -> None:
     console.print("[green]Updated. Relaunching...[/]")
     console.file.flush()
     python = sys.executable
-    os.execv(python, [python, str(ROOT / "tui.py")])
+    os.execv(python, [python, str(ROOT / "utils" / "tui.py")])
 
 
 def _util_clean_chunks() -> None:

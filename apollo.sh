@@ -83,8 +83,8 @@ ok "dependencies up to date"
 if [ $# -gt 0 ]; then
     CMD="$1"; shift
     case "$CMD" in
-        train)     SCRIPT="train.py" ;;
-        inference) SCRIPT="inference.py" ;;
+        train)     SCRIPT="core/train.py" ;;
+        inference) SCRIPT="core/inference.py" ;;
         test)      SCRIPT="test.py" ;;
         python)    exec "$VENV_DIR/bin/python" "$@" ;;
         *)         exec "$VENV_DIR/bin/python" "$CMD" "$@" ;;
@@ -97,4 +97,4 @@ export VIRTUAL_ENV="$VENV_DIR"
 export PATH="$VENV_DIR/bin:$PATH"
 unset PYTHONHOME
 
-exec "$VENV_DIR/bin/python" "$SCRIPT_DIR/tui.py"
+exec "$VENV_DIR/bin/python" "$SCRIPT_DIR/utils/tui.py"

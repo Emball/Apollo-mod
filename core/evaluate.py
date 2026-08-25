@@ -40,7 +40,9 @@ import torch
 import torchaudio
 from omegaconf import OmegaConf
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_CORE_DIR  = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.dirname(_CORE_DIR)
+sys.path.insert(0, _CORE_DIR)
 from look2hear.system.audio_litmodule import _ms_log_stft_loss, _spectral_flatness_ratio, _hf_band_mae_cpu
 import look2hear.models.apollo
 import look2hear.losses
