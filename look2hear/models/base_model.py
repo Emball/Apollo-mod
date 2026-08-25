@@ -27,7 +27,13 @@ class BaseModel(nn.Module, PyTorchModelHubMixin):
     @staticmethod
     def from_pretrain(pretrained_model_conf_or_path, *args, **kwargs):
         from . import get
+        from omegaconf import DictConfig, ListConfig
+        from omegaconf.base import ContainerMetadata, Metadata
+        from typing import Any
 
+        torch.serialization.add_safe_globals(
+            [DictConfig, ListConfig, ContainerMetadata, Metadata, Any, dict, list]
+        )
         conf = torch.load(
             pretrained_model_conf_or_path, map_location="cpu", weights_only=True
         )
