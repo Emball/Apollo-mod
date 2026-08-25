@@ -977,6 +977,7 @@ def screen_utilities(state: dict) -> None:
             "Clean chunks folder",
             "Clean old checkpoints (keep best 5)",
             "View training runs",
+            "Update Apollo",
             "Back",
         ]
         idx = _pick("Utilities", items, hint="Enter=select  Esc=back")
@@ -989,6 +990,48 @@ def screen_utilities(state: dict) -> None:
             _util_clean_checkpoints()
         elif idx == 2:
             _util_view_runs()
+        elif idx == 3:
+            _util_update()
+
+
+def _util_update() -> None:
+    """Pull the latest code via git, then relaunch the TUI in place."""
+    console.clear()
+    console.print(_banner_panel())
+
+    if not (ROOT / ".git").exists():
+        console.print("[red]Not a git checkout -- cannot update.[/]")
+        console.input("Press Enter to return.")
+        return
+
+    import shutil
+    git_bin = shutil.which("git")
+    if not git_bin:
+        console.print("[red]git not found on PATH -- cannot update.[/]")
+        console.input("Press Enter to return.")
+        return
+
+    console.print("[cyan]Checking for updates...[/]\n")
+    result = subprocess.run(
+        [git_bin, "pull", "--ff-only"],
+        cwd=str(ROOT), capture_output=True, text=True,
+    )
+    console.print(result.stdout)
+    if result.returncode != 0:
+        console.print(result.stderr)
+        console.print("[red]Update failed -- local copy unchanged.[/]")
+        console.input("Press Enter to return.")
+        return
+
+    if "Already up to date" in result.stdout:
+        console.print("[green]Already up to date.[/]")
+        console.input("Press Enter to return.")
+        return
+
+    console.print("[green]Updated. Relaunching...[/]")
+    console.file.flush()
+    python = sys.executable
+    os.execv(python, [python, str(ROOT / "tui.py")])
 
 
 def _util_clean_chunks() -> None:
