@@ -44,7 +44,7 @@ def apply_optimizations(cfg: DictConfig) -> None:
     # Triton kernel cache (compiled kernels persist between runs)
     triton_cache = opt.get("triton_cache", True)
     if triton_cache:
-        cache_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".triton_cache")
+        cache_dir = os.path.join(_REPO_ROOT, ".triton_cache")
         os.makedirs(cache_dir, exist_ok=True)
         os.environ["TRITON_CACHE_DIR"] = cache_dir
 
@@ -110,7 +110,8 @@ _HOP_SAMPLES   = int(_CHUNK_SAMPLES * (1 - _OVERLAP))
 _SUPPORTED_EXTS = {".wav", ".mp3", ".flac"}
 
 # Models directory -- pretrained weights are looked up here automatically
-_MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+_REPO_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_MODELS_DIR = os.path.join(_REPO_ROOT, "models")
 
 # Pretrained model filenames to search for (base -> universal).
 # Set download URLs here once you have them; None = skip auto-download.
@@ -694,13 +695,12 @@ def prepare_data(cfg: DictConfig) -> None:
 
     Skips any split that is already chunked.
     """
-    # Anchor to the directory train.py lives in, not CWD.
-    _script_dir  = os.path.dirname(os.path.abspath(__file__))
-    train_chunks = os.path.join(_script_dir, cfg.datas.train_dir)
-    val_chunks   = os.path.join(_script_dir, cfg.datas.eval_dir)
+    # Anchor to repo root, not CWD.
+    train_chunks = os.path.join(_REPO_ROOT, cfg.datas.train_dir)
+    val_chunks   = os.path.join(_REPO_ROOT, cfg.datas.eval_dir)
 
     # Data source dirs live under data/<name>/train and data/<name>/val
-    data_root  = os.path.join(_script_dir, "data", cfg.exp.name)
+    data_root  = os.path.join(_REPO_ROOT, "data", cfg.exp.name)
     data_train = os.path.join(data_root, "train")
     data_val   = os.path.join(data_root, "val")
 
@@ -808,8 +808,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     prepare_data(cfg)
 
     # Verify chunks exist -- if data/ was empty, provide a clear error
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    train_lq   = os.path.join(script_dir, cfg.datas.train_dir, "LQ")
+    train_lq   = os.path.join(_REPO_ROOT, cfg.datas.train_dir, "LQ")
     if not os.path.isdir(train_lq) or not any(f.endswith(".wav") for f in os.listdir(train_lq)):
         _name = cfg.exp.name
         print_only("")
@@ -1487,9 +1486,8 @@ if __name__ == "__main__":
 
     # Derive data and chunk paths from exp.name if not explicitly set in config.
     # data/<name>/train, data/<name>/val, chunks/<name>/train, chunks/<name>/val
-    _script_dir = os.path.dirname(os.path.abspath(__file__))
-    _data_name_root   = os.path.join(_script_dir, "data",   cfg.exp.name)
-    _chunks_name_root = os.path.join(_script_dir, "chunks", cfg.exp.name)
+    _data_name_root   = os.path.join(_REPO_ROOT, "data",   cfg.exp.name)
+    _chunks_name_root = os.path.join(_REPO_ROOT, "chunks", cfg.exp.name)
 
     _default_train_dir = os.path.join("chunks", cfg.exp.name, "train")
     _default_eval_dir  = os.path.join("chunks", cfg.exp.name, "val")
@@ -1500,7 +1498,7 @@ if __name__ == "__main__":
         cfg.datas.eval_dir = _default_eval_dir
 
     # If loose _LQ/_HQ files exist in data/ root, move them into data/<name>/
-    _data_root = os.path.join(_script_dir, "data")
+    _data_root = os.path.join(_REPO_ROOT, "data")
     if os.path.isdir(_data_root):
         import shutil as _shutil
         _loose = [f for f in os.listdir(_data_root)

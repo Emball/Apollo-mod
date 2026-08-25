@@ -80,4 +80,4 @@ if not "%*"=="" (
 )
 
 :: 5. No arguments — launch TUI
-"%VENV_DIR%\Scripts\python.exe" "%SCRIPT_DIR%\tui.py"
+"%VENV_DIR%\Scripts\python.exe" "%SCRIPT_DIR%\utils\tui.py"

@@ -144,7 +144,8 @@ def _spectral_merge(original: "torch.Tensor", enhanced: "torch.Tensor",
     out   = _istft(S_out, length=T)
     return out
 
-_MODELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
+_REPO_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_MODELS_DIR = os.path.join(_REPO_ROOT, "models")
 
 KNOWN_MODELS = {
     "apollo": (

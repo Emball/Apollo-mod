@@ -240,7 +240,7 @@ def run_bulk(config: dict, input_dir: str | Path, output_dir: str | Path, print_
 
 def screen_degrade_audio(state: dict, console, _pick, _run_with_live_output, ROOT: Path) -> None:
     """Entry point called from tui.py."""
-    configs_dir = ROOT / "configs" / "degrade"
+    configs_dir = ROOT / "utils" / "degrade"
     configs = list_configs(configs_dir)
     if not configs:
         console.clear()
