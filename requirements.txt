@@ -15,6 +15,7 @@ huggingface-hub==0.20.3
 # Audio
 librosa==0.10.1
 soundfile==0.12.1
+scipy>=1.11.0
 auraloss==0.4.0
 
 # Data
