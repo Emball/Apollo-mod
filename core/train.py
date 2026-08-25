@@ -443,6 +443,56 @@ def _build_cached_aug_fn(cfg: "DictConfig"):
 
     return _apply
 
+_CHUNK_CACHE_DIR = os.path.join(_REPO_ROOT, "usr", "cache", "chunks")
+
+
+def _source_md5s(src_root: str) -> str:
+    """Return a stable hex digest over all LQ + HQ source files in src_root (sorted by name)."""
+    import hashlib
+    h = hashlib.md5()
+    lq_dir = os.path.join(src_root, "LQ")
+    hq_dir = os.path.join(src_root, "HQ")
+    for d in (lq_dir, hq_dir):
+        if not os.path.isdir(d):
+            continue
+        for fname in sorted(os.listdir(d)):
+            p = os.path.join(d, fname)
+            if not os.path.isfile(p):
+                continue
+            h.update(fname.encode())
+            fh = hashlib.md5()
+            with open(p, "rb") as f:
+                for block in iter(lambda: f.read(1 << 20), b""):
+                    fh.update(block)
+            h.update(fh.hexdigest().encode())
+    return h.hexdigest()
+
+
+def _chunk_cache_key(src_root: str, fixed_delay, aug_cfg) -> str:
+    """Stable cache key: source file md5s + chunk params + aug params."""
+    import hashlib, json as _json
+    params = {
+        "segment_sec": _CHUNK_SEC,
+        "overlap": _OVERLAP,
+        "fixed_delay": str(fixed_delay),
+        "aug": aug_cfg if aug_cfg is None else _json.dumps(
+            OmegaConf.to_container(aug_cfg, resolve=True), sort_keys=True
+        ),
+    }
+    h = hashlib.md5()
+    h.update(_source_md5s(src_root).encode())
+    h.update(_json.dumps(params, sort_keys=True).encode())
+    return h.hexdigest()[:16]
+
+
+def _chunk_cache_lookup(key: str, split: str) -> str | None:
+    """Return the cache chunk dir for this key+split if it exists and has WAV files, else None."""
+    d = os.path.join(_CHUNK_CACHE_DIR, key, split, "LQ")
+    if os.path.isdir(d) and any(f.endswith(".wav") for f in os.listdir(d)):
+        return os.path.join(_CHUNK_CACHE_DIR, key, split)
+    return None
+
+
 def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=None, fixed_delay: int = None) -> int:
     """
     Normalize src_root into LQ/ + HQ/ layout (if not already), then chunk all
@@ -704,15 +754,11 @@ def prepare_data(cfg: DictConfig) -> None:
 
     Layouts A and B are automatically reorganized into LQ/ + HQ/ in-place,
     then chunked into:
-        chunks/train/LQ/  chunks/train/HQ/
-        chunks/val/LQ/    chunks/val/HQ/
+        usr/cache/chunks/<key>/train/LQ|HQ
+        usr/cache/chunks/<key>/val/LQ|HQ
 
     Skips any split that is already chunked.
     """
-    # Anchor to repo root, not CWD.
-    train_chunks = os.path.join(_REPO_ROOT, cfg.datas.train_dir)
-    val_chunks   = os.path.join(_REPO_ROOT, cfg.datas.eval_dir)
-
     # Data source dirs live under data/<name>/train and data/<name>/val
     data_root  = os.path.join(_REPO_ROOT, "data", cfg.exp.name)
     data_train = os.path.join(data_root, "train")
@@ -725,8 +771,35 @@ def prepare_data(cfg: DictConfig) -> None:
     else:
         fixed_delay = None
 
-    _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, fixed_delay=fixed_delay)
-    _chunk_split(data_val,   val_chunks,   "val",   cached_aug_fn=None,          fixed_delay=fixed_delay)
+    aug_cfg = getattr(cfg.datas, "augmentation", None)
+
+    # Normalize source dirs so _source_md5s can hash them correctly before chunking.
+    _normalize_data_dir(data_train, "train")
+    _normalize_data_dir(data_val, "val")
+
+    # Chunks live in usr/cache/chunks/<key>/<split>/ keyed on (source md5s + params).
+    # Any config that requests the same dataset with the same params reuses the cache.
+    train_key = _chunk_cache_key(data_train, fixed_delay, aug_cfg)
+    val_key   = _chunk_cache_key(data_val,   fixed_delay, None)
+
+    train_chunks = _chunk_cache_lookup(train_key, "train")
+    if train_chunks:
+        print_only(f"[data/train] Cache hit ({train_key[:8]}...) -- skipping chunking.")
+    else:
+        train_chunks = os.path.join(_CHUNK_CACHE_DIR, train_key, "train")
+        _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, fixed_delay=fixed_delay)
+
+    val_chunks = _chunk_cache_lookup(val_key, "val")
+    if val_chunks:
+        print_only(f"[data/val]   Cache hit ({val_key[:8]}...) -- skipping chunking.")
+    else:
+        val_chunks = os.path.join(_CHUNK_CACHE_DIR, val_key, "val")
+        _chunk_split(data_val, val_chunks, "val", cached_aug_fn=None, fixed_delay=fixed_delay)
+
+    # Expose resolved absolute paths back into cfg so the datamodule picks them up.
+    with open_dict(cfg):
+        cfg.datas.train_dir = train_chunks
+        cfg.datas.eval_dir  = val_chunks
 
     # Val bootstrap from train chunks
     # If val is still empty after chunking (no data/val source exists),
@@ -822,7 +895,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     prepare_data(cfg)
 
     # Verify chunks exist -- if data/ was empty, provide a clear error
-    train_lq   = os.path.join(_REPO_ROOT, cfg.datas.train_dir, "LQ")
+    train_lq   = os.path.join(cfg.datas.train_dir, "LQ")
     if not os.path.isdir(train_lq) or not any(f.endswith(".wav") for f in os.listdir(train_lq)):
         _name = cfg.exp.name
         print_only("")
