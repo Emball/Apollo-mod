@@ -40,9 +40,11 @@ utils/                   -- TUI and tools
   degrade_audio.py       -- synthetic degradation pipeline
   degrade/               -- degradation JSON configs
 configs/                 -- training YAML configs (apollo.yaml, apollo_uni.yaml)
-dev/                     -- internal docs and experimental configs
+dev/                     -- internal docs and dev-only configs (stfl, stfl-og, stfl2)
   AGENTS.md
-  apollo_stfl2.yaml
+  apollo_stfl.yaml       -- active stfl run config (diagnostic branch)
+  apollo_stfl-og.yaml    -- original stfl config (reference)
+  apollo_stfl2.yaml      -- stfl2 experimental config
 data/                    -- training source audio (LQ/ + HQ/ pairs per split)
 chunks/                  -- legacy placeholder (unused; chunks live in usr/cache/chunks/)
 models/                  -- pretrained / downloaded weights
@@ -82,21 +84,21 @@ input/ output/           -- inference I/O staging dirs
 
 **Val audio rotation:** Saves exactly `val_songs` songs × 3 files (LQ/HQ/Restored) = N×3 files per val run. At training start a rotation schedule is computed so that every val song gets equal coverage by end of training. Each song's chunk is picked once at schedule-build time (`_lock_val_refs`) — one specific non-silent chunk, never re-picked — and stored in `_val_locked_refs`, so the same audio is always compared across val steps for a given song. `val_rotate_every: auto` derives the cadence from total configured steps; an integer overrides it manually. The schedule and locked refs are checkpointed and resume-stable. File writes run in a background thread so training resumes immediately. Old configs using `val_audio_pairs` still work via fallback.
 
-**Val perceptual metrics:** Five metrics computed after each val run: `sisdr` (legacy, used for checkpoint selection and early stopping), `msstft` (multi-scale log-STFT loss, 3 window sizes), `sfr` (spectral flatness ratio 8-22kHz — rising above 1.05 is an early overfitting signal), `hf_band_mae` (mean absolute log-magnitude error in the 13-19kHz transition band — primary signal for MP3 rolloff fine-tuning), `sdr` (Signal-to-Distortion Ratio — cheap signal, less noisy than sisdr). All five are logged to TensorBoard. The background write thread is joined in `on_validation_epoch_end` before Lightning reads metrics for checkpoint naming, so all appear in filenames.
+**Val perceptual metrics (diagnostic branch):** Four metrics computed live after each val run: `visqol` (perceptual quality score via pyvisqol — primary quality signal; lazy-loaded, silently skipped if not installed; runs on `visqol_fraction` of val pairs, default 1.0), `sdr` (Signal-to-Distortion Ratio), `sfr` (spectral flatness ratio 8-22kHz — rising above 1.05 is an early overfitting/artifact signal), `sisdr` (legacy, noisy). Optional `target_band_loss` (configurable Hz range, off by default) appends `tbl=` to console and checkpoint names when enabled. All metrics logged to TensorBoard. `msstft` and `hf_band_mae` removed from live val; available as offline helpers via `evaluate.py` for legacy checkpoint scoring.
 
-**Checkpoint monitoring:** Two separate weighting systems exist:
+**Checkpoint monitoring (diagnostic branch):** Two separate weighting systems exist:
 
-1. **Checkpoint save trigger** — `AudioLightningModule.on_validation_epoch_end()` logs `val_composite` using weights `msstft=0.40, hfmae=0.35, sfr=0.15, sisdr=0.10`. The `ModelCheckpoint` callback monitors `val_composite` (min) to decide whether to save. This determines which checkpoints get written to disk.
+1. **Checkpoint save trigger** — `AudioLightningModule.on_validation_epoch_end()` logs `val_composite` using weights `visqol=0.50, sdr=0.25, sfr=0.15, sisdr=0.10`. The `ModelCheckpoint` callback monitors `val_composite` (min) to decide whether to save.
 
-2. **Filename rank badge** — `RankBadger` in `train.py` renames checkpoints after save using weights `msstft=0.40, hfmae=0.30, sfr=0.15, sisdr=0.10, sdr=0.05`. This is display-only; the save trigger still uses the litmodule's composite. `[1]` = lowest composite score (best).
+2. **Filename rank badge** — `RankBadger` in `train.py` renames checkpoints after save using the same weights. `[1]` = lowest composite score (best).
 
-All checkpoints are kept (`save_top_k=-1` enforced in code). `evaluate.py` uses a third weighting that includes VISQOL (visqol=0.40, hfmae=0.25, msstft=0.20, sfr=0.10, sdr=0.05) — offline ranking only.
+All checkpoints are kept (`save_top_k=-1` enforced in code). `evaluate.py` uses a separate weighting that includes msstft/hfmae for legacy checkpoint compatibility — offline ranking only.
 
-**Checkpoint filenames:** Format is `[rank]-step={step:06d}-{val_loss:.3f}-{val_msstft:.4f}-{val_sfr:.3f}-{val_hfmae:.4f}-{val_sdr:.3f}.ckpt`. `[rank]` is prepended by the `RankBadger` callback after each save.
+**Checkpoint filenames (diagnostic branch):** Format is `[rank]-step={step:06d}-sisdr={val_loss:.3f}-visqol={val_visqol:.3f}-sdr={val_sdr:.3f}-sfr={val_sfr:.3f}.ckpt`. `tbl={val_tbl:.4f}` is appended when `target_band_loss_enabled: true`. `[rank]` is prepended by the `RankBadger` callback after each save.
 
 **Baseline eval:** On fresh runs (no resume), `trainer.validate()` is called on the pretrained weights before `trainer.fit()`. Prints `[baseline] sisdr=XX.XXX` so improvement is immediately visible against the starting point.
 
-**StepPrinter:** TQDM is disabled. Prints one line per optimizer step. `it/s` counts every batch (including accumulation batches) for consistency with pre-accumulation baselines. Val time is excluded from the rate. Last val metrics are shown inline on every training line once available, ordered `msstft, sfr, hfmae, sdr, sisdr` (perceptual signals first, sisdr last since it's the noisiest and least perceptually meaningful).
+**StepPrinter (diagnostic branch):** TQDM is disabled. Prints one line per optimizer step. `it/s` counts every batch (including accumulation batches) for consistency with pre-accumulation baselines. Val time is excluded from the rate. Last val metrics shown inline once available: `visqol, sdr, sfr, sisdr` (perceptual zoom-out first, sisdr last). `tbl=` appended when target band loss is enabled.
 
 **Band weight:** `MultiFrequencyGenLoss` applies a penalty curve over STFT bins, shape controlled by `band_weight_shape`: `"gaussian"` (default, raised curve peaking at `band_weight_center_hz` with width `band_weight_sigma_hz`) or `"trapezoid"` (flat-topped between `band_weight_lo_hz`/`band_weight_hi_hz` with `band_weight_ramp_hz` soft edges — useful for targeting a specific rolloff/transition band). `band_weight_gain=0` is perfectly flat regardless of shape. Replaces the old `hf_boost` + `hf_threshold_ratio` step function. Config keys `hf_boost` and `hf_threshold_ratio` are accepted for back-compat but ignored.
 
@@ -117,6 +119,8 @@ Feature matching loss uses fresh feature maps from the generator step, not stale
 
 **Startup update check:** `apollo.bat` runs `git pull --ff-only` before installing dependencies, if the working dir is a git checkout and `git` is on PATH. Failure is non-fatal — a warning is printed and it continues with the local copy.
 
+**Dev mode:** `apollo.bat --dev` sets `APOLLO_DEV=1` before launching the TUI. When set, `_list_configs()` in `tui.py` includes `dev/*.yaml` in the config picker alongside `configs/*.yaml`. The flag is stripped before any other arg parsing — `apollo.bat --dev train ...` works as expected.
+
 **Pretrained checkpoint loading:** `BaseModel.from_pretrain()` allow-lists OmegaConf's `DictConfig`/`ListConfig` classes via `torch.serialization.add_safe_globals` before `torch.load(..., weights_only=True)`, since the upstream HuggingFace checkpoint's `infos` dict contains a pickled `DictConfig`.
 
 ---
@@ -125,7 +129,7 @@ Feature matching loss uses fresh feature maps from the generator step, not stale
 
 | Branch | Contains |
 |--------|----------|
-| `main` | Spectral merge engine, TUI ensemble picker, aux checkpoint blending, `_ensure_wav` in-place MP3→WAV conversion, short-chunk STFT fix, noise augmentation disabled. stfl configs live on diagnostic only. |
-| `diagnostic/revert-training-step` | All of main plus: training step revert (discriminator-first, fresh feature maps), TF32 unconditionally disabled, AMP via Lightning precision plugin, stfl/stfl-og configs. |
+| `main` | Spectral merge engine, TUI ensemble picker, aux checkpoint blending, `_ensure_wav` in-place MP3→WAV conversion, short-chunk STFT fix, noise augmentation disabled. Dev mode (`--dev` flag). stfl configs live in `dev/` on diagnostic only. |
+| `diagnostic/revert-training-step` | All of main plus: training step revert (discriminator-first, fresh feature maps), configurable TF32, AMP via Lightning precision plugin, VISQOL live metrics, stfl/stfl-og/stfl2 configs in `dev/`. |
 
 The diagnostic branch contains four training fixes that have not yet been validated. If they resolve the stfl regression, they will be merged to main.

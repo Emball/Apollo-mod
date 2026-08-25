@@ -37,6 +37,7 @@ ROOT = Path(__file__).parent.parent.resolve()  # repo root (parent of utils/)
 sys.path.insert(0, str(ROOT / "core"))          # for lazy imports of evaluate, degrade_audio
 sys.path.insert(0, str(ROOT / "utils"))         # for degrade_audio co-located in utils/
 CONFIGS_DIR = ROOT / "configs"
+DEV_CONFIGS_DIR = ROOT / "dev"
 RUNS_DIR = ROOT / "runs"
 INPUT_DIR = ROOT / "input"
 OUTPUT_DIR = ROOT / "output"
@@ -224,7 +225,10 @@ def _pick(title: str, items: list[str], hint: str = "", subtitle: str = "", star
 def _list_configs() -> list[Path]:
     if not CONFIGS_DIR.exists():
         return []
-    return sorted(CONFIGS_DIR.glob("*.yaml"))
+    configs = list(CONFIGS_DIR.glob("*.yaml"))
+    if os.environ.get("APOLLO_DEV") and DEV_CONFIGS_DIR.exists():
+        configs += [p for p in DEV_CONFIGS_DIR.glob("*.yaml") if p.name != "AGENTS.md"]
+    return sorted(configs, key=lambda p: p.stem)
 
 
 def _config_summary(cfg_path: Path) -> str:

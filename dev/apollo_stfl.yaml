@@ -1,0 +1,171 @@
+exp:
+  dir: ./runs
+  name: apollo_stfl
+
+resume: true
+
+optimizations:
+  tf32: true
+  cudnn_benchmark: true
+  expandable_segments: true
+  triton_cache: true
+  ram_limit_fraction: 0.95
+training:
+  n_layers_to_freeze: 4
+  val_audio_pairs: 6
+  val_rotate_every: 200
+  grad_accum_steps: 1
+
+datas:
+  _target_: paired_datamodule.PairedAudioDataModule
+  sr: 44100
+  segment_sec: 3
+  batch_size: 2
+  num_workers: 2
+  pin_memory: false
+  val_bootstrap_chunks: 15
+  align_data: 0
+  augmentation:
+    live:
+      enabled: true
+      stereo_alternation:
+        enabled: true
+        prob: 1.0
+      gain:
+        enabled: true
+        prob: 0.5
+        db_max: 1.5
+      polarity:
+        enabled: true
+        prob: 0.5
+      pitch_shift:
+        enabled: false
+        prob: 0.5
+        semitones_max: 1.5
+      noise:
+        enabled: false  # disabled -- corrupts discriminator HF gradient signal
+        prob: 0.5
+        sigma: 0.002
+      mp3_degradation:
+        enabled: false
+        prob: 0.5
+        kbps_min: 64
+        kbps_max: 256
+    cached:
+      enabled: false
+      cached_variants: 1
+      mono_channel:
+        enabled: false
+        fraction: 1.0
+      gain:
+        enabled: false
+        fraction: 0.5
+        db_max: 1.5
+      polarity:
+        enabled: false
+        fraction: 0.5
+      pitch_shift:
+        enabled: false
+        fraction: 0.5
+        semitones_max: 1.5
+      noise:
+        enabled: false
+        fraction: 0.5
+        sigma: 0.002
+      mp3_degradation:
+        enabled: false
+        fraction: 0.5
+        kbps_min: 64
+        kbps_max: 256
+
+model:
+  _target_: look2hear.models.apollo.Apollo
+  sr: 44100
+  win: 20
+  feature_dim: 384
+  layer: 6
+
+discriminator:
+  window_weight_boost: false
+  _target_: look2hear.discriminators.frequencydis.MultiFrequencyDiscriminator
+  nch: 2
+  window: [32, 64, 128, 256, 512, 1024, 2048]
+
+optimizer:
+  type: AdamW
+  lr_g: 0.00001
+  lr_d: 0.000001
+  weight_decay: 0.01
+  betas_g: [0.9, 0.999]
+  betas_d: [0.5, 0.99]
+
+scheduler_g:
+  _target_: torch.optim.lr_scheduler.StepLR
+  step_size: 2
+  gamma: 0.98
+
+scheduler_d:
+  _target_: torch.optim.lr_scheduler.StepLR
+  step_size: 2
+  gamma: 0.98
+
+loss_g:
+  _target_: look2hear.losses.gan_losses.MultiFrequencyGenLoss
+  eps: 1e-8
+  band_weight_center_hz: 15000.0
+  band_weight_sigma_hz: 3000.0
+  band_weight_gain: 0.0            # disabled -- flat loss for baseline run
+
+loss_d:
+  _target_: look2hear.losses.gan_losses.MultiFrequencyDisLoss
+  eps: 1e-8
+
+metrics:
+  _target_: look2hear.losses.MultiSrcNegSDR
+  sdr_type: sisdr
+
+system:
+  _target_: look2hear.system.audio_litmodule.AudioLightningModule
+  gradient_checkpointing: true
+  grad_accum_steps: ${training.grad_accum_steps}
+  visqol_fraction: 1.0
+  target_band_loss_enabled: false
+  target_band_loss_lo_hz: 13000.0
+  target_band_loss_hi_hz: 19000.0
+
+early_stopping:
+  _target_: pytorch_lightning.callbacks.EarlyStopping
+  monitor: val_loss
+  patience: 100
+  mode: min
+  verbose: true
+
+checkpoint:
+  _target_: pytorch_lightning.callbacks.ModelCheckpoint
+  dirpath: ${exp.dir}/${exp.name}/checkpoints
+  monitor: val_loss
+  mode: min
+  verbose: true
+  save_top_k: -1
+  save_last: false
+  filename: 'step={step:06d}-sisdr={val_loss:.3f}-visqol={val_visqol:.3f}-sdr={val_sdr:.3f}-sfr={val_sfr:.3f}'
+
+logger:
+  _target_: pytorch_lightning.loggers.TensorBoardLogger
+  save_dir: ${exp.dir}/${exp.name}/logs
+  name: ""
+  version: ""
+  log_graph: false
+
+trainer:
+  _target_: pytorch_lightning.Trainer
+  devices: [0]
+  max_epochs: 400
+  default_root_dir: ${exp.dir}/${exp.name}/
+  accelerator: cuda
+  precision: 16-mixed
+  limit_train_batches: 1.0
+  limit_val_batches: 100
+  fast_dev_run: false
+  val_check_interval: 50
+  check_val_every_n_epoch: null
