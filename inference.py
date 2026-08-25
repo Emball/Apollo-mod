@@ -91,8 +91,13 @@ def _spectral_merge(original: "torch.Tensor", enhanced: "torch.Tensor",
                            length=length, return_complex=False)
 
     T = enhanced.shape[-1]
-    S_orig = _stft(original[..., :T])  # [2, F, frames]
-    S_enh  = _stft(enhanced)            # [2, F, frames]
+    # torch.stft reflect-padding requires at least n_fft samples; pad short chunks
+    pad = max(0, n_fft - T)
+    if pad > 0:
+        enhanced = torch.nn.functional.pad(enhanced, (0, pad))
+        original = torch.nn.functional.pad(original, (0, pad))
+    S_orig = _stft(original[..., :enhanced.shape[-1]])  # [2, F, frames]
+    S_enh  = _stft(enhanced)                              # [2, F, frames]
 
     mag_orig = S_orig.abs()
     mag_enh  = S_enh.abs()
