@@ -12,7 +12,9 @@ Launched from tui.py as a TUI screen, or standalone:
 Chain step types:
     wma_encode   -- {bitrate}                          ffmpeg -c:a wmav2
     mp3_lame     -- {quality} or {bitrate}              ffmpeg -c:a libmp3lame
-    mp3_fhg      -- {bitrate, enc_delay, codec_name}     acmenc (Fraunhofer IIS)
+    mp3_fhg      -- {bitrate, enc_delay, codec_name}     acmenc (Fraunhofer IIS) --
+                    requires "external_codecs.acmenc" set to a local acmenc.exe
+                    path in the config; acmenc is a custom install, not shipped
     lowpass      -- {cutoff_hz, poles}                   ffmpeg -af lowpass
     highpass     -- {cutoff_hz, poles}                   ffmpeg -af highpass
 
@@ -50,7 +52,7 @@ def load_config(config_path: str | Path) -> dict:
     cfg = json.loads(path.read_text())
     cfg.setdefault("tools", {})
     cfg["tools"].setdefault("ffmpeg", "ffmpeg")
-    cfg["tools"].setdefault("acmenc", "acmenc")
+    cfg.setdefault("external_codecs", {})
     if "chain" not in cfg or not cfg["chain"]:
         raise DegradeError(f"Config {path} has no 'chain' steps.")
     return cfg
@@ -96,14 +98,20 @@ def _step_mp3_lame(step: dict, src: Path, tmpdir: Path, n: int, tools: dict, pri
     return out
 
 
-def _step_mp3_fhg(step: dict, src_wav: Path, tmpdir: Path, n: int, tools: dict, print_fn, outdir_override: Path | None = None) -> Path:
+def _step_mp3_fhg(step: dict, src_wav: Path, tmpdir: Path, n: int, external_codecs: dict, print_fn, outdir_override: Path | None = None) -> Path:
     bitrate = step.get("bitrate", 192)
     enc_delay = step.get("enc_delay", 672)
     codec_name = step.get("codec_name", FHG_CODEC_NAME)
     out = (outdir_override / f"gen{n}_mp3.mp3") if outdir_override else (tmpdir / f"gen{n}_mp3.mp3")
-    acmenc = tools["acmenc"]
+    acmenc = external_codecs.get("acmenc")
+    if not acmenc:
+        raise DegradeError(
+            "mp3_fhg step requires 'external_codecs.acmenc' in the config -- "
+            "set it to the path to acmenc.exe on this machine. acmenc is a "
+            "custom local install and is not shipped with this repo."
+        )
     if not shutil.which(acmenc) and not Path(acmenc).exists():
-        raise DegradeError(f"acmenc not found at '{acmenc}' -- set tools.acmenc in the config.")
+        raise DegradeError(f"acmenc not found at '{acmenc}' -- check external_codecs.acmenc in the config.")
     cmd = [
         acmenc, "-c", codec_name,
         "--enc-delay", str(enc_delay),
@@ -142,6 +150,7 @@ def run_chain(config: dict, input_path: str | Path, output_dir: str | Path, prin
         raise DegradeError(f"Input not found: {input_path}")
 
     tools = config["tools"]
+    external_codecs = config["external_codecs"]
     chain = config["chain"]
     basename = _sanitize_basename(input_path.stem)
 
@@ -172,7 +181,7 @@ def run_chain(config: dict, input_path: str | Path, output_dir: str | Path, prin
                 if current.suffix.lower() != ".wav":
                     current = _decode_to_wav(current, tmpdir, i, tools, print_fn)
                 dest_dir = output_dir if is_last else None
-                current = _step_mp3_fhg(step, current, tmpdir, i, tools, print_fn, outdir_override=dest_dir)
+                current = _step_mp3_fhg(step, current, tmpdir, i, external_codecs, print_fn, outdir_override=dest_dir)
                 if is_last:
                     final = output_dir / f"{basename}_degraded.mp3"
                     if current != final:
