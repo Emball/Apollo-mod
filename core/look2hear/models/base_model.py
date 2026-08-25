@@ -28,15 +28,21 @@ class BaseModel(nn.Module, PyTorchModelHubMixin):
     def from_pretrain(pretrained_model_conf_or_path, *args, **kwargs):
         from . import get
         from omegaconf import DictConfig, ListConfig
-        from omegaconf.base import ContainerMetadata, Metadata
-        from typing import Any
 
-        torch.serialization.add_safe_globals(
-            [DictConfig, ListConfig, ContainerMetadata, Metadata, Any, dict, list]
-        )
-        conf = torch.load(
-            pretrained_model_conf_or_path, map_location="cpu", weights_only=True
-        )
+        if hasattr(torch.serialization, "add_safe_globals"):
+            from omegaconf.base import ContainerMetadata, Metadata
+            from typing import Any
+            torch.serialization.add_safe_globals(
+                [DictConfig, ListConfig, ContainerMetadata, Metadata, Any, dict, list]
+            )
+            conf = torch.load(
+                pretrained_model_conf_or_path, map_location="cpu", weights_only=True
+            )
+        else:
+            # torch <2.4 — add_safe_globals unavailable; checkpoint is from trusted HuggingFace source
+            conf = torch.load(
+                pretrained_model_conf_or_path, map_location="cpu", weights_only=False
+            )
 
         model_class = get(conf["model_name"])
         # model_class = get("Conv_TasNet")
