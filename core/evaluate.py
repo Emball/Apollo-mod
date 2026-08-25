@@ -5,12 +5,12 @@ Launched from tui.py as a TUI screen, or standalone:
     python evaluate.py --conf_dir configs/apollo_stfl2.yaml
 
 Metrics computed per checkpoint:
-    hfmae   -- HF band MAE 13-19kHz (primary MP3 rolloff signal)
-    msstft  -- Multi-scale log-STFT loss
-    sfr     -- Spectral flatness ratio (overfitting signal)
-    sdr     -- Signal-to-Distortion Ratio (scale-invariant)
-    visqol  -- ViSQOL perceptual score (requires: pip install pyvisqol)
-    sisdr   -- SI-SDR (legacy, inherited from upstream)
+    visqol  -- ViSQOL perceptual score (primary; requires: pip install pyvisqol)
+    sdr     -- Signal-to-Distortion Ratio (waveform integrity)
+    sfr     -- Spectral flatness ratio (artifact canary)
+    sisdr   -- SI-SDR (legacy, noisy -- low weight)
+    msstft  -- Multi-scale log-STFT loss (computed here; not in live training)
+    hfmae   -- HF band MAE (configurable; computed here for legacy checkpoints)
 
 Ranking weights (evaluate.py only -- offline, VISQOL-anchored):
     visqol=0.40, hfmae=0.25, msstft=0.20, sfr=0.10, sdr=0.05
@@ -53,11 +53,12 @@ _SR = 44100
 # Weights (evaluate.py offline ranking -- VISQOL-anchored)
 # ---------------------------------------------------------------------------
 _EVAL_WEIGHTS = {
-    "visqol": 0.40,
-    "hfmae":  0.25,
-    "msstft": 0.20,
-    "sfr":    0.10,
-    "sdr":    0.05,
+    "visqol": 0.50,
+    "sdr":    0.25,
+    "sfr":    0.15,
+    "sisdr":  0.10,
+    "msstft": 0.00,  # kept for display; excluded from composite (superseded by visqol)
+    "hfmae":  0.00,  # kept for display; excluded from composite (use target_band_loss in config)
 }
 
 # Metrics where higher = better (will be inverted during normalization)

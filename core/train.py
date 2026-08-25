@@ -1149,6 +1149,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         val_rotate_every=cfg.training.get("val_rotate_every", "auto"),
         gradient_checkpointing=cfg.system.get("gradient_checkpointing", False),
         grad_accum_steps=cfg.training.get("grad_accum_steps", 1),
+        visqol_fraction=cfg.system.get("visqol_fraction", 1.0),
+        target_band_loss_enabled=cfg.system.get("target_band_loss_enabled", False),
+        target_band_loss_lo_hz=cfg.system.get("target_band_loss_lo_hz", 13000.0),
+        target_band_loss_hi_hz=cfg.system.get("target_band_loss_hi_hz", 19000.0),
     )
 
     # Callbacks
@@ -1198,17 +1202,17 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             total = self._epoch_batches
             pct   = 100 * done / total
             # Show last val metrics inline if available
-            sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
+            visqol = getattr(pl_module, "_last_val_visqol", None)
             sdr    = getattr(pl_module, "_last_val_sdr",    None)
-            msstft = getattr(pl_module, "_last_val_msstft", None)
             sfr    = getattr(pl_module, "_last_val_sfr",    None)
-            hfmae  = getattr(pl_module, "_last_val_hfmae",  None)
+            sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
+            tbl    = getattr(pl_module, "_last_val_tbl",    None)
             val_parts = []
-            if msstft is not None: val_parts.append(f"msstft={float(msstft):.4f}")
-            if sfr    is not None: val_parts.append(f"sfr={float(sfr):.3f}")
-            if hfmae  is not None: val_parts.append(f"hfmae={float(hfmae):.4f}")
+            if visqol is not None: val_parts.append(f"visqol={float(visqol):.3f}")
             if sdr    is not None: val_parts.append(f"sdr={float(sdr):.3f}")
+            if sfr    is not None: val_parts.append(f"sfr={float(sfr):.3f}")
             if sisdr  is not None: val_parts.append(f"sisdr={-float(sisdr):.3f}")
+            if tbl    is not None: val_parts.append(f"tbl={float(tbl):.4f}")
             val_str = "  " + "  ".join(val_parts) if val_parts else ""
             print(
                 f"\r  {pct:5.1f}%  step={trainer.global_step}  "
@@ -1257,19 +1261,19 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             if hasattr(self, '_val_elapsed'):
                 self._val_elapsed += val_dur
             if not getattr(self, '_val_sanity', True):
-                sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
+                visqol = getattr(pl_module, "_last_val_visqol", None)
                 sdr    = getattr(pl_module, "_last_val_sdr",    None)
-                msstft = getattr(pl_module, "_last_val_msstft", None)
                 sfr    = getattr(pl_module, "_last_val_sfr",    None)
-                hfmae  = getattr(pl_module, "_last_val_hfmae",  None)
+                sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
+                tbl    = getattr(pl_module, "_last_val_tbl",    None)
                 parts = []
-                if msstft is not None: parts.append(f"msstft={float(msstft):.4f}")
+                if visqol is not None: parts.append(f"visqol={float(visqol):.3f}")
+                if sdr    is not None: parts.append(f"sdr={float(sdr):.3f}")
                 if sfr    is not None:
                     flag = " noise^" if float(sfr) > 1.05 else ""
                     parts.append(f"sfr={float(sfr):.3f}{flag}")
-                if hfmae  is not None: parts.append(f"hfmae={float(hfmae):.4f}")
-                if sdr    is not None: parts.append(f"sdr={float(sdr):.3f}")
                 if sisdr  is not None: parts.append(f"sisdr={-float(sisdr):.3f}")
+                if tbl    is not None: parts.append(f"tbl={float(tbl):.4f}")
                 if parts:
                     print(f"\n  [val] {' '.join(parts)}  ({val_dur:.1f}s)", flush=True)
 
@@ -1287,7 +1291,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         lowest composite score. Runs in a background thread.
         """
 
-        _WEIGHTS = {"sisdr": 0.10, "msstft": 0.40, "sfr": 0.15, "hfmae": 0.30, "sdr": 0.05}
+        # visqol: higher = better (invert in composite). sdr: higher = better (invert).
+        # sfr: lower = better. sisdr: higher = better (invert). tbl: lower = better (optional).
+        _WEIGHTS = {"visqol": 0.50, "sdr": 0.25, "sfr": 0.15, "sisdr": 0.10}
 
         def on_save_checkpoint(self, trainer, pl_module, checkpoint_dict):
             import threading
@@ -1304,11 +1310,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 files = [f for f in os.listdir(ckpt_dir) if f.endswith(".ckpt")]
 
                 pats = {
-                    "sisdr":  re.compile(r"sisdr=(-?[\d.]+)"),
-                    "msstft": re.compile(r"msstft=(-?[\d.]+)"),
-                    "sfr":    re.compile(r"sfr=(-?[\d.]+)"),
-                    "hfmae":  re.compile(r"hfmae=(-?[\d.]+)"),
+                    "visqol": re.compile(r"visqol=(-?[\d.]+)"),
                     "sdr":    re.compile(r"(?<![a-z])sdr=(-?[\d.]+)"),
+                    "sfr":    re.compile(r"sfr=(-?[\d.]+)"),
+                    "sisdr":  re.compile(r"sisdr=(-?[\d.]+)"),
                 }
 
                 parsed = []
@@ -1335,6 +1340,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                     lo, hi = min(present), max(present)
                     norm_ranges[key] = (lo, hi)
 
+                # Metrics where higher = better (invert so 0 = best after norm)
+                _invert = {"visqol", "sdr", "sisdr"}
+
                 def composite(vals):
                     total_w = 0.0
                     score = 0.0
@@ -1344,11 +1352,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                         lo, hi = norm_ranges[key]
                         span = hi - lo
                         n = 0.0 if span == 0 else (vals[key] - lo) / span
-                        if key == "sisdr":
-                            n = 1.0 - n  # invert: higher sisdr -> lower (better) score
+                        if key in _invert:
+                            n = 1.0 - n
                         score += weight * n
                         total_w += weight
-                    # Renormalize if some metrics were missing for this file
                     return score / total_w if total_w > 0 else float("inf")
 
                 scored = [(composite(v), f, c) for v, f, c in parsed]
@@ -1397,10 +1404,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         checkpoint.filename = (
             "{step:06d}"
             "-{val_loss:.3f}"
-            "-{val_msstft:.4f}"
-            "-{val_sfr:.3f}"
-            "-{val_hfmae:.4f}"
+            "-{val_visqol:.3f}"
             "-{val_sdr:.3f}"
+            "-{val_sfr:.3f}"
         )
         callbacks.append(checkpoint)
 
@@ -1437,15 +1443,14 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             try:
                 m = trainer.callback_metrics
                 vl     = m.get("val_loss",   None)
-                msstft = m.get("val_msstft", None)
+                visqol = m.get("val_visqol", None)
+                sdr    = m.get("val_sdr",    None)
                 sfr    = m.get("val_sfr",    None)
-                hfmae  = m.get("val_hfmae",  None)
-                # Match Lightning filename format exactly
                 parts = [f"{step:06d}"]
                 if vl     is not None: parts.append(f"val_loss={float(vl):.3f}")
-                if msstft is not None: parts.append(f"val_msstft={float(msstft):.4f}")
+                if visqol is not None: parts.append(f"val_visqol={float(visqol):.3f}")
+                if sdr    is not None: parts.append(f"val_sdr={float(sdr):.3f}")
                 if sfr    is not None: parts.append(f"val_sfr={float(sfr):.3f}")
-                if hfmae  is not None: parts.append(f"val_hfmae={float(hfmae):.4f}")
                 fname = "-".join(parts) + ".ckpt"
             except Exception:
                 fname = f"{step:06d}.ckpt"
