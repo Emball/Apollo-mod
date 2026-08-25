@@ -1042,10 +1042,17 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             model = _load_weights(local_path, feature_dim)
             print_only("[weights] Weights loaded.")
         else:
-            # Final fallback -- HuggingFace hub, matched to feature_dim.
-            is_uni = (feature_dim == 384)
+            # Final fallback -- HuggingFace hub (256-dim only; no uni model exists on HF).
+            if feature_dim == 384:
+                raise FileNotFoundError(
+                    "[weights] feature_dim=384 requires a local universal checkpoint, "
+                    "but none was found in models/. "
+                    "Place apollo_model_uni.ckpt in the models/ folder, "
+                    "or set weights_path in your config to point at it explicitly. "
+                    "The JusperLee/Apollo HuggingFace repo does not host a 384-dim checkpoint."
+                )
             hf_repo  = "JusperLee/Apollo"
-            hf_file  = "pytorch_model_uni.bin" if is_uni else "pytorch_model.bin"
+            hf_file  = "pytorch_model.bin"
             print_only(f"[weights] No local model found in models/ -- downloading from HuggingFace ({hf_file})...")
             from huggingface_hub import hf_hub_download
             weights_path = hf_hub_download(repo_id=hf_repo, filename=hf_file)
