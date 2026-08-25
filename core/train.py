@@ -680,7 +680,7 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
                 print_only(f"[data/{split_name}]   Cached {done_conv[0]}/{len(needs_cache)}: {stem}")
             return stem, new_lq, new_hq
 
-        n_conv = min(len(needs_cache), os.cpu_count() or 4)
+        n_conv = min(len(needs_cache), 2)  # FFmpeg is disk+CPU heavy; >2 concurrent thrashes the system
         with _cf.ThreadPoolExecutor(max_workers=n_conv) as ex:
             for stem, lq_p, hq_p in ex.map(_cache_stem, sorted(needs_cache)):
                 wav_paths[stem] = (lq_p, hq_p)
