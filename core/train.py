@@ -118,8 +118,10 @@ _CACHE_DIR  = os.path.join(_REPO_ROOT, "usr", "cache")
 # Pretrained model filenames to search for (base -> universal).
 # Set download URLs here once you have them; None = skip auto-download.
 _PRETRAINED_MODELS = {
-    "apollo_model.ckpt":     None,  # base model   (feature_dim=256)
-    "apollo_model_uni.ckpt": None,  # universal     (feature_dim=384)
+    "apollo.ckpt":           None,  # base model   (feature_dim=256)
+    "apollo_uni.ckpt":       None,  # universal     (feature_dim=384)
+    "apollo_model.ckpt":     None,  # legacy name   (feature_dim=256)
+    "apollo_model_uni.ckpt": None,  # legacy name   (feature_dim=384)
     "pytorch_model.bin":     None,  # HF bin format (feature_dim=256)
 }
 
@@ -1018,9 +1020,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             os.makedirs(_MODELS_DIR, exist_ok=True)
             is_uni = (feature_dim == 384)
             scan_order = (
-                ["apollo_model_uni.ckpt", "apollo_model.ckpt", "pytorch_model.bin"]
+                ["apollo_uni.ckpt", "apollo_model_uni.ckpt", "apollo.ckpt", "apollo_model.ckpt", "pytorch_model.bin"]
                 if is_uni else
-                ["apollo_model.ckpt", "pytorch_model.bin", "apollo_model_uni.ckpt"]
+                ["apollo.ckpt", "apollo_model.ckpt", "pytorch_model.bin", "apollo_uni.ckpt", "apollo_model_uni.ckpt"]
             )
             for fname in scan_order:
                 candidate = os.path.join(_MODELS_DIR, fname)
