@@ -47,7 +47,15 @@ class BaseModel(nn.Module, PyTorchModelHubMixin):
         model_class = get(conf["model_name"])
         # model_class = get("Conv_TasNet")
         model = model_class(*args, **kwargs)
-        model.load_state_dict(conf["state_dict"], strict=False)
+        model_state = model.state_dict()
+        filtered = {
+            k: v for k, v in conf["state_dict"].items()
+            if k in model_state and v.shape == model_state[k].shape
+        }
+        skipped = len(conf["state_dict"]) - len(filtered)
+        if skipped:
+            print(f"[weights] Skipped {skipped} mismatched keys (shape mismatch — expected when feature_dim differs from pretrained checkpoint)")
+        model.load_state_dict(filtered, strict=False)
         return model
 
     def serialize(self):
