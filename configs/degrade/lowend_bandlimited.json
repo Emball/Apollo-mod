@@ -1,0 +1,14 @@
+{
+  "name": "lowend_bandlimited",
+  "description": "Lowpass to simulate MP3-era HF rolloff, then a lighter 2-pass MP3 chain",
+  "tools": {
+    "ffmpeg": "ffmpeg",
+    "acmenc": "C:\\Portable\\acmenc\\acmenc.exe"
+  },
+  "chain": [
+    { "type": "lowpass", "cutoff_hz": 16000, "poles": 2 },
+    { "type": "highpass", "cutoff_hz": 30, "poles": 1 },
+    { "type": "mp3_lame", "quality": 4 },
+    { "type": "mp3_fhg", "bitrate": 192, "enc_delay": 672 }
+  ]
+}

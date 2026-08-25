@@ -38,7 +38,7 @@ The GitHub wiki (`Changes-and-improvements` page, repo `Emball/Apollo-mod.wiki.g
 | `evaluate.py` | Offline checkpoint evaluator. Launched from TUI (Evaluate screen) or standalone (`python evaluate.py --conf_dir ...`). Reads metrics already encoded in checkpoint filenames; only runs inference for missing ones. Adds SDR and optional VISQOL (requires `pip install pyvisqol`). VISQOL scores cached in `<ckpt_dir>/.eval_cache.json`. Ranking weights: visqol=0.40, hfmae=0.25, msstft=0.20, sfr=0.10, sdr=0.05 — separate from RankBadger's training-time weights. |
 | `configs/apollo.yaml` | Base config (`feature_dim=256`). |
 | `configs/apollo_uni.yaml` | Universal config (`feature_dim=384`). |
-| `degrade_audio.bat` | Windows batch script for synthetic degradation pipeline. Single file or `/bulk` folder mode. Chain: WMA 128k → LAME q5 → FhG 192k → LAME q5 → FhG 192k → LAME q2 → FhG 192k (10 steps total). Requires FFmpeg on PATH and `acmenc.exe` at `C:\Portable\acmenc\`. Output written to `<outdir>\<basename>_degraded.mp3`; temp files cleaned on success. |
+| `degrade_audio.py` | Synthetic degradation pipeline. Chain of codec/filter steps defined in a JSON config under `configs/degrade/` -- step types: `wma_encode`, `mp3_lame`, `mp3_fhg` (Fraunhofer IIS via `acmenc`), `lowpass`, `highpass` (ffmpeg cutoff filters). Compressed steps auto-decode to WAV before the next step; the config only lists degradation passes, not the plumbing. Single file or `--bulk` folder mode. `configs/degrade/default.json` reproduces the original fixed 7-pass chain (WMA 128k → LAME q5 → FhG 192k → LAME q5 → FhG 192k → LAME q2 → FhG 192k). Launched from TUI Utilities (`Degrade audio`) or standalone. |
 
 ---
 
