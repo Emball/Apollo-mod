@@ -41,7 +41,7 @@ RUNS_DIR = ROOT / "runs"
 INPUT_DIR = ROOT / "input"
 OUTPUT_DIR = ROOT / "output"
 MODELS_DIR = ROOT / "models"
-STATE_FILE = ROOT / ".tui_state.json"
+STATE_FILE = ROOT / "usr" / ".tui_state.json"
 
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".aac", ".m4a", ".aiff", ".aif"}
 
@@ -60,6 +60,7 @@ def _load_state() -> dict:
 
 def _save_state(state: dict) -> None:
     try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         STATE_FILE.write_text(json.dumps(state, indent=2))
     except Exception:
         pass
