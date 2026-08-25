@@ -128,6 +128,10 @@ system:
   _target_: look2hear.system.audio_litmodule.AudioLightningModule
   gradient_checkpointing: true
   grad_accum_steps: ${training.grad_accum_steps}
+  visqol_fraction: 1.0
+  target_band_loss_enabled: false
+  target_band_loss_lo_hz: 13000.0
+  target_band_loss_hi_hz: 19000.0
 
 early_stopping:
   _target_: pytorch_lightning.callbacks.EarlyStopping
@@ -144,7 +148,7 @@ checkpoint:
   verbose: true
   save_top_k: -1
   save_last: false
-  filename: 'step={step:06d}-sisdr={val_loss:.3f}-msstft={val_msstft:.4f}-sfr={val_sfr:.3f}-hfmae={val_hfmae:.4f}'
+  filename: 'step={step:06d}-sisdr={val_loss:.3f}-visqol={val_visqol:.3f}-sdr={val_sdr:.3f}-sfr={val_sfr:.3f}'
 
 logger:
   _target_: pytorch_lightning.loggers.TensorBoardLogger
