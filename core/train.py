@@ -1013,18 +1013,25 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         local_path = cfg.get("weights_path", None)
 
         if not local_path:
-            # Auto-scan ./models/
+            # Auto-scan ./models/ -- prefer the checkpoint that matches feature_dim.
+            # 384 -> apollo_model_uni.ckpt first; 256 -> apollo_model.ckpt / pytorch_model.bin first.
             os.makedirs(_MODELS_DIR, exist_ok=True)
-            for fname, url in _PRETRAINED_MODELS.items():
+            is_uni = (feature_dim == 384)
+            scan_order = (
+                ["apollo_model_uni.ckpt", "apollo_model.ckpt", "pytorch_model.bin"]
+                if is_uni else
+                ["apollo_model.ckpt", "pytorch_model.bin", "apollo_model_uni.ckpt"]
+            )
+            for fname in scan_order:
                 candidate = os.path.join(_MODELS_DIR, fname)
                 if os.path.isfile(candidate):
                     print_only(f"[weights] Found pretrained model in models/: {fname}")
                     local_path = candidate
                     break
-                elif url is not None:
+                url = _PRETRAINED_MODELS.get(fname)
+                if url is not None:
                     print_only(f"[weights] Downloading {fname} from configured URL...")
                     import urllib.request
-                    os.makedirs(_MODELS_DIR, exist_ok=True)
                     urllib.request.urlretrieve(url, candidate)
                     print_only(f"[weights] Saved to {candidate}")
                     local_path = candidate
@@ -1035,13 +1042,13 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             model = _load_weights(local_path, feature_dim)
             print_only("[weights] Weights loaded.")
         else:
-            # Final fallback -- HuggingFace hub
-            print_only("[weights] No local model found in models/ -- downloading from HuggingFace...")
+            # Final fallback -- HuggingFace hub, matched to feature_dim.
+            is_uni = (feature_dim == 384)
+            hf_repo  = "JusperLee/Apollo"
+            hf_file  = "pytorch_model_uni.bin" if is_uni else "pytorch_model.bin"
+            print_only(f"[weights] No local model found in models/ -- downloading from HuggingFace ({hf_file})...")
             from huggingface_hub import hf_hub_download
-            weights_path = hf_hub_download(
-                repo_id="JusperLee/Apollo",
-                filename="pytorch_model.bin",
-            )
+            weights_path = hf_hub_download(repo_id=hf_repo, filename=hf_file)
             print_only(f"[weights] Cached at: {weights_path}")
             model = look2hear.models.BaseModel.from_pretrain(
                 weights_path, sr=44100, win=20, feature_dim=feature_dim, layer=6
