@@ -43,6 +43,40 @@ def flatten_dict(d, parent_key="", sep="_"):
 # Perceptual metric helpers
 # ---------------------------------------------------------------------------
 
+def _ms_log_stft_loss(est: "torch.Tensor", ref: "torch.Tensor") -> float:
+    """
+    Multi-scale log-magnitude STFT loss. Lower = better match to HQ.
+    Not used in live training as of 0.5.1.0 (superseded by VISQOL) -- kept
+    for evaluate.py's offline legacy-checkpoint scoring.
+    """
+    windows = [512, 1024, 2048]
+    total = 0.0
+    for n_fft in windows:
+        hop = n_fft // 4
+        win = torch.hann_window(n_fft, device=est.device)
+        def _mag(x):
+            return torch.stft(x.reshape(-1, x.shape[-1]),
+                              n_fft=n_fft, hop_length=hop, win_length=n_fft,
+                              window=win, return_complex=True).abs()
+        e_mag = _mag(est)
+        r_mag = _mag(ref)
+        eps = 1e-7
+        total += torch.mean(torch.abs(torch.log(e_mag + eps) - torch.log(r_mag + eps))).item()
+    return total / len(windows)
+
+
+def _hf_band_mae_cpu(est: "torch.Tensor", ref: "torch.Tensor",
+                     sr: int = 44100,
+                     lo_hz: float = 13000.0,
+                     hi_hz: float = 19000.0) -> float:
+    """
+    Mean absolute log-magnitude error in the 13-19 kHz transition band.
+    Not used in live training as of 0.5.1.0 (superseded by configurable
+    target_band_loss) -- kept for evaluate.py's offline legacy-checkpoint scoring.
+    """
+    return _target_band_mae(est, ref, sr=sr, lo_hz=lo_hz, hi_hz=hi_hz)
+
+
 def _spectral_flatness_ratio(est: "torch.Tensor", ref: "torch.Tensor", sr: int = 44100) -> float:
     """
     Spectral flatness ratio in the 8-22 kHz band: est_flatness / ref_flatness.

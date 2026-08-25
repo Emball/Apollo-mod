@@ -1400,7 +1400,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         # Lightning can interpolate them here.
         # Lightning interpolates {metric:fmt} as metric=VALUE automatically.
         # Don't add extra label= text before {metric} tokens or they double up.
-        # Result: step=000200-val_loss=-20.892-val_msstft=0.6058-val_sfr=0.802-val_hfmae=0.8384
+        # Result: step=000200-val_loss=-20.892-val_visqol=3.821-val_sdr=10.234-val_sfr=0.968
         checkpoint.filename = (
             "{step:06d}"
             "-{val_loss:.3f}"
