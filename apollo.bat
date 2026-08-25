@@ -6,6 +6,18 @@ set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 set "VENV_DIR=%SCRIPT_DIR%\.venv"
 
+:: 0. Pull latest changes if this is a git checkout
+if exist "%SCRIPT_DIR%\.git" (
+    where git >nul 2>&1
+    if !errorlevel! equ 0 (
+        echo [apollo] Checking for updates...
+        pushd "%SCRIPT_DIR%"
+        git pull --ff-only
+        if !errorlevel! neq 0 echo [apollo] WARNING: git pull failed -- continuing with local copy.
+        popd
+    )
+)
+
 :: 1. Locate or install uv
 set "UV_BIN="
 where uv >nul 2>&1 && for /f "delims=" %%i in ('where uv') do set "UV_BIN=%%i" & goto :uv_found
