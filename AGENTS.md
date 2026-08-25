@@ -2,6 +2,10 @@
 
 Read `README.md` for usage, config reference, data layout, commands, and augmentation options. This file covers internal architecture, constraints, and non-obvious behavior that isn't user-facing.
 
+## README Guidelines
+
+Write from the user's perspective, not the implementation's. If the user can't act on the information and it doesn't change what they do, leave it out. Implementation details (what library, how it's parallelized, internal mechanics) belong in AGENTS or the wiki, not the README. No m-dashes. No filler qualifiers ("fast", "automatically", "seamlessly"). Say what the thing does, stop.
+
 The GitHub wiki (`Changes-and-improvements` page, repo `Emball/Apollo-mod.wiki.git`) documents every meaningful change made in this fork relative to upstream `JusperLee/Apollo`, with rationale. Sync it alongside this file when changes to documented behavior land.
 
 ---
@@ -71,20 +75,6 @@ Feature matching loss uses fresh feature maps from the generator step, not stale
 **CRITICAL — never call `torch.cuda.empty_cache()` in any training or validation hook.** Only acceptable inside an OOM recovery handler (`except torch.cuda.OutOfMemoryError`).
 
 ---
-
-## README Guidelines
-
-Write from the user's perspective, not the implementation's. If the user can't act on the information and it doesn't change what they do, leave it out. Implementation details (what library, how it's parallelized, internal mechanics) belong in AGENTS or the wiki, not the README.
-
-No m-dashes. No filler qualifiers ("fast", "automatically", "cleanly"). Say what the thing does, stop.
-
-## README Guidelines
-
-Write from the user's perspective, not the implementation's. If the user can't act on the information and it doesn't change what they do, it doesn't belong in the README. Implementation details (what library, what algorithm, parallelism, internal mechanics) go in AGENTS or the wiki.
-
-Tone: direct, no filler. No m-dashes. No phrases like "automatically," "seamlessly," or "fast" that describe the implementation flattering itself. Say what happens, not how impressive it is that it happens.
-
-If something just works, say it works. Don't explain how.
 
 ## Current Branch State
 
