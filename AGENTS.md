@@ -4,7 +4,16 @@ Read `README.md` for usage, config reference, data layout, commands, and augment
 
 ## README Guidelines
 
-Write from the user's perspective, not the implementation's. If the user can't act on the information and it doesn't change what they do, leave it out. Implementation details (what library, how it's parallelized, internal mechanics) belong in AGENTS or the wiki, not the README. No m-dashes. No filler qualifiers ("fast", "automatically", "seamlessly"). Say what the thing does, stop.
+Write from the user's perspective. If the user can't act on the information and it doesn't change what they do, leave it out.
+
+What does not belong in the README:
+- Implementation details: what library, what algorithm, how it's parallelized, internal mechanics
+- Project-specific config values presented as universal defaults (e.g. a hardcoded encoder delay for one dataset)
+- Advice sections, lessons learned, or "choosing your config" guidance -- that belongs in the wiki
+- Anything that flatters the implementation ("fast", "automatically", "seamlessly", "cleanly")
+- M-dashes
+
+Do not add, expand, or rewrite README sections without a specific instruction to do so. When adding new content, match the tone and density of the surrounding text exactly -- do not editorialize.
 
 The GitHub wiki (`Changes-and-improvements` page, repo `Emball/Apollo-mod.wiki.git`) documents every meaningful change made in this fork relative to upstream `JusperLee/Apollo`, with rationale. Sync it alongside this file when changes to documented behavior land.
 

@@ -51,9 +51,9 @@ data/apollo_stfl/
     HQ/
 ```
 
-On first run, `train.py` automatically converts any non-WAV sources to 32-bit float WAV in-place via FFmpeg (parallel, fast), then chunks them into fixed-length segments under `chunks/<apollo_name>/`. If chunk parameters change in your config, the cache is invalidated and re-chunked automatically.
+On first run, sources are converted to WAV and chunked into fixed-length segments under `chunks/<apollo_name>/`. If chunk parameters change in your config, the cache is re-built automatically.
 
-WAV and FLAC sources are supported natively. MP3 sources are converted automatically — the encoder delay (`align_data: 1057` for iTunes-encoded files) is baked in during conversion so no manual compensation is needed at training time.
+16-bit WAV and FLAC are fully supported. MP3 is supported but not recommended as it requires manual delay compensation in your config.
 
 ### Validation Set Guidelines
 
