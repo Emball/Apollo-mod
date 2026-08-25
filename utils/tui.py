@@ -460,12 +460,21 @@ def _run_subprocess(cmd: list[str], label: str, pause_dir: Path | None = None,
             pass
 
     try:
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        # Insert -u after the interpreter if the command starts with a Python binary,
+        # so the child process flushes stdout per line even when writing to a pipe.
+        _cmd = list(cmd)
+        if _cmd and _cmd[0].endswith(("python", "python3", "python.exe")):
+            _cmd.insert(1, "-u")
+
         proc = subprocess.Popen(
-            cmd,
+            _cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            env=env,
             cwd=str(ROOT),
         )
 
