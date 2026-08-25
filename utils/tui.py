@@ -981,6 +981,7 @@ def screen_utilities(state: dict) -> None:
             "Clean old checkpoints (keep best 5)",
             "View training runs",
             "Degrade audio",
+            "Align audio",
             "Update Apollo",
             "Back",
         ]
@@ -998,6 +999,9 @@ def screen_utilities(state: dict) -> None:
             from degrade_audio import screen_degrade_audio
             screen_degrade_audio(state, console, _pick, _run_with_live_output, ROOT)
         elif idx == 4:
+            from align_audio import screen_align_audio
+            screen_align_audio(state, console, _pick, _run_with_live_output, ROOT)
+        elif idx == 5:
             _util_update()
 
 
