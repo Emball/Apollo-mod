@@ -2,7 +2,11 @@
 
 Read `README.md` for usage, config reference, data layout, commands, and augmentation options. This file covers internal architecture, constraints, and non-obvious behavior that isn't user-facing.
 
-## README Guidelines
+## Coding Rules
+
+Unless explicitly instructed to make a change on a specific branch only, all changes must be applied to both `main` and `diagnostic/revert-training-step`.
+
+## README Editing Guidelines
 
 Write from the user's perspective. If the user can't act on the information and it doesn't change what they do, leave it out.
 
@@ -14,8 +18,6 @@ What does not belong in the README:
 - M-dashes
 
 Do not add, expand, or rewrite README sections without a specific instruction to do so. When adding new content, match the tone and density of the surrounding text exactly -- do not editorialize.
-
-Unless explicitly instructed to make a change on a specific branch only, all changes must be applied to both `main` and `diagnostic/revert-training-step`.
 
 The GitHub wiki (`Changes-and-improvements` page, repo `Emball/Apollo-mod.wiki.git`) documents every meaningful change made in this fork relative to upstream `JusperLee/Apollo`, with rationale. Sync it alongside this file when changes to documented behavior land.
 
