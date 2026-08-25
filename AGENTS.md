@@ -15,6 +15,8 @@ What does not belong in the README:
 
 Do not add, expand, or rewrite README sections without a specific instruction to do so. When adding new content, match the tone and density of the surrounding text exactly -- do not editorialize.
 
+Unless explicitly instructed to make a change on a specific branch only, all changes must be applied to both `main` and `diagnostic/revert-training-step`.
+
 The GitHub wiki (`Changes-and-improvements` page, repo `Emball/Apollo-mod.wiki.git`) documents every meaningful change made in this fork relative to upstream `JusperLee/Apollo`, with rationale. Sync it alongside this file when changes to documented behavior land.
 
 ---
