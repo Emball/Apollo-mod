@@ -48,13 +48,28 @@ class BaseModel(nn.Module, PyTorchModelHubMixin):
         # model_class = get("Conv_TasNet")
         model = model_class(*args, **kwargs)
         model_state = model.state_dict()
+        ckpt_state = conf["state_dict"]
+
+        # Detect checkpoint's feature_dim from BN.0.1.weight shape [feature_dim, 11, 1]
+        # and hard-reject cross-dim loads before they silently initialize most weights randomly.
+        if "BN.0.1.weight" in ckpt_state and "BN.0.1.weight" in model_state:
+            ckpt_dim = ckpt_state["BN.0.1.weight"].shape[0]
+            model_dim = model_state["BN.0.1.weight"].shape[0]
+            if ckpt_dim != model_dim:
+                raise ValueError(
+                    f"[weights] Checkpoint has feature_dim={ckpt_dim} but current config has "
+                    f"feature_dim={model_dim}. Loading a {ckpt_dim}-dim checkpoint into a "
+                    f"{model_dim}-dim model initializes most weights randomly and produces garbage. "
+                    f"Use a matching checkpoint or set weights_path in your config."
+                )
+
         filtered = {
-            k: v for k, v in conf["state_dict"].items()
+            k: v for k, v in ckpt_state.items()
             if k in model_state and v.shape == model_state[k].shape
         }
-        skipped = len(conf["state_dict"]) - len(filtered)
+        skipped = len(ckpt_state) - len(filtered)
         if skipped:
-            print(f"[weights] Skipped {skipped} mismatched keys (shape mismatch — expected when feature_dim differs from pretrained checkpoint)")
+            print(f"[weights] Skipped {skipped} mismatched keys (non-fatal, e.g. Hann window buffers).")
         model.load_state_dict(filtered, strict=False)
         return model
 
