@@ -1,0 +1,17 @@
+{
+  "name": "default",
+  "description": "Original 10-step chain: WMA 128k -> LAME q5 -> FhG 192k -> LAME q5 -> FhG 192k -> LAME q2 -> FhG 192k",
+  "tools": {
+    "ffmpeg": "ffmpeg",
+    "acmenc": "C:\\Portable\\acmenc\\acmenc.exe"
+  },
+  "chain": [
+    { "type": "wma_encode", "bitrate": "128k" },
+    { "type": "mp3_lame", "quality": 5 },
+    { "type": "mp3_fhg", "bitrate": 192, "enc_delay": 672 },
+    { "type": "mp3_lame", "quality": 5 },
+    { "type": "mp3_fhg", "bitrate": 192, "enc_delay": 672 },
+    { "type": "mp3_lame", "quality": 2 },
+    { "type": "mp3_fhg", "bitrate": 192, "enc_delay": 672 }
+  ]
+}
