@@ -63,9 +63,21 @@ echo [apollo] Syncing remaining dependencies...
 if %errorlevel% neq 0 ( echo [apollo] ERROR: Dependency install failed. & pause & exit /b 1 )
 echo [apollo] Dependencies up to date
 
-:: 4. If arguments given, treat first as the script name and run it
-if not "%*"=="" (
-    for /f "tokens=1,* delims= " %%a in ("%*") do set "CMD=%%a" & set "REST=%%b"
+:: 4. Strip --dev flag and set env var if present
+set "APOLLO_DEV="
+set "FILTERED_ARGS="
+for %%a in (%*) do (
+    if /i "%%a"=="--dev" (
+        set "APOLLO_DEV=1"
+    ) else (
+        set "FILTERED_ARGS=!FILTERED_ARGS! %%a"
+    )
+)
+set "FILTERED_ARGS=!FILTERED_ARGS:~1!"
+
+:: 5. If arguments given, treat first as the script name and run it
+if not "!FILTERED_ARGS!"=="" (
+    for /f "tokens=1,* delims= " %%a in ("!FILTERED_ARGS!") do set "CMD=%%a" & set "REST=%%b"
     if /i "!CMD!"=="train"     set "SCRIPT=train.py"
     if /i "!CMD!"=="inference" set "SCRIPT=inference.py"
     if /i "!CMD!"=="test"      set "SCRIPT=test.py"
@@ -79,5 +91,5 @@ if not "%*"=="" (
     exit /b %errorlevel%
 )
 
-:: 5. No arguments — launch TUI
+:: 6. No arguments — launch TUI
 "%VENV_DIR%\Scripts\python.exe" "%SCRIPT_DIR%\utils\tui.py"
