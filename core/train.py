@@ -113,6 +113,7 @@ _SUPPORTED_EXTS = {".wav", ".mp3", ".flac"}
 # Models directory -- pretrained weights are looked up here automatically
 _REPO_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MODELS_DIR = os.path.join(_REPO_ROOT, "models")
+_CACHE_DIR  = os.path.join(_REPO_ROOT, "usr", "cache")
 
 # Pretrained model filenames to search for (base -> universal).
 # Set download URLs here once you have them; None = skip auto-download.
@@ -520,10 +521,12 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     hq_offset = (-fixed_delay) if (fixed_delay is not None and fixed_delay < 0) else 0
     print_lock = threading.Lock()
 
-    # --- Phase 1: In-place WAV conversion ---
-    # Non-WAV files are converted to 32-bit float WAV in the data directory.
-    # Alignment trim is baked into the WAV during conversion so chunking never
-    # needs to know about offsets. FFmpeg subprocesses are fully parallel.
+    # --- Phase 1: WAV conversion to cache ---
+    # Non-WAV files (and WAVs with an alignment trim) are decoded to
+    # usr/cache/<md5>.wav -- keyed on the MD5 of the original file bytes so
+    # re-runs with the same source skip re-conversion instantly. Originals are
+    # never modified. Alignment trim is baked in during conversion so chunking
+    # never needs to know about offsets. FFmpeg subprocesses are fully parallel.
 
     def _has_ffmpeg() -> bool:
         try:
@@ -532,15 +535,28 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         except ImportError:
             return False
 
-    def _convert_inplace_ffmpeg(src: str, trim_samples: int) -> str:
-        """Convert src to WAV in-place via ffmpeg-python. Returns new path."""
+    def _file_md5(path: str) -> str:
+        import hashlib
+        h = hashlib.md5()
+        with open(path, "rb") as _f:
+            for _block in iter(lambda: _f.read(1 << 20), b""):
+                h.update(_block)
+        return h.hexdigest()
+
+    def _cached_wav_path(src: str, trim_samples: int) -> str:
+        """Return the usr/cache path for this source + trim combo."""
+        md5 = _file_md5(src)
+        key = md5 if trim_samples == 0 else f"{md5}_t{trim_samples}"
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        return os.path.join(_CACHE_DIR, f"{key}.wav")
+
+    def _to_cached_wav_ffmpeg(src: str, trim_samples: int) -> str:
+        """Decode src to usr/cache via ffmpeg. Returns cache path."""
         import ffmpeg, tempfile
-        src_dir = os.path.dirname(src)
-        src_ext = os.path.splitext(src)[1].lower()
-        dst = os.path.splitext(src)[0] + ".wav"
-        # Write to a temp file in the same directory, then rename atomically.
-        # FFmpeg refuses input==output, so we never write directly to dst.
-        fd, tmp_path = tempfile.mkstemp(suffix=".wav", dir=src_dir)
+        dst = _cached_wav_path(src, trim_samples)
+        if os.path.isfile(dst):
+            return dst
+        fd, tmp_path = tempfile.mkstemp(suffix=".wav", dir=_CACHE_DIR)
         os.close(fd)
         try:
             stream = ffmpeg.input(src)
@@ -561,17 +577,16 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
             raise
-        # Remove original if it was non-WAV (different path from dst)
-        if src_ext != ".wav" and os.path.abspath(src) != os.path.abspath(dst):
-            os.remove(src)
-            print_only(f"[data] Removed original: {os.path.basename(src)}")
         os.replace(tmp_path, dst)
+        print_only(f"[cache] Wrote {os.path.basename(dst)}  ({os.path.basename(src)})")
         return dst
 
-    def _convert_inplace_torchaudio(src: str, trim_samples: int) -> str:
-        """Fallback: convert via torchaudio (GIL-bound for MP3)."""
+    def _to_cached_wav_torchaudio(src: str, trim_samples: int) -> str:
+        """Fallback: decode via torchaudio (GIL-bound for MP3)."""
         import torchaudio
-        dst = os.path.splitext(src)[0] + ".wav"
+        dst = _cached_wav_path(src, trim_samples)
+        if os.path.isfile(dst):
+            return dst
         wav, sr = torchaudio.load(src, frame_offset=trim_samples)
         wav = wav.float()
         if sr != _SR:
@@ -581,53 +596,52 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         elif wav.shape[0] > 2:
             wav = wav[:2]
         torchaudio.save(dst, wav, _SR)
-        if os.path.splitext(src)[1].lower() != ".wav":
-            os.remove(src)
+        print_only(f"[cache] Wrote {os.path.basename(dst)}  ({os.path.basename(src)})")
         return dst
 
     use_ffmpeg = _has_ffmpeg()
-    # Only convert files that are genuinely non-WAV. WAVs are always left alone --
-    # alignment is baked in during the original ffmpeg conversion pass and must
-    # not be applied again on subsequent runs.
-    needs_conv = {
+    # Files needing cache conversion: non-WAV always; WAV with alignment trim also
+    # needs a cached trimmed version. WAVs with no trim are used directly.
+    needs_cache = {
         s for s in matched
         if os.path.splitext(lq_files[s])[1].lower() != ".wav"
         or os.path.splitext(hq_files[s])[1].lower() != ".wav"
+        or lq_offset > 0
+        or hq_offset > 0
     }
 
     wav_paths: dict[str, tuple[str, str]] = {}
 
-    if needs_conv:
+    if needs_cache:
+        to_wav = _to_cached_wav_ffmpeg if use_ffmpeg else _to_cached_wav_torchaudio
         method = "FFmpeg" if use_ffmpeg else "torchaudio (install ffmpeg-python for faster conversion)"
-        print_only(f"[data/{split_name}] Converting {len(needs_conv)} source(s) to WAV via {method}...")
+        print_only(f"[data/{split_name}] Caching {len(needs_cache)} source(s) to WAV via {method}...")
         done_conv = [0]
 
-        def _convert_stem(stem):
+        def _cache_stem(stem):
             lq_p = os.path.join(lq_src, lq_files[stem])
             hq_p = os.path.join(hq_src, hq_files[stem])
-            convert = _convert_inplace_ffmpeg if use_ffmpeg else _convert_inplace_torchaudio
             lq_ext = os.path.splitext(lq_p)[1].lower()
             hq_ext = os.path.splitext(hq_p)[1].lower()
-            new_lq = convert(lq_p, lq_offset) if lq_ext != ".wav" else lq_p
-            new_hq = convert(hq_p, hq_offset) if hq_ext != ".wav" else hq_p
+            new_lq = to_wav(lq_p, lq_offset) if (lq_ext != ".wav" or lq_offset > 0) else lq_p
+            new_hq = to_wav(hq_p, hq_offset) if (hq_ext != ".wav" or hq_offset > 0) else hq_p
             with print_lock:
                 done_conv[0] += 1
-                print_only(f"[data/{split_name}]   Converted {done_conv[0]}/{len(needs_conv)}: {stem}")
+                print_only(f"[data/{split_name}]   Cached {done_conv[0]}/{len(needs_cache)}: {stem}")
             return stem, new_lq, new_hq
 
-        n_conv = min(len(needs_conv), os.cpu_count() or 4)
+        n_conv = min(len(needs_cache), os.cpu_count() or 4)
         with _cf.ThreadPoolExecutor(max_workers=n_conv) as ex:
-            for stem, lq_p, hq_p in ex.map(_convert_stem, sorted(needs_conv)):
+            for stem, lq_p, hq_p in ex.map(_cache_stem, sorted(needs_cache)):
                 wav_paths[stem] = (lq_p, hq_p)
 
-        # Stems that were already WAV with no offset -- no conversion needed
         for stem in matched:
             if stem not in wav_paths:
                 wav_paths[stem] = (
                     os.path.join(lq_src, lq_files[stem]),
                     os.path.join(hq_src, hq_files[stem]),
                 )
-        print_only(f"[data/{split_name}] Conversion done.\n")
+        print_only(f"[data/{split_name}] Cache pass done.\n")
     else:
         wav_paths = {
             s: (os.path.join(lq_src, lq_files[s]), os.path.join(hq_src, hq_files[s]))

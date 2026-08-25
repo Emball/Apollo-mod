@@ -146,6 +146,7 @@ def _spectral_merge(original: "torch.Tensor", enhanced: "torch.Tensor",
 
 _REPO_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MODELS_DIR = os.path.join(_REPO_ROOT, "models")
+_CACHE_DIR  = os.path.join(_REPO_ROOT, "usr", "cache")
 
 KNOWN_MODELS = {
     "apollo": (
@@ -201,21 +202,27 @@ def ensure_model(shortname: str) -> tuple:
 
 
 def _ensure_wav(file_path: str, target_sr: int = _SR) -> str:
-    """If file_path is not a WAV, decode it to a 32-bit float WAV in place via ffmpeg and
-    return the new .wav path.  The original file is removed after a successful conversion.
-    WAV files are returned as-is.  All encoder delay and decoder variance is baked out once
-    here so every downstream tool (Apollo, iZotope, DAW) reads from an identical source.
+    """If file_path is not a WAV, decode it to usr/cache/<md5>.wav and return that path.
+    The original file is never modified. WAV files are returned as-is.
+    Cache hit = instant return with no re-decode.
     """
     if os.path.splitext(file_path)[1].lower() == ".wav":
         return file_path
+    import hashlib, tempfile
+    h = hashlib.md5()
+    with open(file_path, "rb") as _f:
+        for _block in iter(lambda: _f.read(1 << 20), b""):
+            h.update(_block)
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+    cached = os.path.join(_CACHE_DIR, f"{h.hexdigest()}.wav")
+    if os.path.isfile(cached):
+        print(f"[inference] WAV cache hit: {os.path.basename(cached)}")
+        return cached
     try:
         import ffmpeg as _ffmpeg
     except ImportError:
         return file_path  # ffmpeg-python not installed; fall back to torchaudio.load
-    import tempfile
-    src_dir = os.path.dirname(os.path.abspath(file_path))
-    wav_path = os.path.splitext(file_path)[0] + ".wav"
-    fd, tmp_path = tempfile.mkstemp(suffix=".wav", dir=src_dir)
+    fd, tmp_path = tempfile.mkstemp(suffix=".wav", dir=_CACHE_DIR)
     os.close(fd)
     try:
         (
@@ -233,10 +240,9 @@ def _ensure_wav(file_path: str, target_sr: int = _SR) -> str:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
         raise
-    os.replace(tmp_path, wav_path)
-    os.remove(file_path)
-    print(f"[inference] Converted to WAV (in place): {os.path.basename(wav_path)}")
-    return wav_path
+    os.replace(tmp_path, cached)
+    print(f"[inference] Cached WAV: {os.path.basename(cached)}  ({os.path.basename(file_path)})")
+    return cached
 
 
 def load_audio(file_path: str, target_sr: int = _SR) -> torch.Tensor:
