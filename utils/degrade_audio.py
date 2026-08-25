@@ -2,12 +2,12 @@
 degrade_audio.py -- Synthetic audio degradation pipeline for training data gen.
 
 Replaces degrade_audio.bat. The codec/filter chain is defined in a JSON config
-under configs/degrade/ instead of being hardcoded, so different degradation
+under utils/degrade/ instead of being hardcoded, so different degradation
 recipes can be authored without editing code.
 
 Launched from tui.py as a TUI screen, or standalone:
-    python degrade_audio.py --config configs/degrade/default.json --input "in.flac" --output "C:\\out"
-    python degrade_audio.py --config configs/degrade/default.json --input "C:\\in_folder" --output "C:\\out" --bulk
+    python utils/degrade_audio.py --config utils/degrade/default.json --input "in.flac" --output "C:\\out"
+    python utils/degrade_audio.py --config utils/degrade/default.json --input "C:\\in_folder" --output "C:\\out" --bulk
 
 Chain step types:
     wma_encode   -- {bitrate}                          ffmpeg -c:a wmav2
