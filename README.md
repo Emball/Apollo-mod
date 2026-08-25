@@ -1,6 +1,6 @@
 # Apollo-mod
 
-A custom fine-tuning fork of [JusperLee/Apollo](https://github.com/JusperLee/Apollo), a GAN-based audio restoration model targeting codec-compressed audio.
+A custom fine-tuning fork of [JusperLee/Apollo](https://github.com/JusperLee/Apollo), a GAN-based audio restoration model targeting degraded audio.
 
 ---
 
@@ -8,7 +8,11 @@ A custom fine-tuning fork of [JusperLee/Apollo](https://github.com/JusperLee/Apo
 
 Apollo is a research model from Tsinghua University / Tencent AI Lab (ICASSP 2025). It restores degraded audio by splitting the signal into frequency bands and modeling relationships between them. The original was trained on MUSDB18-HQ and MoisesDB with MP3 compression as the primary degradation type, but it has proven to be broadly useful for a variety of different restoration tasks.
 
+## What's Different?
+
 This fork reworks it for single-GPU fine-tuning on your own paired audio datasets. The aim is to help the community explore the true potential of the architecture, unlocking the ability for custom finetunes on consumer hardware.
+
+For a detailed breakdown of every change relative to the original codebase, see the [Changes and Improvements](https://github.com/Emball/Apollo-mod/wiki/Changes-and-improvements) wiki page.
 
 ---
 
@@ -47,27 +51,15 @@ data/apollo_stfl/
     HQ/
 ```
 
-Your validation data should ideally be at least half the size of your train set, with matching degradation to the train set for the most accurate training progress calculations.
+On first run, `train.py` automatically converts any non-WAV sources to 32-bit float WAV in-place via FFmpeg (parallel, fast), then chunks them into fixed-length segments under `chunks/<apollo_name>/`. If chunk parameters change in your config, the cache is invalidated and re-chunked automatically.
 
-On first run, `train.py` automatically converts any non-WAV sources to 32-bit float WAV in-place via FFmpeg, then chunks them into fixed-length segments under `chunks/<apollo_name>/`. If chunk parameters change in your config, the cache is invalidated and re-chunked automatically.
+WAV and FLAC sources are supported natively. MP3 sources are converted automatically — the encoder delay (`align_data: 1057` for iTunes-encoded files) is baked in during conversion so no manual compensation is needed at training time.
 
-WAV and FLAC are fully supported. MP3 sources are converted automatically -- the encoder delay (`align_data: 1057` for iTunes-encoded files) is baked in during conversion.
+### Validation Set Guidelines
 
----
+The val set is used to lock a fixed evaluation sample (`limit_val_batches` chunks) on the first val run. That same fixed set is used for every subsequent val check, giving you a perfectly comparable loss signal across all checkpoints. The selection is stratified by song so no single song dominates.
 
-## Training
-
-Run `apollo.bat` (Windows) or `./apollo.sh` (Linux/macOS) to open the TUI. Select **Train**, choose your config, and training starts immediately with live output in the terminal. Ctrl+C stops training cleanly, saves a checkpoint, and returns to the menu.
-
-To run directly from the command line:
-
-```bash
-train --conf_dir configs/apollo_name.yaml
-```
-
-Each run creates a timestamped folder under `runs/<n>/<timestamp>/`. Set `resume: true` in your config to continue from the most recent checkpoint automatically.
-
-Validation audio (LQ, HQ and restored triplets) is saved to `runs/<n>/<timestamp>/val_audio/` every val run for a fixed set of reference chunks. Comparing these files over the course of training is the best way to monitor progress.
+A rotating set of `val_songs` songs (LQ/HQ/Restored triplets) is saved to `runs/<name>/<timestamp>/val_audio/` after each val run. The rotation schedule is computed at training start so every val song gets equal coverage by end of training, and it's checkpointed so resume doesn't change the sequence. Each song's chunk is locked once and reused for every val run, so the same audio is compared across the whole training run rather than a different random chunk each time.
 
 After each val run the console prints:
 
@@ -75,13 +67,46 @@ After each val run the console prints:
   [val] msstft=0.3421  sfr=0.991  hfmae=0.0312  sdr=0.052  sisdr=25.341  (42.3s)
 ```
 
-- **msstft** -- multi-scale log-STFT loss. Lower is better.
-- **sfr** -- spectral flatness ratio in the 8-22kHz band. Rising above ~1.05 (flagged as `noise^`) is an early overfitting signal.
-- **hfmae** -- mean absolute log-magnitude error in the 13-19kHz transition band. Most direct signal for MP3 rolloff fine-tuning.
-- **sdr** -- Signal-to-Distortion Ratio. Less noisy than sisdr.
-- **sisdr** -- waveform fidelity. Treat as a secondary signal.
+- **msstft** — multi-scale log-STFT loss. Lower is better. Broad spectral health indicator.
+- **sfr** — spectral flatness ratio in the 8-22kHz band. Rising above ~1.05 (flagged as `noise^`) is an early overfitting signal before it shows in SI-SDR.
+- **hfmae** — mean absolute log-magnitude error in the 13-19kHz transition band. The most direct signal for MP3 rolloff fine-tuning. Lower is better.
+- **sdr** — Signal-to-Distortion Ratio. Lower is better. Less noisy than sisdr; included as a secondary signal.
+- **sisdr** — waveform fidelity. Higher is better, but noisy and architecture-inherent — treat as a secondary signal, not the primary one.
 
-All five are logged to TensorBoard.
+All five are logged to TensorBoard and shown in this order (perceptual signals first, sisdr last) since they're a better indicator of actual audio quality than sisdr alone.
+
+**What to put in your val set:**
+
+- Use your most representative and challenging material.
+- Match the degradation type exactly to your training data.
+- A few songs of similar character is better than many songs of mixed difficulty.
+- Aim for at least enough audio to fill `limit_val_batches` chunks. With a 3-second chunk size and `limit_val_batches: 100`, that is 5 minutes minimum.
+
+---
+
+## Training
+
+Run `apollo.bat` (Windows) or `./apollo.sh` (Linux/macOS) to open the TUI. Select **Train**, choose your config, and training starts immediately with live output in the terminal. Ctrl+C stops training cleanly, saves a checkpoint, and returns to the menu.
+
+Before training begins, a baseline val pass runs on the pretrained weights so you have a reference point:
+
+```
+[baseline] sisdr=22.140  (pretrained, before any training)
+```
+
+Training lines show speed and the most recent val metrics:
+
+```
+  24.9%  step=400  400/1604  1.38 it/s  msstft=0.3421  sfr=0.991  hfmae=0.0312  sdr=0.052  sisdr=25.341
+```
+
+To run directly from the command line:
+
+```bash
+train --conf_dir configs/apollo_name.yaml
+```
+
+Each run creates a timestamped folder under `runs/<name>/<timestamp>/`. Set `resume: true` in your config to continue from the most recent checkpoint automatically.
 
 ### Checkpoints
 
@@ -92,52 +117,83 @@ All checkpoints are kept. Each is named with full stats and a rank badge:
 [2]-step=001100-sisdr=-24.650-msstft=0.2934-sfr=0.991-hfmae=0.0258-sdr=0.048.ckpt
 ```
 
-`[1]` = best by weighted composite of perceptual metrics. Rank badges update after every save.
+`[1]` = best by a weighted composite of val metrics. Two weighting systems exist:
+
+1. **Checkpoint save trigger** — `val_composite` uses weights `msstft=0.40, hfmae=0.35, sfr=0.15, sisdr=0.10`. This determines which checkpoints get saved.
+
+2. **Rank badge** — `RankBadger` renames checkpoints using weights `msstft=0.40, hfmae=0.30, sfr=0.15, sisdr=0.10, sdr=0.05`. This is display-only; rank 1 = best.
+
+SI-SDR is noisy and only a minor tiebreaker. The rank badges are updated after every new checkpoint save.
 
 ---
 
 ## Inference
 
-Open the TUI and select **Inference** to pick a config, model, and input file interactively. The model picker shows the **Latest checkpoint** and the **Best checkpoint** as separate options. Batch processing runs all files in the input folder sequentially.
+Open the TUI and select **Inference** to pick a config, model, and input file interactively. The model picker shows the **Latest checkpoint** (what training resumes from) and the **Best checkpoint** (rank `[1]` by the weighted composite score) as separate options. The TUI remembers your last-used settings per config. Batch processing runs all files in the input folder sequentially without prompting between files.
 
-Non-WAV inputs (MP3, FLAC, etc.) are converted to 32-bit float WAV in-place before processing to ensure consistent decoder behavior across tools.
+### Spectral Merge (Ensemble Inference)
 
-To run directly from the command line:
+The inference engine can blend the original input with the enhanced output in the frequency domain. This is useful for preserving low-end content that Apollo sometimes struggles with, or for blending outputs from multiple checkpoints.
 
-```bash
-inference --in_wav "degraded.mp3" --out_wav "restored.wav" --conf_dir configs/apollo_stfl.yaml
-```
+**TUI ensemble picker:** After selecting your output path, you'll see an ensemble picker with options:
+- **No ensemble** — standard enhanced-only output
+- **Low-end preserve** — applies `max_fft` below 700 Hz (original and enhanced blended by bin-wise maximum)
+- **Low-end + transition blend** — `max_fft` below 700 Hz + weighted average in the 15-22kHz transition band
+- **Custom JSON** — full band control via JSON input
 
-Or with explicit weights:
-
-```bash
-inference --in_wav "degraded.mp3" --out_wav "restored.wav" --weights models/apollo_model_uni.ckpt --feature_dim 384
-```
-
-Output format is 32-bit float WAV.
-
-### Spectral Merge
-
-The TUI ensemble picker lets you blend the original input with the enhanced output in the frequency domain. Options: no ensemble, low-end preserve (max magnitude below 700 Hz), low-end + transition blend, or custom JSON. Available via CLI:
+**Command-line flags:**
 
 ```bash
-# Low-end preservation
-inference ... --low_end_preserve
+# Quick low-end preservation (crossover at 700 Hz)
+inference --in_wav input.wav --out_wav output.wav --conf_dir configs/apollo_stfl.yaml --low_end_preserve
 
-# Custom band control
+# Custom crossover frequency
+inference ... --low_end_preserve --low_end_hz 1000
+
+# Full ensemble control via JSON
 inference ... --ensemble '[{"lo":0,"hi":700,"mode":"max_fft","weight":1.0},{"lo":15000,"hi":22050,"mode":"avg","weight":0.6}]'
 
 # Auxiliary checkpoint blending
 inference ... --aux_weights runs/other/checkpoints/best.ckpt --aux_ensemble '[{"lo":8000,"hi":22050,"mode":"enhanced","weight":1.0}]'
 ```
 
-Blend modes: `max_fft`, `min_fft`, `avg`, `original`, `enhanced`. Each band takes a `weight` (0-1) blending between the mode result and pure enhanced output. Phase always comes from the enhanced output.
+**Blend modes per band:**
+- `max_fft` — bin-wise maximum magnitude (takes whichever of original or enhanced has more energy)
+- `min_fft` — bin-wise minimum magnitude
+- `avg` — linear average of magnitudes
+- `original` — bypass, use input only
+- `enhanced` — bypass, use model output only
+
+Each band also has a `weight` (0-1) that blends between the mode result and pure enhanced output.
 
 ---
 
 ## Config Reference
 
 Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yaml`. Copy and rename for each fine-tune. Local configs are not tracked by git.
+
+### Choosing Your Config: Lessons from Real Runs
+
+**Synthetic / noisy degradation (e.g., WMA→MP3 stacking, inconsistent encoding):**
+- Freeze 4 layers (`n_layers_to_freeze: 4`)
+- Keep batch size at 1 (`batch_size: 1`, `grad_accum_steps: 1`)
+- Disable noise augmentation (`noise.enabled: false`)
+- Set `val_check_interval` to 200-300 for cleaner metrics
+- Disable TF32 (`tf32: false`)
+- Start with `band_weight_gain: 0`, enable after baseline
+
+**Real / consistent degradation (e.g., iTunes MP3s, single encoder fingerprint):**
+- Unfreeze all layers (`n_layers_to_freeze: 0`)
+- Can increase batch size to 2-4 (`batch_size: 2`, `grad_accum_steps: 2`)
+- Noise augmentation is safe (`noise.enabled: true`)
+- TF32 is optional but safer to disable (`tf32: false`)
+- Start with `band_weight_gain: 0`, enable after baseline
+
+**General:**
+- Start with `band_weight_gain: 0` for a baseline run, then enable at 1.0-1.5 after you have a reference point
+- Use `val_songs` to match your validation set size
+- SI-SDR is noisy — use msstft and hfmae as your primary signals
+- SFR climbing above 1.05 is not always a problem; it means the model is restoring HF energy. Look for plateauing, not crossing.
 
 ### exp
 
@@ -151,7 +207,7 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 
 | Key | Description |
 |---|---|
-| `tf32` | TF32 matmuls. Only benefits Ampere+ GPUs (RTX 3000/4000 series). Disable for GAN training. |
+| `tf32` | TF32 matmuls. Only benefits Ampere+ GPUs (RTX 3000/4000 series). **Disable for GAN training** — spectral loss landscapes are sensitive to numerical error. Default `false`. |
 | `cudnn_benchmark` | Benchmarks cuDNN conv algorithms on first batch. Leave `true` for fixed input shapes. |
 | `expandable_segments` | Reduces CUDA allocator fragmentation. Leave `true`. |
 | `triton_cache` | Caches compiled Triton kernels. Saves 30-60s on startup after first run. |
@@ -161,9 +217,9 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 
 | Key | Description |
 |---|---|
-| `n_layers_to_freeze` | Freeze the first N BSNet layers. Apollo has 6 total. `4` is recommended for synthetic/noisy degradation; `0` for clean/consistent degradation. |
+| `n_layers_to_freeze` | Freeze the first N BSNet layers. Apollo has 6 total. `4` is recommended for synthetic/noisy degradation; `0` for clean/consistent degradation like real iTunes encodes. |
 | `val_songs` | Number of songs saved per val run as LQ/HQ/Restored triplets. |
-| `val_rotate_every` | `auto` = derive rotation cadence from total configured steps. Integer = switch every N val runs. |
+| `val_rotate_every` | `auto` = derive rotation cadence from total configured steps for full song coverage. Integer = switch every N val runs. |
 | `grad_accum_steps` | Accumulate gradients over N steps to simulate a larger batch without extra VRAM. |
 
 ### datas
@@ -172,7 +228,7 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 |---|---|
 | `sr` | Sample rate. Fixed at `44100`. |
 | `segment_sec` | Chunk length in seconds. |
-| `batch_size` | Chunks per step. `1` is a safe starting point. |
+| `batch_size` | Chunks per step. `1` is a safe starting point for noisy/synthetic degradation. |
 | `num_workers` | DataLoader workers. `2-4` recommended on 16 GB RAM. |
 | `pin_memory` | Set `false` on 16 GB systems. |
 | `align_data` | Fixed sample offset for encoder delay. Baked into WAV at conversion time. iTunes MP3s use `1057`. Set `false` to disable. |
@@ -186,7 +242,7 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 | `stereo_alternation` | Live | Alternates L/R by sample index. Balanced stereo exposure without random channel collapse. |
 | `gain` | Live | Random gain shift applied identically to LQ and HQ. Never hard-clamps. |
 | `polarity` | Live | Randomly flips signal polarity. |
-| `noise` | Live | Matched Gaussian noise added to both LQ and HQ. Avoid with fragile/synthetic degradation. |
+| `noise` | Live | Matched Gaussian noise added to both LQ and HQ. **Do not use with fragile/synthetic degradation** — it pollutes the gradient signal. Safe for clean/consistent degradation. |
 | `pitch_shift` | Cached | Disabled recommended for codec restoration. |
 | `mp3_degradation` | Cached | CBR MP3 re-encode on LQ only. |
 
@@ -195,12 +251,14 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 | Key | Description |
 |---|---|
 | `band_weight_shape` | `gaussian` (default) or `trapezoid`. |
-| `band_weight_center_hz` | Gaussian: center frequency of the penalty bump in Hz. Default `15000`. |
-| `band_weight_sigma_hz` | Gaussian: width of the bump (1-sigma) in Hz. Default `3000`. |
-| `band_weight_lo_hz` | Trapezoid: low edge of the boosted band in Hz. |
-| `band_weight_hi_hz` | Trapezoid: high edge of the boosted band in Hz. |
-| `band_weight_ramp_hz` | Trapezoid: soft ramp width at each edge in Hz. |
-| `band_weight_gain` | Peak gain above baseline. `0` = flat loss. Start at `0` and enable after a baseline run. |
+| `band_weight_center_hz` | Gaussian only. Center frequency of the penalty bump in Hz. Default `15000`. |
+| `band_weight_sigma_hz` | Gaussian only. Width of the bump (1-sigma) in Hz. Default `3000`. |
+| `band_weight_lo_hz` | Trapezoid only. Low edge of the boosted band in Hz. Default `4500`. |
+| `band_weight_hi_hz` | Trapezoid only. High edge of the boosted band in Hz. Default `18500`. |
+| `band_weight_ramp_hz` | Trapezoid only. Width of the soft ramp at each edge in Hz. Default `1500`. |
+| `band_weight_gain` | Peak gain above baseline. `0` = flat loss regardless of shape. `1.5` applies meaningful focus on the target band. |
+
+The gaussian shape adds a raised bump of extra penalty centered on a single frequency without over-boosting already-fine content nearby — good for a general HF-quality push. The trapezoid shape targets a specific flat band with soft edges — better when you know the exact transition range of the encoder you're targeting (e.g. an MP3 rolloff zone) and want even penalty across it rather than a single peak. Both are more surgical than the old `hf_boost` step function. Start with `gain: 0` for a baseline run, then enable if the model is neglecting the target zone.
 
 ### discriminator
 
@@ -220,11 +278,11 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 
 | Key | Description |
 |---|---|
-| `type` | `adamw`, `adamw_8bit` (cuts optimizer VRAM ~75%), or `cpu_offload`. |
-| `lr_g` | Generator learning rate. `3e-6` recommended for fine-tuning. |
+| `type` | `adamw`, `adamw_8bit` (recommended, cuts optimizer VRAM ~75%), or `cpu_offload`. |
+| `lr_g` | Generator learning rate. `3e-6` recommended for fine-tuning close to the target distribution; `1e-5` for more aggressive adaptation. |
 | `lr_d` | Discriminator learning rate. Keep ~10x lower than `lr_g`. |
 | `betas_g` | Generator Adam betas. Default `[0.9, 0.999]`. |
-| `betas_d` | Discriminator Adam betas. Default `[0.5, 0.99]`. |
+| `betas_d` | Discriminator Adam betas. Default `[0.5, 0.99]` — classic GAN recommendation. |
 
 ### system
 
@@ -236,11 +294,24 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 
 | Key | Description |
 |---|---|
-| `val_check_interval` | Validate every N training steps. |
+| `val_check_interval` | Validate every N training steps. For synthetic/noisy degradation, use 200-300 for cleaner metrics. For clean degradation, 50-100 is fine. |
 | `limit_val_batches` | Cap val batches per run. `100` gives good coverage at 3s chunk size. |
 | `max_epochs` | Hard epoch cap. Early stopping usually triggers before this. |
 | `precision` | `16-mixed` for fp16 mixed precision. |
-| `patience` | Early stopping patience in val runs. |
+| `patience` | Early stopping patience in val runs. `100` is reasonable; set higher or disable for exploratory runs. |
+
+---
+
+## Lessons Learned (Quick Reference)
+
+- **Frozen layers** — `4` for synthetic/noisy degradation; `0` for clean/consistent degradation.
+- **Augmentation** — noise augmentation harms fragile/synthetic degradation; safe for clean degradation.
+- **Batch size** — smaller (`1`) stabilizes training on noisy degradation; larger (`2-4`) works for clean degradation.
+- **TF32** — disable for GAN training on spectral data; precision loss matters.
+- **Training step order** — discriminator first, fresh feature maps for generator loss. Do not reuse feature maps.
+- **SI-SDR** — noisy and misleading for restoration tasks. Use perceptual metrics (msstft, hfmae, sfr) as primary signals.
+- **SFR threshold** — generic `1.05` threshold does not apply to restoration tasks. Look for plateauing, not crossing.
+- **Encoder fingerprint** — real encoder output beats synthetic approximation. Match the encoder version exactly.
 
 ---
 
@@ -254,7 +325,8 @@ Based on [JusperLee/Apollo](https://github.com/JusperLee/Apollo) by Kai Li and Y
   author={Li, Kai and Luo, Yi},
   booktitle={IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP)},
   year={2025},
-  organization={IEEE}\n}
+  organization={IEEE}
+}
 ```
 
 Licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
