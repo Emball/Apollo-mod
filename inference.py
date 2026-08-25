@@ -199,7 +199,47 @@ def ensure_model(shortname: str) -> tuple:
     return dest, feature_dim
 
 
+def _ensure_wav(file_path: str, target_sr: int = _SR) -> str:
+    """If file_path is not a WAV, decode it to a 32-bit float WAV in place via ffmpeg and
+    return the new .wav path.  The original file is removed after a successful conversion.
+    WAV files are returned as-is.  All encoder delay and decoder variance is baked out once
+    here so every downstream tool (Apollo, iZotope, DAW) reads from an identical source.
+    """
+    if os.path.splitext(file_path)[1].lower() == ".wav":
+        return file_path
+    try:
+        import ffmpeg as _ffmpeg
+    except ImportError:
+        return file_path  # ffmpeg-python not installed; fall back to torchaudio.load
+    import tempfile
+    src_dir = os.path.dirname(os.path.abspath(file_path))
+    wav_path = os.path.splitext(file_path)[0] + ".wav"
+    fd, tmp_path = tempfile.mkstemp(suffix=".wav", dir=src_dir)
+    os.close(fd)
+    try:
+        (
+            _ffmpeg
+            .input(file_path)
+            .output(tmp_path, format="wav", acodec="pcm_f32le", ar=target_sr, ac=2)
+            .overwrite_output()
+            .run(capture_stdout=True, capture_stderr=True)
+        )
+    except _ffmpeg.Error as e:
+        os.unlink(tmp_path)
+        stderr = e.stderr.decode(errors="replace") if e.stderr else ""
+        raise RuntimeError(f"[inference] ffmpeg conversion failed for {file_path}:\n{stderr}") from e
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+    os.replace(tmp_path, wav_path)
+    os.remove(file_path)
+    print(f"[inference] Converted to WAV (in place): {os.path.basename(wav_path)}")
+    return wav_path
+
+
 def load_audio(file_path: str, target_sr: int = _SR) -> torch.Tensor:
+    file_path = _ensure_wav(file_path, target_sr)
     audio, sr = torchaudio.load(file_path)
     if audio.shape[-1] == 0:
         raise ValueError(f"Audio file contains no samples: {file_path}")
