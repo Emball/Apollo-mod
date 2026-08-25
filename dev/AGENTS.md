@@ -25,20 +25,47 @@ The GitHub wiki (`Changes-and-improvements` page, repo `Emball/Apollo-mod.wiki.g
 
 ## Architecture
 
+## Folder Structure
+
+```
+apollo.bat / apollo.sh   -- launchers (install deps, start TUI)
+core/                    -- training/inference engine
+  train.py               -- training entry point
+  inference.py           -- inference entry point
+  evaluate.py            -- offline checkpoint evaluator
+  paired_datamodule.py   -- LQ/HQ data loading
+  look2hear/             -- model, discriminator, losses, metrics, system
+utils/                   -- TUI and tools
+  tui.py                 -- keyboard-navigated launcher (primary interface)
+  degrade_audio.py       -- synthetic degradation pipeline
+  degrade/               -- degradation JSON configs
+configs/                 -- training YAML configs (apollo.yaml, apollo_uni.yaml)
+dev/                     -- internal docs and experimental configs
+  AGENTS.md
+  apollo_stfl2.yaml
+data/                    -- training source audio (LQ/ + HQ/ pairs per split)
+chunks/                  -- auto-generated chunk cache
+models/                  -- pretrained / downloaded weights
+runs/                    -- training run output (checkpoints, logs)
+input/ output/           -- inference I/O staging dirs
+```
+
+## Architecture
+
 | File | Role |
 |---|---|
-| `look2hear/models/apollo.py` | Generator. BSNet + Roformer layers. STFT/iSTFT always in float32. |
-| `look2hear/discriminators/frequencydis.py` | Frequency discriminator. Hann windows cached as plain tensors in `_hann_cache` (not `register_buffer` — keeps them out of checkpoint state_dict). Mono input auto-expanded to stereo via `.expand()`. `window_weight_boost` config param (default `false`) enables inverse-size window weighting — only useful for severely degraded sources, causes HF artifact reproduction on mildly degraded audio. |
-| `look2hear/system/audio_litmodule.py` | Lightning module. Manual optimization, gradient checkpointing (BSNet only), val audio saving, RAM/CUDA OOM watchdogs, val index locking, rotation schedule, background write thread. Training step follows original two-pass structure (discriminator first, fresh feature maps for generator loss). TF32 disabled. AMP handled by Lightning's built-in precision plugin, not manual autocast. |
-| `look2hear/losses/gan_losses.py` | GAN losses. Hann windows and weight tensors in `_hann_cache`/`_weight_cache` dicts (not buffers). Gaussian band weight curve replaces the old flat `hf_boost` step function — peaks at `band_weight_center_hz` with `band_weight_sigma_hz` width. Set `band_weight_gain: 0` for flat loss. `hf_band_mae()` exposed as standalone function for val metrics. |
-| `paired_datamodule.py` | Loads chunked LQ/HQ WAV pairs. Live + cached augmentation pipeline. Val dataloader shuffles; dataset index passed through batch for stable audio monitoring. |
-| `train.py` | Entry point. FFmpeg-based in-place source conversion, auto-chunks on first run, run isolation, resume logic, chunk cache manifest. `RankBadger` callback renames checkpoints with `[rank]` prefix after each save. Baseline val pass runs before training on fresh runs. Checkpoint and early stopping monitor `val_composite` (weighted perceptual composite), not `val_loss`. |
-| `inference.py` | Entry point. Chunked inference, streams output to disk. Auto-selects latest checkpoint when `--weights` is omitted. `_ensure_wav` converts any non-WAV input to 32-bit float WAV in-place via FFmpeg before loading — eliminates encoder-delay mismatches between tools. `_spectral_merge` blends original and enhanced in the STFT domain (4096-point Hann, OLA) per user-defined frequency bands. Chunks shorter than `n_fft` are zero-padded before STFT and trimmed back after iSTFT — prevents crash on short tail chunks. Modes: `max_fft`, `min_fft`, `avg`, `original`, `enhanced`. `--low_end_preserve` applies `max_fft` below `--low_end_hz` (default 700 Hz). `--ensemble` accepts a JSON list of band specs for full control. `--aux_weights` / `--aux_conf_dir` / `--aux_ensemble` add a second checkpoint blended at specified bands. Phase always comes from the primary enhanced output; only magnitude is blended. |
-| `tui.py` | Keyboard-navigated TUI (Rich). Primary interface, launched by `apollo.bat`/`apollo.sh`. Shows Latest and Best checkpoint options separately in inference. Ctrl+C during training saves a checkpoint and returns to menu. Inference screen includes an ensemble picker (`_pick_ensemble`) between output selection and run — offers no ensemble, low-end preserve, low-end + transition blend preset, and custom JSON input. Selected ensemble flags are forwarded to inference.py. Utilities screen includes "Update Apollo" — runs `git pull --ff-only`, then relaunches itself in place via `os.execv`. |
-| `evaluate.py` | Offline checkpoint evaluator. Launched from TUI (Evaluate screen) or standalone (`python evaluate.py --conf_dir ...`). Reads metrics already encoded in checkpoint filenames; only runs inference for missing ones. Adds SDR and optional VISQOL (requires `pip install pyvisqol`). VISQOL scores cached in `<ckpt_dir>/.eval_cache.json`. Ranking weights: visqol=0.40, hfmae=0.25, msstft=0.20, sfr=0.10, sdr=0.05 — separate from RankBadger's training-time weights. |
+| `core/look2hear/models/apollo.py` | Generator. BSNet + Roformer layers. STFT/iSTFT always in float32. |
+| `core/look2hear/discriminators/frequencydis.py` | Frequency discriminator. Hann windows cached as plain tensors in `_hann_cache` (not `register_buffer` — keeps them out of checkpoint state_dict). Mono input auto-expanded to stereo via `.expand()`. `window_weight_boost` config param (default `false`) enables inverse-size window weighting — only useful for severely degraded sources, causes HF artifact reproduction on mildly degraded audio. |
+| `core/look2hear/system/audio_litmodule.py` | Lightning module. Manual optimization, gradient checkpointing (BSNet only), val audio saving, RAM/CUDA OOM watchdogs, val index locking, rotation schedule, background write thread. Training step follows original two-pass structure (discriminator first, fresh feature maps for generator loss). TF32 disabled. AMP handled by Lightning's built-in precision plugin, not manual autocast. |
+| `core/look2hear/losses/gan_losses.py` | GAN losses. Hann windows and weight tensors in `_hann_cache`/`_weight_cache` dicts (not buffers). Gaussian band weight curve replaces the old flat `hf_boost` step function — peaks at `band_weight_center_hz` with `band_weight_sigma_hz` width. Set `band_weight_gain: 0` for flat loss. `hf_band_mae()` exposed as standalone function for val metrics. |
+| `core/paired_datamodule.py` | Loads chunked LQ/HQ WAV pairs. Live + cached augmentation pipeline. Val dataloader shuffles; dataset index passed through batch for stable audio monitoring. |
+| `core/train.py` | Entry point. FFmpeg-based in-place source conversion, auto-chunks on first run, run isolation, resume logic, chunk cache manifest. `RankBadger` callback renames checkpoints with `[rank]` prefix after each save. Baseline val pass runs before training on fresh runs. Checkpoint and early stopping monitor `val_composite` (weighted perceptual composite), not `val_loss`. All paths resolved from `_REPO_ROOT` (two levels up from `core/`). |
+| `core/inference.py` | Entry point. Chunked inference, streams output to disk. Auto-selects latest checkpoint when `--weights` is omitted. `_ensure_wav` converts any non-WAV input to 32-bit float WAV in-place via FFmpeg before loading — eliminates encoder-delay mismatches between tools. `_spectral_merge` blends original and enhanced in the STFT domain (4096-point Hann, OLA) per user-defined frequency bands. Chunks shorter than `n_fft` are zero-padded before STFT and trimmed back after iSTFT — prevents crash on short tail chunks. Modes: `max_fft`, `min_fft`, `avg`, `original`, `enhanced`. `--low_end_preserve` applies `max_fft` below `--low_end_hz` (default 700 Hz). `--ensemble` accepts a JSON list of band specs for full control. `--aux_weights` / `--aux_conf_dir` / `--aux_ensemble` add a second checkpoint blended at specified bands. Phase always comes from the primary enhanced output; only magnitude is blended. |
+| `utils/tui.py` | Keyboard-navigated TUI (Rich). Primary interface, launched by `apollo.bat`/`apollo.sh`. Shows Latest and Best checkpoint options separately in inference. Ctrl+C during training saves a checkpoint and returns to menu. Inference screen includes an ensemble picker (`_pick_ensemble`) between output selection and run — offers no ensemble, low-end preserve, low-end + transition blend preset, and custom JSON input. Selected ensemble flags are forwarded to inference.py. Utilities screen includes "Update Apollo" — runs `git pull --ff-only`, then relaunches itself in place via `os.execv`. `ROOT` resolves to repo root (parent of `utils/`); `core/` is added to `sys.path` for lazy imports. |
+| `core/evaluate.py` | Offline checkpoint evaluator. Launched from TUI (Evaluate screen) or standalone (`python core/evaluate.py --conf_dir ...`). Reads metrics already encoded in checkpoint filenames; only runs inference for missing ones. Adds SDR and optional VISQOL (requires `pip install pyvisqol`). VISQOL scores cached in `<ckpt_dir>/.eval_cache.json`. Ranking weights: visqol=0.40, hfmae=0.25, msstft=0.20, sfr=0.10, sdr=0.05 — separate from RankBadger's training-time weights. |
 | `configs/apollo.yaml` | Base config (`feature_dim=256`). |
 | `configs/apollo_uni.yaml` | Universal config (`feature_dim=384`). |
-| `degrade_audio.py` | Synthetic degradation pipeline. Chain of codec/filter steps defined in a JSON config under `configs/degrade/` -- step types: `wma_encode`, `mp3_lame`, `lowpass`, `highpass` (all ffmpeg, shippable with no setup), and `mp3_fhg` (Fraunhofer IIS via `acmenc` -- requires `external_codecs.acmenc` set to a local `acmenc.exe` path; acmenc is a custom install, not shipped). Compressed steps auto-decode to WAV before the next step; the config only lists degradation passes, not the plumbing. Single file or `--bulk` folder mode. `configs/degrade/default.json` is ffmpeg-only (WMA 128k → LAME q5 → LAME q2); `configs/degrade/fhg_original.json` reproduces the original 7-pass FhG chain and requires acmenc. Launched from TUI Utilities (`Degrade audio`) or standalone. |
+| `utils/degrade_audio.py` | Synthetic degradation pipeline. Chain of codec/filter steps defined in a JSON config under `utils/degrade/` -- step types: `wma_encode`, `mp3_lame`, `lowpass`, `highpass` (all ffmpeg, shippable with no setup), and `mp3_fhg` (Fraunhofer IIS via `acmenc` -- requires `external_codecs.acmenc` set to a local `acmenc.exe` path; acmenc is a custom install, not shipped). Compressed steps auto-decode to WAV before the next step; the config only lists degradation passes, not the plumbing. Single file or `--bulk` folder mode. `utils/degrade/default.json` is ffmpeg-only (WMA 128k → LAME q5 → LAME q2); `utils/degrade/fhg_original.json` reproduces the original 7-pass FhG chain and requires acmenc. Launched from TUI Utilities (`Degrade audio`) or standalone. |
 
 ---
 
