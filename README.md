@@ -64,16 +64,15 @@ A rotating set of `val_songs` songs (LQ/HQ/Restored triplets) is saved to `runs/
 After each val run the console prints:
 
 ```
-  [val] msstft=0.3421  sfr=0.991  hfmae=0.0312  sdr=0.052  sisdr=25.341  (42.3s)
+  [val] visqol=3.821  sdr=10.234  sfr=0.968  sisdr=12.458  (18.8s)
 ```
 
-- **msstft** — multi-scale log-STFT loss. Lower is better. Broad spectral health indicator.
-- **sfr** — spectral flatness ratio in the 8-22kHz band. Rising above ~1.05 (flagged as `noise^`) is an early overfitting signal before it shows in SI-SDR.
-- **hfmae** — mean absolute log-magnitude error in the 13-19kHz transition band. The most direct signal for MP3 rolloff fine-tuning. Lower is better.
-- **sdr** — Signal-to-Distortion Ratio. Lower is better. Less noisy than sisdr; included as a secondary signal.
-- **sisdr** — waveform fidelity. Higher is better, but noisy and architecture-inherent — treat as a secondary signal, not the primary one.
+- **visqol** — perceptual quality score (0-5). The primary signal. Correlates with human listening judgement; insensitive to fine spectral deviations the model may be synthesizing rather than reconstructing. Higher is better.
+- **sdr** — Signal-to-Distortion Ratio. Less noisy than sisdr; a honest secondary check that overall waveform quality is improving. Higher is better.
+- **sfr** — spectral flatness ratio in the 8-22kHz band. A canary, not a quality metric. Rising toward or above 1.05 means the model may be injecting noise rather than reconstructing content. Watch for trend changes.
+- **sisdr** — waveform fidelity. Higher is better, but architecture-capped and noisy. Treat as a sanity check, not a primary signal.
 
-All five are logged to TensorBoard and shown in this order (perceptual signals first, sisdr last) since they're a better indicator of actual audio quality than sisdr alone.
+All four are logged to TensorBoard. `visqol` requires `pyvisqol` — if not installed it is silently skipped and reported as 0.0.
 
 **What to put in your val set:**
 
@@ -88,6 +87,12 @@ All five are logged to TensorBoard and shown in this order (perceptual signals f
 
 Run `apollo.bat` (Windows) or `./apollo.sh` (Linux/macOS) to open the TUI. Select **Train**, choose your config, and training starts immediately with live output in the terminal. Ctrl+C stops training cleanly, saves a checkpoint, and returns to the menu.
 
+Pass `--dev` to include configs from `dev/` alongside the standard `configs/` directory in the TUI config picker:
+
+```bash
+apollo.bat --dev
+```
+
 Before training begins, a baseline val pass runs on the pretrained weights so you have a reference point:
 
 ```
@@ -97,7 +102,7 @@ Before training begins, a baseline val pass runs on the pretrained weights so yo
 Training lines show speed and the most recent val metrics:
 
 ```
-  24.9%  step=400  400/1604  1.38 it/s  msstft=0.3421  sfr=0.991  hfmae=0.0312  sdr=0.052  sisdr=25.341
+  24.9%  step=400  400/1604  1.38 it/s  visqol=3.821  sdr=10.234  sfr=0.968  sisdr=12.458
 ```
 
 To run directly from the command line:
@@ -113,17 +118,11 @@ Each run creates a timestamped folder under `runs/<name>/<timestamp>/`. Set `res
 All checkpoints are kept. Each is named with full stats and a rank badge:
 
 ```
-[1]-step=001200-sisdr=-24.801-msstft=0.2913-sfr=0.988-hfmae=0.0241-sdr=0.052.ckpt
-[2]-step=001100-sisdr=-24.650-msstft=0.2934-sfr=0.991-hfmae=0.0258-sdr=0.048.ckpt
+[1]-step=001200-sisdr=-12.470-visqol=3.940-sdr=10.143-sfr=0.973.ckpt
+[2]-step=001100-sisdr=-12.398-visqol=3.891-sdr=10.120-sfr=0.975.ckpt
 ```
 
-`[1]` = best by a weighted composite of val metrics. Two weighting systems exist:
-
-1. **Checkpoint save trigger** — `val_composite` uses weights `msstft=0.40, hfmae=0.35, sfr=0.15, sisdr=0.10`. This determines which checkpoints get saved.
-
-2. **Rank badge** — `RankBadger` renames checkpoints using weights `msstft=0.40, hfmae=0.30, sfr=0.15, sisdr=0.10, sdr=0.05`. This is display-only; rank 1 = best.
-
-SI-SDR is noisy and only a minor tiebreaker. The rank badges are updated after every new checkpoint save.
+`[1]` = best by a weighted composite: `visqol=0.50, sdr=0.25, sfr=0.15, sisdr=0.10`. The rank badges are updated after every new checkpoint save. Offline `evaluate.py` runs additional metrics (msstft, hfmae, VISQOL on more samples) and re-ranks the full set.
 
 ---
 
@@ -192,8 +191,8 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 **General:**
 - Start with `band_weight_gain: 0` for a baseline run, then enable at 1.0-1.5 after you have a reference point
 - Use `val_songs` to match your validation set size
-- SI-SDR is noisy — use msstft and hfmae as your primary signals
-- SFR climbing above 1.05 is not always a problem; it means the model is restoring HF energy. Look for plateauing, not crossing.
+- SI-SDR is noisy — use VISQOL as the primary signal; SFR as a canary
+- SFR climbing is not always a problem — it often means the model is synthesizing HF content. Watch for trend changes, not a hard threshold.
 
 ### exp
 
@@ -289,6 +288,10 @@ The gaussian shape adds a raised bump of extra penalty centered on a single freq
 | Key | Description |
 |---|---|
 | `gradient_checkpointing` | Recomputes activations during backward. Saves 30-40% VRAM at ~30% compute cost. |
+| `visqol_fraction` | Fraction of val pairs to score with VISQOL per val run. `1.0` = all; lower values reduce val time if VISQOL is slow. Default `1.0`. |
+| `target_band_loss_enabled` | Adds a configurable-range band loss to live val metrics. Off by default. When enabled, appears as `tbl=` in console and checkpoint filenames. |
+| `target_band_loss_lo_hz` | Low edge of the target band in Hz. Default `13000`. |
+| `target_band_loss_hi_hz` | High edge of the target band in Hz. Default `19000`. |
 
 ### checkpoint and trainer
 
@@ -309,8 +312,8 @@ The gaussian shape adds a raised bump of extra penalty centered on a single freq
 - **Batch size** — smaller (`1`) stabilizes training on noisy degradation; larger (`2-4`) works for clean degradation.
 - **TF32** — disable for GAN training on spectral data; precision loss matters.
 - **Training step order** — discriminator first, fresh feature maps for generator loss. Do not reuse feature maps.
-- **SI-SDR** — noisy and misleading for restoration tasks. Use perceptual metrics (msstft, hfmae, sfr) as primary signals.
-- **SFR threshold** — generic `1.05` threshold does not apply to restoration tasks. Look for plateauing, not crossing.
+- **SI-SDR** — noisy and misleading for restoration tasks. Use VISQOL and SDR as primary signals; SFR as a canary.
+- **SFR** — watch for trend changes, not absolute threshold. Rising SFR with stable VISQOL is fine.
 - **Encoder fingerprint** — real encoder output beats synthetic approximation. Match the encoder version exactly.
 
 ---
