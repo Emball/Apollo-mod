@@ -1,35 +1,107 @@
-exp: 
+# Original stfl run config -- preserved as reference for the pre-mod training baseline.
+# optimizer_g/optimizer_d format was used in early versions; this is the modern equivalent.
+exp:
   dir: ./runs
   name: apollo_stfl
+
+resume: false  # original run was not resumed
+
+optimizations:
+  tf32: false
+  cudnn_benchmark: true
+  expandable_segments: true
+  triton_cache: true
+  ram_limit_fraction: 0.95
+
+training:
+  n_layers_to_freeze: 4
+  val_songs: 3
+  val_rotate_every: auto
+  grad_accum_steps: 1
+
 datas:
   _target_: paired_datamodule.PairedAudioDataModule
   sr: 44100
   segment_sec: 3
   batch_size: 1
   num_workers: 2
+  pin_memory: false
+  val_bootstrap_chunks: 15
+  align_data: false
+  augmentation:
+    live:
+      enabled: false
+      stereo_alternation:
+        enabled: false
+        prob: 1.0
+      gain:
+        enabled: false
+        prob: 0.5
+        db_max: 1.5
+      polarity:
+        enabled: false
+        prob: 0.5
+      pitch_shift:
+        enabled: false
+        prob: 0.5
+        semitones_max: 1.5
+      noise:
+        enabled: false
+        prob: 0.5
+        sigma: 0.002
+      mp3_degradation:
+        enabled: false
+        prob: 0.5
+        kbps_min: 64
+        kbps_max: 256
+    cached:
+      enabled: false
+      cached_variants: 1
+      stereo_alternation:
+        enabled: false
+        fraction: 1.0
+      gain:
+        enabled: false
+        fraction: 0.5
+        db_max: 1.5
+      polarity:
+        enabled: false
+        fraction: 0.5
+      pitch_shift:
+        enabled: false
+        fraction: 0.5
+        semitones_max: 1.5
+      noise:
+        enabled: false
+        fraction: 0.5
+        sigma: 0.002
+      mp3_degradation:
+        enabled: false
+        fraction: 0.5
+        kbps_min: 64
+        kbps_max: 256
 
 model:
   _target_: look2hear.models.apollo.Apollo
   sr: 44100
   win: 20
-  feature_dim: 384       # universal model is wider than base (256)
+  feature_dim: 384
   layer: 6
 
 discriminator:
   _target_: look2hear.discriminators.frequencydis.MultiFrequencyDiscriminator
   nch: 2
   window: [32, 64, 128, 256, 512, 1024, 2048]
+  window_weight_boost: false
 
-optimizer_g:
-  _target_: torch.optim.AdamW
-  lr: 0.00001
+# Original used lr=1e-5 for G and lr=1e-6 for D with betas=[0.5, 0.99] for D
+optimizer:
+  type: AdamW
+  lr_g: 0.00001
+  lr_d: 0.000001
   weight_decay: 0.01
-
-optimizer_d:
-  _target_: torch.optim.AdamW
-  lr: 0.000001
-  weight_decay: 0.01
-  betas: [0.5, 0.99]
+  betas_g: [0.9, 0.999]
+  betas_d: [0.5, 0.99]
 
 scheduler_g:
   _target_: torch.optim.lr_scheduler.StepLR
@@ -44,6 +116,13 @@ scheduler_d:
 loss_g:
   _target_: look2hear.losses.gan_losses.MultiFrequencyGenLoss
   eps: 1e-8
+  band_weight_shape: gaussian
+  band_weight_center_hz: 15000.0
+  band_weight_sigma_hz: 3000.0
+  band_weight_gain: 0.0            # original had no band weighting
+  band_weight_lo_hz: 4500.0
+  band_weight_hi_hz: 18500.0
+  band_weight_ramp_hz: 1500.0
 
 loss_d:
   _target_: look2hear.losses.gan_losses.MultiFrequencyDisLoss
@@ -55,11 +134,17 @@ metrics:
 
 system:
   _target_: look2hear.system.audio_litmodule.AudioLightningModule
+  gradient_checkpointing: false
+  grad_accum_steps: ${training.grad_accum_steps}
+  visqol_fraction: 1.0
+  target_band_loss_enabled: false
+  target_band_loss_lo_hz: 13000.0
+  target_band_loss_hi_hz: 19000.0
 
 early_stopping:
   _target_: pytorch_lightning.callbacks.EarlyStopping
   monitor: val_loss
-  patience: 2000          # in steps (val runs every 100 steps, so ~200 evals before stopping)
+  patience: 2000
   mode: min
   verbose: true
 
@@ -71,12 +156,14 @@ checkpoint:
   verbose: true
   save_top_k: -1
   save_last: false
-  filename: 'step={step:06d}-val_loss={val_loss:.4f}'
+  filename: 'step={step:06d}-sisdr={val_loss:.3f}-visqol={val_visqol:.3f}-sdr={val_sdr:.3f}-sfr={val_sfr:.3f}'
 
 logger:
   _target_: pytorch_lightning.loggers.TensorBoardLogger
   save_dir: ${exp.dir}/${exp.name}/logs
-  name: Apollo_Universal
+  name: ""
+  version: ""
+  log_graph: false
 
 trainer:
   _target_: pytorch_lightning.Trainer
@@ -87,5 +174,5 @@ trainer:
   precision: 16-mixed
   limit_train_batches: 1.0
   fast_dev_run: false
-  val_check_interval: 306   # run validation every 500 steps (~8 min at current speed)
-  check_val_every_n_epoch: null  # disable epoch-based val, use step-based instead
+  val_check_interval: 306
+  check_val_every_n_epoch: null
