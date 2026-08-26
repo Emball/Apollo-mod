@@ -66,14 +66,17 @@ echo [apollo] Dependencies up to date
 :: 4. Strip --dev flag and set env var if present
 set "APOLLO_DEV="
 set "FILTERED_ARGS="
-for %%a in (%*) do (
-    if /i "%%a"=="--dev" (
-        set "APOLLO_DEV=1"
-    ) else (
-        set "FILTERED_ARGS=!FILTERED_ARGS! %%a"
+set "_RAW_ARGS=%*"
+if defined _RAW_ARGS (
+    for %%a in (%*) do (
+        if /i "%%a"=="--dev" (
+            set "APOLLO_DEV=1"
+        ) else (
+            set "FILTERED_ARGS=!FILTERED_ARGS! %%a"
+        )
     )
+    if defined FILTERED_ARGS set "FILTERED_ARGS=!FILTERED_ARGS:~1!"
 )
-set "FILTERED_ARGS=!FILTERED_ARGS:~1!"
 
 :: 5. If arguments given, treat first as the script name and run it
 if not "!FILTERED_ARGS!"=="" (
