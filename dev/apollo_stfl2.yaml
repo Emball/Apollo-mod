@@ -10,9 +10,10 @@ optimizations:
   expandable_segments: true
   triton_cache: true
   ram_limit_fraction: 0.95
+
 training:
   n_layers_to_freeze: 0
-  val_audio_pairs: 6
+  val_songs: 6
   val_rotate_every: 200
   grad_accum_steps: 2
 
@@ -54,7 +55,7 @@ datas:
     cached:
       enabled: false
       cached_variants: 1
-      mono_channel:
+      stereo_alternation:
         enabled: false
         fraction: 1.0
       gain:
@@ -86,10 +87,10 @@ model:
   layer: 6
 
 discriminator:
-  window_weight_boost: false
   _target_: look2hear.discriminators.frequencydis.MultiFrequencyDiscriminator
   nch: 2
   window: [32, 64, 128, 256, 512, 1024, 2048]
+  window_weight_boost: false
 
 optimizer:
   type: AdamW
@@ -112,9 +113,13 @@ scheduler_d:
 loss_g:
   _target_: look2hear.losses.gan_losses.MultiFrequencyGenLoss
   eps: 1e-8
+  band_weight_shape: gaussian
   band_weight_center_hz: 15000.0
   band_weight_sigma_hz: 3000.0
   band_weight_gain: 0.0            # disabled -- flat loss for baseline run
+  band_weight_lo_hz: 4500.0        # trapezoid params (unused when shape=gaussian)
+  band_weight_hi_hz: 18500.0
+  band_weight_ramp_hz: 1500.0
 
 loss_d:
   _target_: look2hear.losses.gan_losses.MultiFrequencyDisLoss
