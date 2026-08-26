@@ -1,6 +1,6 @@
 exp:
   dir: ./runs
-  name: apollo_stfl2
+  name: apollo_stfl
 
 resume: true
 
@@ -11,10 +11,10 @@ optimizations:
   triton_cache: true
   ram_limit_fraction: 0.95
 training:
-  n_layers_to_freeze: 0
+  n_layers_to_freeze: 4
   val_audio_pairs: 6
   val_rotate_every: 200
-  grad_accum_steps: 2
+  grad_accum_steps: 1
 
 datas:
   _target_: paired_datamodule.PairedAudioDataModule
@@ -43,7 +43,7 @@ datas:
         prob: 0.5
         semitones_max: 1.5
       noise:
-        enabled: true
+        enabled: false  # disabled -- corrupts discriminator HF gradient signal
         prob: 0.5
         sigma: 0.002
       mp3_degradation:

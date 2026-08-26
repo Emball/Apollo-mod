@@ -1,0 +1,91 @@
+exp: 
+  dir: ./runs
+  name: apollo_stfl
+datas:
+  _target_: paired_datamodule.PairedAudioDataModule
+  sr: 44100
+  segment_sec: 3
+  batch_size: 1
+  num_workers: 2
+
+model:
+  _target_: look2hear.models.apollo.Apollo
+  sr: 44100
+  win: 20
+  feature_dim: 384       # universal model is wider than base (256)
+  layer: 6
+
+discriminator:
+  _target_: look2hear.discriminators.frequencydis.MultiFrequencyDiscriminator
+  nch: 2
+  window: [32, 64, 128, 256, 512, 1024, 2048]
+
+optimizer_g:
+  _target_: torch.optim.AdamW
+  lr: 0.00001
+  weight_decay: 0.01
+
+optimizer_d:
+  _target_: torch.optim.AdamW
+  lr: 0.000001
+  weight_decay: 0.01
+  betas: [0.5, 0.99]
+
+scheduler_g:
+  _target_: torch.optim.lr_scheduler.StepLR
+  step_size: 2
+  gamma: 0.98
+
+scheduler_d:
+  _target_: torch.optim.lr_scheduler.StepLR
+  step_size: 2
+  gamma: 0.98
+
+loss_g:
+  _target_: look2hear.losses.gan_losses.MultiFrequencyGenLoss
+  eps: 1e-8
+
+loss_d:
+  _target_: look2hear.losses.gan_losses.MultiFrequencyDisLoss
+  eps: 1e-8
+
+metrics:
+  _target_: look2hear.losses.MultiSrcNegSDR
+  sdr_type: sisdr
+
+system:
+  _target_: look2hear.system.audio_litmodule.AudioLightningModule
+
+early_stopping:
+  _target_: pytorch_lightning.callbacks.EarlyStopping
+  monitor: val_loss
+  patience: 2000          # in steps (val runs every 100 steps, so ~200 evals before stopping)
+  mode: min
+  verbose: true
+
+checkpoint:
+  _target_: pytorch_lightning.callbacks.ModelCheckpoint
+  dirpath: ${exp.dir}/${exp.name}/checkpoints
+  monitor: val_loss
+  mode: min
+  verbose: true
+  save_top_k: -1
+  save_last: false
+  filename: 'step={step:06d}-val_loss={val_loss:.4f}'
+
+logger:
+  _target_: pytorch_lightning.loggers.TensorBoardLogger
+  save_dir: ${exp.dir}/${exp.name}/logs
+  name: Apollo_Universal
+
+trainer:
+  _target_: pytorch_lightning.Trainer
+  devices: [0]
+  max_epochs: 500
+  default_root_dir: ${exp.dir}/${exp.name}/
+  accelerator: cuda
+  precision: 16-mixed
+  limit_train_batches: 1.0
+  fast_dev_run: false
+  val_check_interval: 306   # run validation every 500 steps (~8 min at current speed)
+  check_val_every_n_epoch: null  # disable epoch-based val, use step-based instead
