@@ -129,7 +129,7 @@ Feature matching loss uses fresh feature maps from the generator step, not stale
 
 | Branch | Contains |
 |--------|----------|
-| `main` | Spectral merge engine, TUI ensemble picker, aux checkpoint blending, `_ensure_wav` in-place MP3→WAV conversion, short-chunk STFT fix, noise augmentation disabled. Dev mode (`--dev` flag). stfl configs live in `dev/` on diagnostic only. |
-| `diagnostic/revert-training-step` | All of main plus: training step revert (discriminator-first, fresh feature maps), configurable TF32, AMP via Lightning precision plugin, VISQOL live metrics, stfl/stfl-og/stfl2 configs in `dev/`. |
+| `main` | Spectral merge engine, TUI ensemble picker, aux checkpoint blending, `_ensure_wav` in-place MP3→WAV conversion, short-chunk STFT fix, noise augmentation disabled. Dev mode (`--dev` flag). Dev configs (`dev/`) on both branches. |
+| `diagnostic/revert-training-step` | All of main plus: training step revert (discriminator-first, fresh feature maps), configurable TF32, AMP via Lightning precision plugin, VISQOL live metrics. |
 
 The diagnostic branch contains four training fixes that have not yet been validated. If they resolve the stfl regression, they will be merged to main.
