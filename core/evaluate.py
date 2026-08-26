@@ -13,7 +13,7 @@ Metrics computed per checkpoint:
     hfmae   -- HF band MAE (configurable; computed here for legacy checkpoints)
 
 Ranking weights (evaluate.py only -- offline, VISQOL-anchored):
-    visqol=0.40, hfmae=0.25, msstft=0.20, sfr=0.10, sdr=0.05
+    visqol=0.50, sdr=0.25, sfr=0.15, sisdr=0.10
 
 Training-time RankBadger uses a separate weighting (no VISQOL).
 
