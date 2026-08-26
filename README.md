@@ -51,7 +51,7 @@ data/apollo_stfl/
     HQ/
 ```
 
-On first run, sources are converted to WAV and chunked into fixed-length segments under `chunks/<apollo_name>/`. If chunk parameters change in your config, the cache is re-built automatically.
+On first run, sources are converted to WAV and chunked into fixed-length segments under `usr/cache/chunks/`. The cache is keyed on source file contents and chunk parameters, so changing either automatically triggers a rebuild. The same cache is shared across configs that use the same dataset and parameters.
 
 16-bit WAV and FLAC are fully supported. MP3 is supported but not recommended as it requires manual delay compensation in your config.
 
