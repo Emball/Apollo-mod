@@ -113,15 +113,14 @@ scheduler_d:
 loss_g:
   _target_: look2hear.losses.gan_losses.MultiFrequencyGenLoss
   eps: 1e-8
-  # Trapezoid targeting the HF air band where codec rolloff is most severe on
-  # instrumental content -- cymbals, string harmonics, synth overtones.
-  # Flanks below ~10kHz are mildly discounted; below that the codec damage is
-  # mild and the model can already handle it with the flat loss.
+  # Trapezoid targeting HF phase/temporal smear in instrumental -- no hard cutoff
+  # (instrumental LQ has live signal to 21kHz), damage is corruption not erasure.
+  # Smear begins ~11kHz; shifted window down from 10-20 to 11-21 to stay on it.
   band_weight_shape: trapezoid
   band_weight_gain: 1.5
-  band_weight_lo_hz: 10000.0
-  band_weight_hi_hz: 20000.0
-  band_weight_ramp_hz: 2000.0
+  band_weight_lo_hz: 11000.0
+  band_weight_hi_hz: 21000.0
+  band_weight_ramp_hz: 1500.0
   band_weight_center_hz: 15000.0  # unused when shape=trapezoid
   band_weight_sigma_hz: 3000.0    # unused when shape=trapezoid
 
@@ -139,8 +138,8 @@ system:
   grad_accum_steps: ${training.grad_accum_steps}
   visqol_fraction: 1.0
   target_band_loss_enabled: false
-  target_band_loss_lo_hz: 10000.0
-  target_band_loss_hi_hz: 20000.0
+  target_band_loss_lo_hz: 11000.0
+  target_band_loss_hi_hz: 21000.0
 
 early_stopping:
   _target_: pytorch_lightning.callbacks.EarlyStopping
