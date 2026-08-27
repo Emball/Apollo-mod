@@ -116,7 +116,7 @@ loss_g:
   band_weight_shape: gaussian
   band_weight_center_hz: 15000.0
   band_weight_sigma_hz: 3000.0
-  band_weight_gain: 0.0            # disabled -- flat loss for baseline run
+  band_weight_gain: 1.2            # gaussian boost centered on 15kHz -- restored after flat baseline
   band_weight_lo_hz: 4500.0        # trapezoid params (unused when shape=gaussian)
   band_weight_hi_hz: 18500.0
   band_weight_ramp_hz: 1500.0
