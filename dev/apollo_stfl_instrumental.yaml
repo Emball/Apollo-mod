@@ -117,10 +117,10 @@ loss_g:
   # (instrumental LQ has live signal to 21kHz), damage is corruption not erasure.
   # Smear begins ~11kHz; shifted window down from 10-20 to 11-21 to stay on it.
   band_weight_shape: trapezoid
-  band_weight_gain: 1.5
-  band_weight_lo_hz: 11000.0
-  band_weight_hi_hz: 21000.0
-  band_weight_ramp_hz: 1500.0
+  band_weight_gain: 1.6
+  band_weight_lo_hz: 15000.0   # delta is flat/negative below 15kHz -- cliff starts here
+  band_weight_hi_hz: 21000.0   # HQ content present to 22kHz
+  band_weight_ramp_hz: 1000.0  # cliff is abrupt, tight ramp reflects that
   band_weight_center_hz: 15000.0  # unused when shape=trapezoid
   band_weight_sigma_hz: 3000.0    # unused when shape=trapezoid
 

@@ -118,8 +118,8 @@ loss_g:
   # Below 12kHz the LQ/HQ delta is <3dB -- no meaningful loss to recover there.
   band_weight_shape: trapezoid
   band_weight_gain: 1.4
-  band_weight_lo_hz: 12000.0
-  band_weight_hi_hz: 20000.0
+  band_weight_lo_hz: 10000.0   # delta crosses 4dB at 10.5kHz -- transition zone starts here
+  band_weight_hi_hz: 16000.0   # LQ hits noise floor by 15kHz; no point weighting above
   band_weight_ramp_hz: 1500.0
   band_weight_center_hz: 10000.0  # unused when shape=trapezoid
   band_weight_sigma_hz: 3000.0    # unused when shape=trapezoid
