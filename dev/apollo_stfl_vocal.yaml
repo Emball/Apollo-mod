@@ -143,7 +143,7 @@ system:
 
 early_stopping:
   _target_: pytorch_lightning.callbacks.EarlyStopping
-  monitor: val_loss
+  monitor: val_sfr
   patience: 100
   mode: min
   verbose: true
@@ -151,7 +151,7 @@ early_stopping:
 checkpoint:
   _target_: pytorch_lightning.callbacks.ModelCheckpoint
   dirpath: ${exp.dir}/${exp.name}/checkpoints
-  monitor: val_loss
+  monitor: val_sfr
   mode: min
   verbose: true
   save_top_k: -1

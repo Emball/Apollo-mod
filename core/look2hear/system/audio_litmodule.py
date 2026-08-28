@@ -806,17 +806,6 @@ class AudioLightningModule(pl.LightningModule):
         if self.target_band_loss_enabled:
             self.log("val_tbl", float(_tbl) if _tbl is not None else 0.0, prog_bar=False, logger=True)
 
-        # Weighted composite for checkpoint monitoring. Lower = better.
-        # visqol: higher = better, invert. sdr: higher = better, invert.
-        # sfr: lower = better (canary). sisdr: higher = better, invert.
-        # Weights: visqol=0.50, sdr=0.25, sfr=0.15, sisdr=0.10
-        _w_visqol = 0.50 * (-(float(_visqol) / 5.0) if _visqol is not None else 0.0)  # normalise 1-5 scale, invert
-        _w_sdr    = 0.25 * (-float(_sdr)    if _sdr    is not None else 0.0)
-        _w_sfr    = 0.15 * ( float(_sfr)    if _sfr    is not None else 0.0)
-        _w_sisdr  = 0.10 * (-float(_sisdr)  if _sisdr  is not None else 0.0)
-        _composite = _w_visqol + _w_sdr + _w_sfr + _w_sisdr
-        self.log("val_composite", _composite, prog_bar=False, logger=True)
-
     # ------------------------------------------------------------------
     # Checkpoint persistence
     # ------------------------------------------------------------------

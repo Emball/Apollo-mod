@@ -1277,104 +1277,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 if parts:
                     print(f"\n  [val] {' '.join(parts)}  ({val_dur:.1f}s)", flush=True)
 
-    class RankBadger(_Callback):
-        """
-        After each checkpoint save, renames all checkpoints in the dir to
-        prepend [rank] based on a weighted composite of the perceptual
-        metrics -- not sisdr alone. sisdr is noisy (architecture-inherent
-        variance) and demoted to a minor tiebreaker; msstft and hfmae carry
-        the most signal for perceived restoration quality.
-
-        Weights: msstft=0.40, hfmae=0.35, sfr=0.15, sisdr=0.10.
-        Each metric is min-max normalized across the current checkpoint set
-        before weighting, oriented so 0.0 = best and 1.0 = worst. Rank 1 =
-        lowest composite score. Runs in a background thread.
-        """
-
-        # visqol: higher = better (invert in composite). sdr: higher = better (invert).
-        # sfr: lower = better. sisdr: higher = better (invert). tbl: lower = better (optional).
-        _WEIGHTS = {"visqol": 0.50, "sdr": 0.25, "sfr": 0.15, "sisdr": 0.10}
-
-        def on_save_checkpoint(self, trainer, pl_module, checkpoint_dict):
-            import threading
-            threading.Thread(target=self._rebadge, args=(trainer,), daemon=True).start()
-
-        def _rebadge(self, trainer):
-            import re, time as _t
-            _t.sleep(0.5)  # let the file finish flushing
-            try:
-                cb = trainer.checkpoint_callback
-                ckpt_dir = cb.dirpath if cb is not None else None
-                if not ckpt_dir or not os.path.isdir(ckpt_dir):
-                    return
-                files = [f for f in os.listdir(ckpt_dir) if f.endswith(".ckpt")]
-
-                pats = {
-                    "visqol": re.compile(r"visqol=(-?[\d.]+)"),
-                    "sdr":    re.compile(r"(?<![a-z])sdr=(-?[\d.]+)"),
-                    "sfr":    re.compile(r"sfr=(-?[\d.]+)"),
-                    "sisdr":  re.compile(r"sisdr=(-?[\d.]+)"),
-                }
-
-                parsed = []
-                for f in files:
-                    clean = re.sub(r"^\[\d+\]-", "", f)
-                    vals = {}
-                    for key, pat in pats.items():
-                        m = pat.search(clean)
-                        if m:
-                            vals[key] = float(m.group(1))
-                    if vals:
-                        parsed.append((vals, f, clean))
-                if not parsed:
-                    return
-
-                # Min-max normalize each metric across the current set.
-                # sisdr: higher is better -> invert so higher normalizes to 0 (best).
-                # msstft/sfr/hfmae: lower is better -> normalizes directly, 0 = best.
-                norm_ranges = {}
-                for key in self._WEIGHTS:
-                    present = [v[key] for v, _, _ in parsed if key in v]
-                    if not present:
-                        continue
-                    lo, hi = min(present), max(present)
-                    norm_ranges[key] = (lo, hi)
-
-                # Metrics where higher = better (invert so 0 = best after norm)
-                _invert = {"visqol", "sdr", "sisdr"}
-
-                def composite(vals):
-                    total_w = 0.0
-                    score = 0.0
-                    for key, weight in self._WEIGHTS.items():
-                        if key not in vals or key not in norm_ranges:
-                            continue
-                        lo, hi = norm_ranges[key]
-                        span = hi - lo
-                        n = 0.0 if span == 0 else (vals[key] - lo) / span
-                        if key in _invert:
-                            n = 1.0 - n
-                        score += weight * n
-                        total_w += weight
-                    return score / total_w if total_w > 0 else float("inf")
-
-                scored = [(composite(v), f, c) for v, f, c in parsed]
-                # Sort ascending -- lowest composite score = best = rank 1
-                scored.sort(key=lambda x: x[0])
-                for rank, (_, old_name, clean_name) in enumerate(scored, start=1):
-                    new_name = f"[{rank}]-{clean_name}"
-                    if old_name != new_name:
-                        try:
-                            os.rename(
-                                os.path.join(ckpt_dir, old_name),
-                                os.path.join(ckpt_dir, new_name),
-                            )
-                        except Exception:
-                            pass
-            except Exception:
-                pass
-
-    callbacks: List[Callback] = [StepPrinter(), RankBadger()]
+    callbacks: List[Callback] = [StepPrinter()]
 
     _lvb = cfg.trainer.get("limit_val_batches", 1.0)
     val_disabled = (isinstance(_lvb, (int, float)) and float(_lvb) == 0.0)
@@ -1385,16 +1288,18 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if cfg.get("early_stopping") and not val_disabled:
         print_only(f"Instantiating early_stopping")
         es = hydra.utils.instantiate(cfg.early_stopping)
-        es.monitor = "val_composite"
+        # Monitor sfr directly -- it's the metric that actually flags GAN
+        # collapse (discriminator-satisfying noise instead of real signal).
+        # Lower = better; the "noise^" flag in the printout fires above 1.05.
+        es.monitor = "val_sfr"
         es.mode    = "min"
         callbacks.append(es)
     if cfg.get("checkpoint") and not val_disabled:
         print_only(f"Instantiating checkpoint")
         checkpoint = hydra.utils.instantiate(cfg.checkpoint)
-        # Monitor the weighted composite (msstft/hfmae/sfr/sisdr) not val_loss alone.
-        checkpoint.monitor = "val_composite"
+        # Monitor sfr, not a composite -- see note above.
+        checkpoint.monitor = "val_sfr"
         checkpoint.mode    = "min"
-        # Keep every checkpoint -- ranking badge added by RankBadger.
         checkpoint.save_top_k = -1
         # Full stats in filename; all metrics are logged via self.log() so
         # Lightning can interpolate them here.
