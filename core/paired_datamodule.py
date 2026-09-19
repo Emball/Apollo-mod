@@ -55,18 +55,6 @@ class SimpleAugCfg:
     prob: float   = 0.5
 
 @dataclass
-class PitchShiftAugCfg:
-    enabled:      bool  = True
-    prob:         float = 0.5
-    semitones_max: float = 1.5
-
-@dataclass
-class NoiseAugCfg:
-    enabled: bool  = True
-    prob:    float = 0.5
-    sigma:   float = 0.002
-
-@dataclass
 class Mp3AugCfg:
     enabled:  bool  = False
     prob:     float = 0.5
@@ -76,13 +64,11 @@ class Mp3AugCfg:
 
 @dataclass
 class AugmentationCfg:
-    enabled:      bool            = True
-    gain:         GainAugCfg      = field(default_factory=GainAugCfg)
-    polarity:     SimpleAugCfg    = field(default_factory=SimpleAugCfg)
-    pitch_shift:  PitchShiftAugCfg = field(default_factory=PitchShiftAugCfg)
-    noise:        NoiseAugCfg     = field(default_factory=NoiseAugCfg)
-    mp3_degradation: Mp3AugCfg   = field(default_factory=Mp3AugCfg)
-    stereo_alternation: SimpleAugCfg   = field(default_factory=SimpleAugCfg)
+    enabled:            bool         = True
+    gain:               GainAugCfg   = field(default_factory=GainAugCfg)
+    polarity:           SimpleAugCfg = field(default_factory=SimpleAugCfg)
+    mp3_degradation:    Mp3AugCfg    = field(default_factory=Mp3AugCfg)
+    stereo_alternation: SimpleAugCfg = field(default_factory=SimpleAugCfg)
 
 def _get(d, key, default):
     try:
@@ -101,12 +87,10 @@ def _parse_aug_cfg(raw) -> AugmentationCfg:
     if live is not None:
         raw = live
 
-    gain_raw    = _get(raw, "gain", {})
-    pol_raw     = _get(raw, "polarity", {})
-    pitch_raw   = _get(raw, "pitch_shift", {})
-    noise_raw   = _get(raw, "noise", {})
-    mp3_raw     = _get(raw, "mp3_degradation", {})
-    mono_raw    = _get(raw, "stereo_alternation", {})
+    gain_raw = _get(raw, "gain", {})
+    pol_raw  = _get(raw, "polarity", {})
+    mp3_raw  = _get(raw, "mp3_degradation", {})
+    mono_raw = _get(raw, "stereo_alternation", {})
 
     return AugmentationCfg(
         enabled=_get(raw, "enabled", True),
@@ -118,16 +102,6 @@ def _parse_aug_cfg(raw) -> AugmentationCfg:
         polarity=SimpleAugCfg(
             enabled=_get(pol_raw, "enabled", True),
             prob=   _get(pol_raw, "prob",    0.5),
-        ),
-        pitch_shift=PitchShiftAugCfg(
-            enabled=       _get(pitch_raw, "enabled",       True),
-            prob=          _get(pitch_raw, "prob",          0.5),
-            semitones_max= _get(pitch_raw, "semitones_max", 1.5),
-        ),
-        noise=NoiseAugCfg(
-            enabled=_get(noise_raw, "enabled", True),
-            prob=   _get(noise_raw, "prob",    0.5),
-            sigma=  _get(noise_raw, "sigma",   0.002),
         ),
         mp3_degradation=Mp3AugCfg(
             enabled= _get(mp3_raw, "enabled",  False),
@@ -234,84 +208,54 @@ def augment_pair(
     cfg: AugmentationCfg,
     sr: int = 44100,
     idx: Optional[int] = None,
+    in_second_half: bool = False,
     forced_kbps: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Apply random augmentations to an LQ/HQ pair. Shape: (2, samples).
+    Apply augmentations to an LQ/HQ pair. Shape: (2, samples).
     Inputs are expected to be in [-1, 1] (post normalize_pair).
 
-    stereo_alternation: picks one channel (L or R) randomly and returns a
-        (1, samples) tensor for both LQ and HQ. Apollo processes each
-        channel independently anyway, so this avoids feeding near-duplicate
-        stereo channels as if they were unique data.
+    stereo_alternation, polarity: applied deterministically based on which
+        half of the song this chunk falls in. First half = clean (no aug).
+        Second half = augmented. This guarantees that every repeated section
+        in a song (chorus, loop, etc.) appears once clean and once augmented,
+        making redundant musical content into genuinely distinct training pairs.
 
-    pitch_shift: shifts both LQ and HQ by the same random amount via
-        torch-pitch-shift. Output length is guaranteed identical to input.
+    gain: still applied per-chunk with a random draw, since amplitude
+        variation within a song is realistic and benefits from fine-grained
+        coverage rather than coarse half-level assignment.
 
-    noise: adds matched Gaussian noise to both LQ and HQ. Since both
-        receive the same noise, the pair relationship is preserved and
-        the model learns noise robustness without becoming a denoiser.
-
-    mp3_degradation: applies a CBR MP3 encode/decode pass to LQ (or LQ+HQ
-        if target="both"), simulating an additional lossy encoding stage
-        on top of existing codec degradation. Bitrate is drawn randomly
-        from [kbps_min, kbps_max] unless forced_kbps is given, in which
-        case that exact bitrate is used -- lets callers (e.g. cached
-        augmentation variant generation) stratify coverage across a range
-        rather than relying on independent random draws per call.
-
-    gain, polarity: applied identically to both LQ and HQ.
+    mp3_degradation: applied per-chunk when enabled (unchanged).
     """
     if not cfg.enabled:
         return lq, hq
 
-    # stereo_alternation
-    # Alternate L/R deterministically by sample index so every epoch covers
-    # both channels evenly rather than randomly clumping on one side.
-    # Applied first so all subsequent augmentations work on the selected channel.
-    if cfg.stereo_alternation.enabled and random.random() < cfg.stereo_alternation.prob:
-        ch = (idx % 2) if idx is not None else random.randint(0, lq.shape[0] - 1)
+    # stereo_alternation: deterministic by song half.
+    # First half gets L channel, second half gets R channel, giving the model
+    # both stereo perspectives of every repeated musical idea.
+    if cfg.stereo_alternation.enabled:
+        ch = 1 if in_second_half else 0
         lq = lq[ch:ch+1]
         hq = hq[ch:ch+1]
 
-    # Pitch shift
-    if cfg.pitch_shift.enabled and random.random() < cfg.pitch_shift.prob:
-        semitones = random.uniform(-cfg.pitch_shift.semitones_max, cfg.pitch_shift.semitones_max)
-        lq = _pitch_shift_tensor(lq, semitones, sr)
-        hq = _pitch_shift_tensor(hq, semitones, sr)
-
-    # Gain
+    # Gain: per-chunk random draw (realistic intra-song amplitude variance).
     if cfg.gain.enabled and random.random() < cfg.gain.prob:
         db    = random.uniform(-cfg.gain.db_max, cfg.gain.db_max)
         scale = 10 ** (db / 20.0)
         lq    = lq * scale
         hq    = hq * scale
-        # If the gain push would clip, rescale both down just enough to avoid it
-        # rather than hard-clamping -- preserves waveform shape including any
-        # pre-existing clipping distortion in the source material
-        peak = max(lq.abs().max(), hq.abs().max())
+        peak  = max(lq.abs().max(), hq.abs().max())
         if peak > 1.0:
             lq = lq / peak
             hq = hq / peak
 
-    # Polarity inversion
-    if cfg.polarity.enabled and random.random() < cfg.polarity.prob:
+    # Polarity inversion: deterministic by song half.
+    # Second half only, so every repeated section appears once normal, once inverted.
+    if cfg.polarity.enabled and in_second_half:
         lq = -lq
         hq = -hq
 
-    # Gaussian noise
-    if cfg.noise.enabled and random.random() < cfg.noise.prob:
-        noise = torch.randn_like(lq) * cfg.noise.sigma
-        lq = lq + noise
-        hq = hq + noise
-        peak = max(lq.abs().max(), hq.abs().max())
-        if peak > 1.0:
-            lq = lq / peak
-            hq = hq / peak
-
-    # MP3 degradation. target="lq" applies to LQ only (default, standard augmentation).
-    # target="both" applies the same bitrate to LQ and HQ so codec artifacts cancel out,
-    # forcing the model to focus only on non-codec differences between the streams.
+    # MP3 degradation (unchanged -- per-chunk when enabled).
     if cfg.mp3_degradation.enabled and random.random() < cfg.mp3_degradation.prob:
         if _check_ffmpeg():
             kbps = forced_kbps if forced_kbps is not None else random.randint(
@@ -375,16 +319,35 @@ class ChunkedPairDataset(Dataset):
         self.pairs   = get_matched_pairs(lq_dir, hq_dir)
         self.sr      = sr
         self.aug_cfg = aug_cfg or AugmentationCfg()
+
+        # Build a per-chunk second-half flag keyed by (lq_path, hq_path).
+        # Chunks are named <stem>_NNNN.wav; we group by stem and mark the
+        # upper half of each song's chunks as in_second_half=True. This
+        # guarantees every repeated musical section appears once clean and
+        # once augmented without relying on coin flips.
+        from collections import defaultdict
+        import re
+        stem_to_indices: dict = defaultdict(list)
+        for i, (lq_path, _) in enumerate(self.pairs):
+            fname = os.path.splitext(os.path.basename(lq_path))[0]
+            # Strip trailing _NNNN chunk index to recover the song stem
+            stem = re.sub(r'_\d{4}$', '', fname)
+            stem_to_indices[stem].append(i)
+
+        self._in_second_half: list[bool] = [False] * len(self.pairs)
+        for stem, indices in stem_to_indices.items():
+            indices_sorted = sorted(indices)
+            midpoint = len(indices_sorted) // 2
+            for i, global_idx in enumerate(indices_sorted):
+                self._in_second_half[global_idx] = (i >= midpoint)
+
         aug = self.aug_cfg
         print(f"Training dataset : {len(self.pairs)} chunk pairs")
         print(
             f"Augmentation     : enabled={aug.enabled}  "
-            f"stereo_alternation={aug.stereo_alternation.enabled}(p={aug.stereo_alternation.prob})  "
-            f"gain={aug.gain.enabled}(p={aug.gain.prob}, +/-{aug.gain.db_max}dB)  "
-            f"polarity={aug.polarity.enabled}(p={aug.polarity.prob})  "
-            f"pitch_shift={aug.pitch_shift.enabled}(p={aug.pitch_shift.prob}, "
-            f"+/-{aug.pitch_shift.semitones_max}st)  "
-            f"noise={aug.noise.enabled}(p={aug.noise.prob}, sigma={aug.noise.sigma})  "
+            f"stereo_alternation={aug.stereo_alternation.enabled}(half-split)  "
+            f"polarity={aug.polarity.enabled}(half-split)  "
+            f"gain={aug.gain.enabled}(per-chunk, p={aug.gain.prob}, +/-{aug.gain.db_max}dB)  "
             f"mp3={aug.mp3_degradation.enabled}(p={aug.mp3_degradation.prob}, "
             f"{aug.mp3_degradation.kbps_min}-{aug.mp3_degradation.kbps_max}kbps)"
         )
@@ -399,7 +362,12 @@ class ChunkedPairDataset(Dataset):
         # No per-chunk normalize_pair here -- chunks are already normalized at
         # the full-song level during _slice_and_save. Normalizing again per-chunk
         # would re-introduce inconsistent gain riding at chunk boundaries.
-        lq, hq = augment_pair(lq, hq, self.aug_cfg, sr=self.sr, idx=idx)
+        lq, hq = augment_pair(
+            lq, hq, self.aug_cfg,
+            sr=self.sr,
+            idx=idx,
+            in_second_half=self._in_second_half[idx],
+        )
         return hq, lq
 
 # Validation dataset -- full-length files sliced at runtime
