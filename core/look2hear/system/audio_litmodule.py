@@ -194,8 +194,9 @@ class AudioLightningModule(pl.LightningModule):
         scheduler=None,
         val_save_interval=5,
         val_audio_dir=None,
-        val_songs=3,                # number of songs to save audio for per val run
-        val_rotate_every="auto",    # "auto" = derive from total steps; int = manual cadence
+        val_preview_samples=6,      # total chunks saved as audio files per preview run
+        val_metric_samples=15,      # total chunks used for val_sdr/val_sfr computation (fixed forever)
+        val_rotate_every="auto",    # "auto" = derive from total steps; int = manual cadence in steps
         gradient_checkpointing=False,
         grad_accum_steps=1,
         # Configurable target band loss (off by default)
@@ -212,27 +213,28 @@ class AudioLightningModule(pl.LightningModule):
         self.loss_func        = loss_func
         self.metrics          = metrics
         self.scheduler        = list(scheduler)
-        self.val_save_interval = val_save_interval
-        self.val_audio_dir    = val_audio_dir
-        self.val_songs        = val_songs
-        self.val_rotate_every = val_rotate_every
+        self.val_save_interval    = val_save_interval
+        self.val_audio_dir        = val_audio_dir
+        self.val_preview_samples  = val_preview_samples
+        self.val_metric_samples   = val_metric_samples
+        self.val_rotate_every     = val_rotate_every
         self.target_band_loss_enabled = target_band_loss_enabled
         self.target_band_loss_lo_hz   = target_band_loss_lo_hz
         self.target_band_loss_hi_hz   = target_band_loss_hi_hz
         self.visqol_fraction          = max(0.0, min(1.0, float(visqol_fraction)))
 
-        # Val fixed-index lock (for loss computation)
+        # Val fixed-index lock (for val_loss / SI-SDR computation in validation_step)
         self._val_fixed_indices = None   # set[int] locked after first real val run
         self._val_seen_indices  = []     # accumulator during first run
 
-        # Val audio rotation schedule
-        # _val_rotation_schedule: list of lists, each inner list is the song keys
-        #   for that rotation slot. Computed once, checkpointed.
-        # _val_run_count: how many real val runs have happened this training run.
-        #   Checkpointed so resume picks up the right slot.
+        # Val metric refs: fixed pool for val_sdr / val_sfr computation.
+        # Locked once from the full val pool, never changes.
+        self._val_metric_refs: dict = {}  # "song_key:N" -> (lq_path, hq_path, start, seg_samples)
+
+        # Val preview rotation schedule and refs (for audio file output only, no metrics)
         self._val_rotation_schedule: list = []
         self._val_run_count: int          = 0
-        self._val_locked_refs: dict       = {}  # song_key -> (lq_path, hq_path, start, seg_samples)
+        self._val_locked_refs: dict       = {}  # preview refs: "song_key:N" -> (...)
 
         # Gradient accumulation state
         self.grad_accum_steps = max(1, grad_accum_steps)
@@ -468,7 +470,7 @@ class AudioLightningModule(pl.LightningModule):
     def _build_rotation_schedule(self, all_songs: list) -> list:
         """
         Build the full rotation schedule for the entire training run.
-        Each slot is a list of val_songs song keys.
+        Each slot is a list of val_preview_samples entries.
         Slots are constructed so every song appears as equally often as possible.
         The cadence (slots between rotations) is derived from total configured
         steps when val_rotate_every="auto", otherwise uses the integer value.
@@ -477,8 +479,8 @@ class AudioLightningModule(pl.LightningModule):
         import math
 
         n_songs         = len(all_songs)
-        chunks_per_song = max(1, math.ceil(self.val_songs / max(1, n_songs)))
-        per_set         = min(self.val_songs, n_songs * chunks_per_song)
+        chunks_per_song = max(1, math.ceil(self.val_preview_samples / max(1, n_songs)))
+        per_set         = min(self.val_preview_samples, n_songs * chunks_per_song)
 
         # Derive total val runs from trainer config
         try:
@@ -509,13 +511,13 @@ class AudioLightningModule(pl.LightningModule):
         schedule = []
         for slot_i in range(total_slots):
             slot = [(song_key, slot_i % chunks_per_song) for song_key in all_songs]
-            # If val_songs < n_songs, trim to per_set (song-level rotation)
+            # If val_preview_samples < n_songs * chunks_per_song, trim to per_set (song-level rotation)
             if len(slot) > per_set:
                 offset = (slot_i * per_set) % len(slot)
                 slot = (slot + slot)[offset : offset + per_set]
             schedule.append(slot)
 
-        mode = "chunk" if n_songs <= self.val_songs else "song"
+        mode = "chunk" if n_songs <= self.val_preview_samples else "song"
         print(f"[val audio] Rotation schedule: {n_songs} songs x {chunks_per_song} chunks, "
               f"{per_set} per slot, {mode} rotation every {rotate_every} val runs, "
               f"{total_slots} slots total.")
@@ -540,38 +542,34 @@ class AudioLightningModule(pl.LightningModule):
     # Val audio reference building
     # ------------------------------------------------------------------
 
-    def _lock_val_refs(self) -> None:
+    def _pick_chunks(self, by_song: dict, total: int, label: str) -> dict:
         """
-        Called once when the rotation schedule is first built.
-        Locks multiple non-silent chunks per song so the schedule can reference
-        distinct chunks from the same song when val_songs > n_songs.
-        Refs are keyed as "song_key:N" (N=0,1,2,...).
+        Pick `total` chunks from `by_song` with equal distribution across songs.
+        Prefers non-silent chunks. Returns dict keyed as "song_key:N".
         """
         import random
         import math as _math
         import torchaudio as _ta
 
         dataset      = self.trainer.datamodule.data_val
-        fixed        = self._val_fixed_indices or set()
         _SILENCE_RMS = 0.01
+        n_songs      = len(by_song)
+        if n_songs == 0:
+            return {}
 
-        by_song = {}
-        for ds_idx in fixed:
-            pair_idx, _ = dataset.index[ds_idx]
-            _, hq_path  = dataset.pairs[pair_idx]
-            stem  = os.path.splitext(os.path.basename(hq_path))[0]
-            parts = stem.rsplit("_", 1)
-            key   = parts[0] if len(parts) == 2 and parts[1].isdigit() else stem
-            by_song.setdefault(key, []).append(ds_idx)
-
-        n_songs         = len(by_song)
-        chunks_per_song = max(1, _math.ceil(self.val_songs / max(1, n_songs)))
+        base      = total // n_songs
+        remainder = total % n_songs
+        song_keys = list(by_song.keys())
+        random.shuffle(song_keys)
+        chunks_for = {k: base + (1 if i < remainder else 0) for i, k in enumerate(song_keys)}
 
         locked = {}
-        for song_key, candidates in by_song.items():
-            non_silent = []
-            silent     = []
-            shuffled   = candidates[:]
+        for song_key, n_chunks in chunks_for.items():
+            if n_chunks == 0:
+                continue
+            candidates = by_song[song_key]
+            non_silent, silent = [], []
+            shuffled = candidates[:]
             random.shuffle(shuffled)
             for ds_idx in shuffled:
                 pair_idx, s = dataset.index[ds_idx]
@@ -582,15 +580,28 @@ class AudioLightningModule(pl.LightningModule):
                 except Exception:
                     silent.append(ds_idx)
             ordered = non_silent + silent
-            chosen  = ordered[:chunks_per_song] if ordered else shuffled[:1]
+            chosen  = ordered[:n_chunks] if ordered else shuffled[:1]
             for chunk_idx, ds_idx in enumerate(chosen):
                 pair_idx, start = dataset.index[ds_idx]
                 lq_path, hq_path = dataset.pairs[pair_idx]
                 locked[f"{song_key}:{chunk_idx}"] = (lq_path, hq_path, start, dataset.segment_samples)
 
-        print(f"[val audio] Locked {len(locked)} chunk refs across {n_songs} songs "
-              f"({chunks_per_song} chunks/song).")
-        self._val_locked_refs = locked
+        per_song_counts = list(chunks_for.values())
+        print(f"[{label}] Locked {len(locked)} chunks across {n_songs} songs "
+              f"(~{min(per_song_counts)}-{max(per_song_counts)} per song).")
+        return locked
+
+    def _lock_val_metric_refs(self, by_song: dict) -> None:
+        """Lock a fixed pool of chunks for val_sdr/val_sfr computation. Never rotates."""
+        self._val_metric_refs = self._pick_chunks(by_song, self.val_metric_samples, "val metrics")
+
+    def _lock_val_refs(self, by_song: dict) -> None:
+        """Lock preview chunks for audio file output. Rotation cycles through these."""
+        import math as _math
+        n_songs         = len(by_song)
+        chunks_per_song = max(1, _math.ceil(self.val_preview_samples / max(1, n_songs)))
+        total_preview   = n_songs * chunks_per_song
+        self._val_locked_refs = self._pick_chunks(by_song, total_preview, "val preview")
 
     def _build_val_refs_for_slot(self, slot_entries: list) -> list:
         """
@@ -621,8 +632,9 @@ class AudioLightningModule(pl.LightningModule):
     def _save_val_audio(self):
         """
         Run current slot's ref chunks through the model, then hand off the
-        tensors to a background thread for disk writes + perceptual metrics.
-        Training resumes immediately after the inference pass.
+        tensors to a background thread for disk writes.
+        Training resumes immediately after inference.
+        Metrics are NOT computed here -- see _compute_val_metrics().
         """
         if self.val_audio_dir is None:
             return
@@ -642,20 +654,16 @@ class AudioLightningModule(pl.LightningModule):
         epoch_dir = os.path.join(self.val_audio_dir, f"step_{self.global_step:06d}")
         os.makedirs(epoch_dir, exist_ok=True)
 
-        # Run inference synchronously (GPU needed)
-        perc_pairs = []
+        preview_pairs = []
         self.audio_model.eval()
         with torch.no_grad():
             for song_key, lq_path, hq_path, start, seg_samples in refs:
                 try:
                     lq, _ = torchaudio.load(lq_path, frame_offset=start, num_frames=seg_samples)
                     hq, _ = torchaudio.load(hq_path, frame_offset=start, num_frames=seg_samples)
-
                     if lq.shape[0] == 1: lq = lq.repeat(2, 1)
                     if hq.shape[0] == 1: hq = hq.repeat(2, 1)
-
                     lq_norm, hq_norm = normalize_pair(lq, hq)
-
                     inp = lq_norm.unsqueeze(0).to(self.device)
                     out = self.audio_model(inp)
                     if out.ndim == 3:
@@ -663,87 +671,97 @@ class AudioLightningModule(pl.LightningModule):
                     out     = out.float().cpu().clamp(-1.0, 1.0)
                     lq_save = lq_norm.float().clamp(-1.0, 1.0)
                     hq_save = hq_norm.float().clamp(-1.0, 1.0)
-
-                    perc_pairs.append((song_key, lq_save.clone(), hq_save.clone(), out.clone()))
+                    preview_pairs.append((song_key, lq_save.clone(), hq_save.clone(), out.clone()))
                 except Exception as e:
-                    print(f"[val audio] Inference error {song_key}: {e}")
-
+                    print(f"[val preview] Inference error {song_key}: {e}")
         self.audio_model.train()
 
-        # Compute perceptual metrics synchronously -- must finish before
-        # on_validation_epoch_end returns so Lightning can log into checkpoint filenames.
-        import random as _random
-        import look2hear.losses as _ll
-        _sdr_fn = _ll.MultiSrcNegSDR("snr", zero_mean=True)
-
-        sfr_sum    = 0.0
-        sdr_sum    = 0.0
-        visqol_sum = 0.0
-        tbl_sum    = 0.0
-        visqol_count = 0
-        tbl_count    = 0
-        count        = 0
-
-        # Determine which pairs to run VISQOL on (fraction-based sampling)
-        visqol_indices = set()
-        if self.visqol_fraction > 0.0 and len(perc_pairs) > 0:
-            n_visqol = max(1, round(len(perc_pairs) * self.visqol_fraction))
-            visqol_indices = set(_random.sample(range(len(perc_pairs)), min(n_visqol, len(perc_pairs))))
-
-        for i, (song_key, lq_save, hq_save, out) in enumerate(perc_pairs):
-            try:
-                e = out[0:1]      if out.ndim     == 2 else out
-                r = hq_save[0:1]  if hq_save.ndim == 2 else hq_save
-                sfr_sum += _spectral_flatness_ratio(e, r)
-                sdr_sum += -float(_sdr_fn(e.unsqueeze(0), r.unsqueeze(0)).mean())
-                count   += 1
-
-                if i in visqol_indices:
-                    v = _visqol_score(e, r)
-                    if v is not None:
-                        visqol_sum   += v
-                        visqol_count += 1
-
-                if self.target_band_loss_enabled:
-                    tbl_sum   += _target_band_mae(e, r,
-                                                  lo_hz=self.target_band_loss_lo_hz,
-                                                  hi_hz=self.target_band_loss_hi_hz)
-                    tbl_count += 1
-
-            except Exception as ex:
-                print(f"[val audio] Metric error {song_key}: {ex}")
-
-        if count > 0:
-            self._last_val_sfr    = sfr_sum / count
-            self._last_val_sdr    = sdr_sum / count
-        if visqol_count > 0:
-            self._last_val_visqol = visqol_sum / visqol_count
-        if tbl_count > 0:
-            self._last_val_tbl = tbl_sum / tbl_count
-
-        # Disk writes go async -- training resumes immediately after metrics are logged.
-        # Join any previous write thread first.
         if self._write_thread is not None and self._write_thread.is_alive():
             self._write_thread.join(timeout=60)
 
         def _write_files():
-            for song_key, lq_save, hq_save, out in perc_pairs:
+            for song_key, lq_save, hq_save, out in preview_pairs:
                 try:
                     torchaudio.save(os.path.join(epoch_dir, f"{song_key}_LQ.wav"),       lq_save, 44100)
                     torchaudio.save(os.path.join(epoch_dir, f"{song_key}_HQ.wav"),       hq_save, 44100)
                     torchaudio.save(os.path.join(epoch_dir, f"{song_key}_Restored.wav"), out,     44100)
                 except Exception as ex:
-                    print(f"[val audio] Write error {song_key}: {ex}")
+                    print(f"[val preview] Write error {song_key}: {ex}")
 
         self._write_thread = threading.Thread(target=_write_files, daemon=True)
         self._write_thread.start()
+
+    def _compute_val_metrics(self):
+        """
+        Run the fixed metric pool through the model and compute val_sdr / val_sfr / val_visqol.
+        Called synchronously in on_validation_epoch_end before logging so Lightning
+        can interpolate values into checkpoint filenames.
+        """
+        if not self._val_metric_refs:
+            return
+
+        import random as _random
+        import look2hear.losses as _ll
+        from paired_datamodule import normalize_pair
+
+        _sdr_fn = _ll.MultiSrcNegSDR("snr", zero_mean=True)
+
+        sfr_sum = sdr_sum = visqol_sum = tbl_sum = 0.0
+        count = visqol_count = tbl_count = 0
+
+        metric_items = list(self._val_metric_refs.items())
+        visqol_indices = set()
+        if self.visqol_fraction > 0.0 and metric_items:
+            n_v = max(1, round(len(metric_items) * self.visqol_fraction))
+            visqol_indices = set(_random.sample(range(len(metric_items)), min(n_v, len(metric_items))))
+
+        self.audio_model.eval()
+        with torch.no_grad():
+            for i, (ref_key, (lq_path, hq_path, start, seg_samples)) in enumerate(metric_items):
+                try:
+                    lq, _ = torchaudio.load(lq_path, frame_offset=start, num_frames=seg_samples)
+                    hq, _ = torchaudio.load(hq_path, frame_offset=start, num_frames=seg_samples)
+                    if lq.shape[0] == 1: lq = lq.repeat(2, 1)
+                    if hq.shape[0] == 1: hq = hq.repeat(2, 1)
+                    lq_norm, hq_norm = normalize_pair(lq, hq)
+                    inp = lq_norm.unsqueeze(0).to(self.device)
+                    out = self.audio_model(inp)
+                    if out.ndim == 3:
+                        out = out[0]
+                    out = out.float().cpu().clamp(-1.0, 1.0)
+                    hq_norm = hq_norm.float().clamp(-1.0, 1.0)
+                    e = out[0:1]     if out.ndim     == 2 else out
+                    r = hq_norm[0:1] if hq_norm.ndim == 2 else hq_norm
+                    sfr_sum += _spectral_flatness_ratio(e, r)
+                    sdr_sum += -float(_sdr_fn(e.unsqueeze(0), r.unsqueeze(0)).mean())
+                    count   += 1
+                    if i in visqol_indices:
+                        v = _visqol_score(e, r)
+                        if v is not None:
+                            visqol_sum   += v
+                            visqol_count += 1
+                    if self.target_band_loss_enabled:
+                        tbl_sum   += _target_band_mae(e, r,
+                                                      lo_hz=self.target_band_loss_lo_hz,
+                                                      hi_hz=self.target_band_loss_hi_hz)
+                        tbl_count += 1
+                except Exception as ex:
+                    print(f"[val metrics] Error {ref_key}: {ex}")
+        self.audio_model.train()
+
+        if count > 0:
+            self._last_val_sdr = sdr_sum / count
+            self._last_val_sfr = sfr_sum / count
+        if visqol_count > 0:
+            self._last_val_visqol = visqol_sum / visqol_count
+        if tbl_count > 0:
+            self._last_val_tbl = tbl_sum / tbl_count
 
     # ------------------------------------------------------------------
     # Validation epoch end
     # ------------------------------------------------------------------
 
     def on_validation_epoch_end(self):
-        # Reset metric slots -- filled synchronously in _save_val_audio()
         self._last_val_sisdr  = None
         self._last_val_sdr    = None
         self._last_val_sfr    = None
@@ -766,60 +784,69 @@ class AudioLightningModule(pl.LightningModule):
         if self._val_fixed_indices is None and self._val_seen_indices:
             self._lock_val_fixed_indices()
 
-        # --- Build rotation schedule on first real val run ---
+        # --- Build all ref pools and rotation schedule on first real val run ---
         if not self._val_rotation_schedule and self._val_fixed_indices is not None:
-            dataset = self.trainer.datamodule.data_val
+            dataset  = self.trainer.datamodule.data_val
+
+            # Build full by_song from ALL seen indices (not just fixed loss subset)
+            by_song  = {}
             all_songs = []
             seen_keys = set()
-            for ds_idx in self._val_fixed_indices:
+            for ds_idx in self._val_seen_indices or self._val_fixed_indices:
                 pair_idx, _ = dataset.index[ds_idx]
                 _, hq_path  = dataset.pairs[pair_idx]
                 stem  = os.path.splitext(os.path.basename(hq_path))[0]
                 parts = stem.rsplit("_", 1)
                 key   = parts[0] if len(parts) == 2 and parts[1].isdigit() else stem
+                by_song.setdefault(key, []).append(ds_idx)
                 if key not in seen_keys:
                     seen_keys.add(key)
                     all_songs.append(key)
 
+            # Metric pool: fixed forever, used for val_sdr/val_sfr every run
+            self._lock_val_metric_refs(by_song)
+
+            # Preview pool and rotation schedule
+            self._lock_val_refs(by_song)
             self._val_rotation_schedule = self._build_rotation_schedule(all_songs)
-            self._lock_val_refs()
 
             if str(self.val_rotate_every).lower() == "auto":
                 import math
                 try:
-                    max_epochs   = self.trainer.max_epochs or 1
-                    batches      = self.trainer.num_training_batches or 1
-                    total_steps  = (max_epochs * batches) // self.grad_accum_steps
-                    val_interval = self.trainer.val_check_interval or 200
+                    max_epochs     = self.trainer.max_epochs or 1
+                    batches        = self.trainer.num_training_batches or 1
+                    total_steps    = (max_epochs * batches) // self.grad_accum_steps
+                    val_interval   = self.trainer.val_check_interval or 200
                     total_val_runs = max(1, total_steps // val_interval)
                 except Exception:
                     total_val_runs = 50
+                import math
                 n_songs         = len(all_songs)
-                chunks_per_song = max(1, math.ceil(self.val_songs / max(1, n_songs)))
+                chunks_per_song = max(1, math.ceil(self.val_preview_samples / max(1, n_songs)))
                 n_slots         = max(1, chunks_per_song)
                 self._val_rotate_cadence = max(1, total_val_runs // n_slots)
             else:
-                # val_rotate_every is in training steps; convert to val-run cadence
                 try:
                     val_interval = self.trainer.val_check_interval or 1
                 except Exception:
                     val_interval = 1
                 self._val_rotate_cadence = max(1, int(self.val_rotate_every) // val_interval)
 
-            print(f"[val audio] {len(all_songs)} songs available, "
+            print(f"[val] {len(all_songs)} songs | "
+                  f"metric pool: {len(self._val_metric_refs)} chunks | "
+                  f"preview: {len(self._val_locked_refs)} chunks, "
                   f"rotate every {self._val_rotate_cadence} val runs "
                   f"(= {self._val_rotate_cadence * (self.trainer.val_check_interval or 1)} steps).")
 
-        # Increment run counter then save audio (metrics computed synchronously inside)
+        # Compute metrics over fixed pool, then save preview audio
+        self._compute_val_metrics()
         self._val_run_count += 1
         self._save_val_audio()
 
-        # Log metrics so Lightning can interpolate into filenames.
         _sfr    = self._last_val_sfr
         _sdr    = self._last_val_sdr
         _visqol = self._last_val_visqol
         _tbl    = self._last_val_tbl
-        _sisdr  = self._last_val_sisdr
 
         self.log("val_sfr",    float(_sfr)    if _sfr    is not None else 0.0, prog_bar=False, logger=True)
         self.log("val_sdr",    float(_sdr)    if _sdr    is not None else 0.0, prog_bar=False, logger=True)
@@ -837,6 +864,7 @@ class AudioLightningModule(pl.LightningModule):
         checkpoint["val_run_count"]          = self._val_run_count
         checkpoint["val_rotate_cadence"]     = getattr(self, "_val_rotate_cadence", 5)
         checkpoint["val_locked_refs"]        = self._val_locked_refs
+        checkpoint["val_metric_refs"]        = self._val_metric_refs
 
     def on_load_checkpoint(self, checkpoint: dict) -> None:
         self._val_fixed_indices     = checkpoint.get("val_fixed_indices",     None)
@@ -844,6 +872,7 @@ class AudioLightningModule(pl.LightningModule):
         self._val_run_count         = checkpoint.get("val_run_count",         0)
         self._val_rotate_cadence    = checkpoint.get("val_rotate_cadence",    5)
         self._val_locked_refs       = checkpoint.get("val_locked_refs",       {})
+        self._val_metric_refs       = checkpoint.get("val_metric_refs",       {})
 
         # Strip state_dict keys from older checkpoints that no longer exist in model
         sd = checkpoint.get("state_dict", {})

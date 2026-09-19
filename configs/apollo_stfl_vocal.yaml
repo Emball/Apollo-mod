@@ -13,7 +13,8 @@ optimizations:
 
 training:
   n_layers_to_freeze: 2          # fewer frozen layers -- vocal HF is harder, model needs more room
-  val_songs: 6
+  val_preview_samples: 6
+  val_metric_samples: 15
   val_rotate_every: 200
   grad_accum_steps: 1
 

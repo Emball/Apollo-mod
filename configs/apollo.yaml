@@ -13,7 +13,8 @@ optimizations:
 
 training:
   n_layers_to_freeze: 4
-  val_songs: 5
+  val_preview_samples: 5
+  val_metric_samples: 15
   val_rotate_every: auto
   grad_accum_steps: 1
 
