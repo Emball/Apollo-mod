@@ -63,12 +63,34 @@ class Mp3AugCfg:
     target:   str   = "lq"   # "lq" = LQ only (default), "both" = LQ and HQ at same bitrate
 
 @dataclass
+class DeepGainAugCfg:
+    enabled: bool  = True
+    prob:    float = 0.03   # rare -- ~1 in 33 chunks
+    db_min:  float = -10.0  # floor
+    db_max:  float = -6.0   # ceiling (always a reduction, never a boost)
+
+@dataclass
+class SilenceDipAugCfg:
+    enabled:             bool  = True
+    prob:                float = 0.05    # ~1 in 20 chunks
+    max_hold_sec:        float = 2.0     # max silence hold duration
+    # Ramp duration distribution: short=70%, medium=20%, long=10%
+    short_ramp_ms:       float = 10.0
+    short_ramp_max_ms:   float = 50.0
+    medium_ramp_ms:      float = 50.0
+    medium_ramp_max_ms:  float = 200.0
+    long_ramp_ms:        float = 200.0
+    long_ramp_max_ms:    float = 1000.0
+
+@dataclass
 class AugmentationCfg:
-    enabled:            bool         = True
-    gain:               GainAugCfg   = field(default_factory=GainAugCfg)
-    polarity:           SimpleAugCfg = field(default_factory=SimpleAugCfg)
-    mp3_degradation:    Mp3AugCfg    = field(default_factory=Mp3AugCfg)
-    stereo_alternation: SimpleAugCfg = field(default_factory=SimpleAugCfg)
+    enabled:            bool             = True
+    gain:               GainAugCfg       = field(default_factory=GainAugCfg)
+    deep_gain:          DeepGainAugCfg   = field(default_factory=DeepGainAugCfg)
+    polarity:           SimpleAugCfg     = field(default_factory=SimpleAugCfg)
+    silence_dip:        SilenceDipAugCfg = field(default_factory=SilenceDipAugCfg)
+    mp3_degradation:    Mp3AugCfg        = field(default_factory=Mp3AugCfg)
+    stereo_alternation: SimpleAugCfg     = field(default_factory=SimpleAugCfg)
 
 def _get(d, key, default):
     try:
@@ -88,7 +110,9 @@ def _parse_aug_cfg(raw) -> AugmentationCfg:
         raw = live
 
     gain_raw = _get(raw, "gain", {})
+    dg_raw   = _get(raw, "deep_gain", {})
     pol_raw  = _get(raw, "polarity", {})
+    sil_raw  = _get(raw, "silence_dip", {})
     mp3_raw  = _get(raw, "mp3_degradation", {})
     mono_raw = _get(raw, "stereo_alternation", {})
 
@@ -99,9 +123,26 @@ def _parse_aug_cfg(raw) -> AugmentationCfg:
             prob=   _get(gain_raw, "prob",    0.5),
             db_max= _get(gain_raw, "db_max",  1.5),
         ),
+        deep_gain=DeepGainAugCfg(
+            enabled=_get(dg_raw, "enabled", True),
+            prob=   _get(dg_raw, "prob",    0.03),
+            db_min= _get(dg_raw, "db_min",  -10.0),
+            db_max= _get(dg_raw, "db_max",  -6.0),
+        ),
         polarity=SimpleAugCfg(
             enabled=_get(pol_raw, "enabled", True),
             prob=   _get(pol_raw, "prob",    0.5),
+        ),
+        silence_dip=SilenceDipAugCfg(
+            enabled=            _get(sil_raw, "enabled",           True),
+            prob=               _get(sil_raw, "prob",              0.05),
+            max_hold_sec=       _get(sil_raw, "max_hold_sec",      2.0),
+            short_ramp_ms=      _get(sil_raw, "short_ramp_ms",     10.0),
+            short_ramp_max_ms=  _get(sil_raw, "short_ramp_max_ms", 50.0),
+            medium_ramp_ms=     _get(sil_raw, "medium_ramp_ms",    50.0),
+            medium_ramp_max_ms= _get(sil_raw, "medium_ramp_max_ms",200.0),
+            long_ramp_ms=       _get(sil_raw, "long_ramp_ms",      200.0),
+            long_ramp_max_ms=   _get(sil_raw, "long_ramp_max_ms",  1000.0),
         ),
         mp3_degradation=Mp3AugCfg(
             enabled= _get(mp3_raw, "enabled",  False),
@@ -202,6 +243,43 @@ def _mp3_degrade_tensor(wav: torch.Tensor, kbps: int, sr: int) -> torch.Tensor:
         decoded = torch.nn.functional.pad(decoded, (0, original_length - decoded.shape[-1]))
 
     return decoded.float()
+def _silence_dip_envelope(n_samples: int, sr: int, cfg: "SilenceDipAugCfg") -> "torch.Tensor":
+    """Build a [1, n_samples] amplitude envelope that dips to zero somewhere inside
+    the chunk. Shape: ramp down -> hold at zero -> ramp back up. The dip is placed
+    at a random interior position so neither boundary is ever silenced (keeps chunk
+    edges clean for the dataloader). Applied identically to LQ and HQ."""
+    # Pick ramp type by weighted draw: 70% short, 20% medium, 10% long
+    r = random.random()
+    if r < 0.70:
+        ramp_ms = random.uniform(cfg.short_ramp_ms,  cfg.short_ramp_max_ms)
+    elif r < 0.90:
+        ramp_ms = random.uniform(cfg.medium_ramp_ms, cfg.medium_ramp_max_ms)
+    else:
+        ramp_ms = random.uniform(cfg.long_ramp_ms,   cfg.long_ramp_max_ms)
+
+    ramp_samples = max(1, int(ramp_ms / 1000.0 * sr))
+    hold_samples = random.randint(1, max(1, int(cfg.max_hold_sec * sr)))
+    dip_len      = 2 * ramp_samples + hold_samples
+
+    # Keep the whole dip interior -- at least 1 sample of non-silence at each boundary
+    max_start = n_samples - dip_len - 2
+    if max_start <= 1:
+        # Chunk too short for this dip -- return flat envelope (no-op)
+        return torch.ones(1, n_samples)
+
+    start = random.randint(1, max_start)
+
+    env = torch.ones(n_samples)
+    # Ramp down: 1 -> 0
+    env[start : start + ramp_samples] = torch.linspace(1.0, 0.0, ramp_samples)
+    # Hold at zero
+    env[start + ramp_samples : start + ramp_samples + hold_samples] = 0.0
+    # Ramp up: 0 -> 1
+    env[start + ramp_samples + hold_samples : start + dip_len] = torch.linspace(0.0, 1.0, ramp_samples)
+
+    return env.unsqueeze(0)  # (1, n_samples) for broadcasting over channels
+
+
 def augment_pair(
     lq: torch.Tensor,
     hq: torch.Tensor,
@@ -254,6 +332,24 @@ def augment_pair(
     if cfg.polarity.enabled and in_second_half:
         lq = -lq
         hq = -hq
+
+    # Deep gain reduction: rare, -6 to -10dB, trains the model that low-ceiling
+    # masters and near-silence are valid targets, not noise to fill in.
+    # Applied on top of the fine gain above -- independent draw.
+    if cfg.deep_gain.enabled and random.random() < cfg.deep_gain.prob:
+        db    = random.uniform(cfg.deep_gain.db_min, cfg.deep_gain.db_max)
+        scale = 10 ** (db / 20.0)
+        lq    = lq * scale
+        hq    = hq * scale
+
+    # Silence dip: zero out a random interior region of the chunk via a
+    # fade-down / hold / fade-up envelope. Applied identically to LQ and HQ
+    # so the pair stays aligned. Teaches the model that silence = silence,
+    # preventing hallucinated texture on quiet passages and fades.
+    if cfg.silence_dip.enabled and random.random() < cfg.silence_dip.prob:
+        env = _silence_dip_envelope(lq.shape[-1], sr, cfg.silence_dip)
+        lq  = lq * env
+        hq  = hq * env
 
     # MP3 degradation (unchanged -- per-chunk when enabled).
     if cfg.mp3_degradation.enabled and random.random() < cfg.mp3_degradation.prob:
@@ -348,6 +444,10 @@ class ChunkedPairDataset(Dataset):
             f"stereo_alternation={aug.stereo_alternation.enabled}(half-split)  "
             f"polarity={aug.polarity.enabled}(half-split)  "
             f"gain={aug.gain.enabled}(per-chunk, p={aug.gain.prob}, +/-{aug.gain.db_max}dB)  "
+            f"deep_gain={aug.deep_gain.enabled}(p={aug.deep_gain.prob}, "
+            f"{aug.deep_gain.db_min}..{aug.deep_gain.db_max}dB)  "
+            f"silence_dip={aug.silence_dip.enabled}(p={aug.silence_dip.prob}, "
+            f"hold<={aug.silence_dip.max_hold_sec}s)  "
             f"mp3={aug.mp3_degradation.enabled}(p={aug.mp3_degradation.prob}, "
             f"{aug.mp3_degradation.kbps_min}-{aug.mp3_degradation.kbps_max}kbps)"
         )
