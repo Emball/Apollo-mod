@@ -133,24 +133,45 @@ def _load_model(ckpt_path: str, feature_dim: int, sr: int, win: int, layer: int)
 # ---------------------------------------------------------------------------
 
 def _load_val_chunks(val_chunk_dir: str, limit: Optional[int] = None) -> list:
+    """
+    Load val chunks with equal distribution across songs (floor/ceil budget split).
+    When limit is set, distributes as evenly as possible: each song gets
+    floor(limit/n_songs) chunks, with the remainder going to whichever songs
+    have the most chunks available. Matches the litmodule _pick_chunks logic.
+    """
+    import math
+    from collections import defaultdict
+
     lq_dir = os.path.join(val_chunk_dir, "LQ")
     hq_dir = os.path.join(val_chunk_dir, "HQ")
     if not os.path.isdir(lq_dir) or not os.path.isdir(hq_dir):
         raise RuntimeError(f"Val chunk dirs not found: {lq_dir}, {hq_dir}")
-    files = sorted(f for f in os.listdir(lq_dir) if f.endswith(".wav"))
-    if limit:
-        from collections import defaultdict
-        by_song: dict = defaultdict(list)
-        for f in files:
-            song = "_".join(f.rsplit("_", 1)[:-1]) if "_" in f else f
-            by_song[song].append(f)
-        per_song = max(1, limit // len(by_song))
-        selected = []
-        for song_files in by_song.values():
-            selected.extend(song_files[:per_song])
-        files = sorted(selected)[:limit]
+
+    all_files = sorted(f for f in os.listdir(lq_dir) if f.endswith(".wav"))
+
+    # Group by song (strip trailing _NNN chunk index if present)
+    by_song: dict = defaultdict(list)
+    for f in all_files:
+        stem = f[:-4]  # strip .wav
+        parts = stem.rsplit("_", 1)
+        song = parts[0] if len(parts) == 2 and parts[1].isdigit() else stem
+        by_song[song].append(f)
+
+    if limit is None or limit <= 0:
+        selected = list(all_files)
+    else:
+        n_songs   = len(by_song)
+        base      = limit // n_songs
+        remainder = limit % n_songs
+        # Give remainder slots to songs that have the most chunks available
+        song_keys = sorted(by_song.keys(), key=lambda k: -len(by_song[k]))
+        selected  = []
+        for i, song in enumerate(song_keys):
+            n = base + (1 if i < remainder else 0)
+            selected.extend(by_song[song][:n])
+
     chunks = []
-    for fname in files:
+    for fname in sorted(selected):
         lq_path = os.path.join(lq_dir, fname)
         hq_path = os.path.join(hq_dir, fname)
         if os.path.exists(hq_path):
@@ -350,7 +371,7 @@ def _save_cache(ckpt_dir: str, cache: dict) -> None:
 def run_evaluation(
     conf_dir: str,
     ckpt_dir: Optional[str] = None,
-    limit: int = 100,
+    limit: Optional[int] = None,
     run_visqol: bool = False,
     pattern: Optional[str] = None,
     print_fn=print,
@@ -358,6 +379,8 @@ def run_evaluation(
     """
     Core evaluation routine. Returns ranked results list.
     print_fn: callable for output (allows TUI to redirect).
+    limit: total chunks to use across all songs; defaults to val_metric_samples
+           from config (or 15 if absent). Equal distribution across songs.
     """
     cfg         = OmegaConf.load(conf_dir)
     exp_dir     = cfg.exp.dir
@@ -366,6 +389,10 @@ def run_evaluation(
     sr          = int(cfg.model.sr)
     win         = int(cfg.model.win)
     layer       = int(cfg.model.layer)
+
+    # Default limit to val_metric_samples from config so evaluate matches training
+    if limit is None:
+        limit = int(cfg.training.get("val_metric_samples", 15))
 
     # Auto-detect checkpoint dir
     if ckpt_dir is None:
@@ -394,7 +421,13 @@ def run_evaluation(
 
     print_fn(f"[eval] Loading val chunks from: {chunk_root}")
     chunks = _load_val_chunks(chunk_root, limit=limit)
-    print_fn(f"[eval] {len(chunks)} chunks selected")
+    from collections import defaultdict as _dd
+    _by_s: dict = _dd(int)
+    for _, _, fn in chunks:
+        stem = fn[:-4]; parts = stem.rsplit("_", 1)
+        _by_s[parts[0] if len(parts) == 2 and parts[1].isdigit() else stem] += 1
+    print_fn(f"[eval] {len(chunks)} chunks across {len(_by_s)} songs "
+             f"({min(_by_s.values())}-{max(_by_s.values())} per song)")
 
     ckpt_files = sorted(
         f for f in os.listdir(ckpt_dir)
@@ -588,7 +621,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Retroactively evaluate Apollo checkpoints")
     parser.add_argument("--conf_dir",  required=True, help="Path to yaml config")
     parser.add_argument("--ckpt_dir",  default=None,  help="Checkpoint folder (auto-detected if omitted)")
-    parser.add_argument("--limit",     type=int, default=100, help="Max val chunks per checkpoint (default 100)")
+    parser.add_argument("--limit",     type=int, default=None, help="Total val chunks across songs (default: val_metric_samples from config)")
     parser.add_argument("--visqol",    action="store_true",   help="Run VISQOL (requires pyvisqol)")
     parser.add_argument("--pattern",   default=None,          help="Only evaluate checkpoints matching this substring")
     args = parser.parse_args()
