@@ -477,9 +477,9 @@ class AudioLightningModule(pl.LightningModule):
         import math
 
         n_songs  = len(all_songs)
-        # Cap per_set so we always have at least 2 rotation slots (meaningful rotation).
-        # e.g. 3 songs / 3 per_set = 1 slot = no rotation; reduce to 2 per_set = 2 slots.
-        per_set  = min(self.val_songs, max(1, n_songs - 1)) if n_songs > 1 else n_songs
+        # Cap per_set to available songs. If val_songs >= n_songs, show all songs
+        # every run (rotation becomes a no-op; one slot repeated).
+        per_set  = min(self.val_songs, n_songs)
 
         # Derive total val runs from trainer config
         try:
@@ -492,33 +492,40 @@ class AudioLightningModule(pl.LightningModule):
         except Exception:
             total_val_runs = 50  # safe fallback
 
-        # Derive rotate_every
+        # Derive rotate_every (in val runs)
         if str(self.val_rotate_every).lower() == "auto":
             # How many slots do we need to cover every song at least once?
             n_slots = math.ceil(n_songs / per_set)
             rotate_every = max(1, total_val_runs // n_slots)
         else:
-            rotate_every = int(self.val_rotate_every)
+            # val_rotate_every is in training steps; convert to val runs
+            val_interval = val_interval if val_interval > 0 else 1
+            rotate_every = max(1, int(self.val_rotate_every) // val_interval)
 
         total_slots = max(1, math.ceil(total_val_runs / rotate_every))
 
-        # Build slots by cycling through shuffled song list
-        shuffled = all_songs[:]
-        random.shuffle(shuffled)
-        # Tile enough copies to fill all slots
-        tiled = (shuffled * math.ceil((total_slots * per_set) / max(n_songs, 1)))
+        # Build the full ref list: (song_key, chunk_idx) tuples, cycling through
+        # all locked refs so every chunk gets a fair share of appearances.
+        chunks_per_song = max(1, math.ceil(self.val_songs / max(1, n_songs)))
+        all_refs = []
+        for song_key in all_songs:
+            for chunk_idx in range(chunks_per_song):
+                all_refs.append((song_key, chunk_idx))
+
+        random.shuffle(all_refs)
+        # Tile enough to fill all slots
+        tiled = all_refs * math.ceil((total_slots * per_set) / max(len(all_refs), 1))
 
         schedule = []
         for i in range(total_slots):
             offset = (i * per_set) % len(tiled)
             slot   = tiled[offset : offset + per_set]
-            # wrap-around
             if len(slot) < per_set:
                 slot += tiled[: per_set - len(slot)]
             schedule.append(slot)
 
-        print(f"[val audio] Rotation schedule: {n_songs} songs, "
-              f"{per_set} per set, rotate every {rotate_every} runs, "
+        print(f"[val audio] Rotation schedule: {n_songs} songs x {chunks_per_song} chunks "
+              f"= {len(all_refs)} refs, {per_set} per slot, rotate every {rotate_every} runs, "
               f"{total_slots} slots total.")
         return schedule
 
@@ -544,16 +551,16 @@ class AudioLightningModule(pl.LightningModule):
     def _lock_val_refs(self) -> None:
         """
         Called once when the rotation schedule is first built.
-        Picks one stable non-silent chunk per song from the fixed index set
-        and stores it in _val_locked_refs. These refs never change for the
-        lifetime of the run, so the same audio is always compared across
-        val steps for a given song.
+        Locks multiple non-silent chunks per song so the schedule can reference
+        distinct chunks from the same song when val_songs > n_songs.
+        Refs are keyed as "song_key:N" (N=0,1,2,...).
         """
         import random
+        import math as _math
         import torchaudio as _ta
 
-        dataset = self.trainer.datamodule.data_val
-        fixed   = self._val_fixed_indices or set()
+        dataset      = self.trainer.datamodule.data_val
+        fixed        = self._val_fixed_indices or set()
         _SILENCE_RMS = 0.01
 
         by_song = {}
@@ -565,38 +572,54 @@ class AudioLightningModule(pl.LightningModule):
             key   = parts[0] if len(parts) == 2 and parts[1].isdigit() else stem
             by_song.setdefault(key, []).append(ds_idx)
 
+        n_songs         = len(by_song)
+        chunks_per_song = max(1, _math.ceil(self.val_songs / max(1, n_songs)))
+
         locked = {}
         for song_key, candidates in by_song.items():
-            shuffled = candidates[:]
+            non_silent = []
+            silent     = []
+            shuffled   = candidates[:]
             random.shuffle(shuffled)
-            chosen = shuffled[0]
             for ds_idx in shuffled:
                 pair_idx, s = dataset.index[ds_idx]
                 lq_p, _ = dataset.pairs[pair_idx]
                 try:
                     wav, _ = _ta.load(lq_p, frame_offset=s, num_frames=dataset.segment_samples)
-                    if wav.pow(2).mean().sqrt().item() >= _SILENCE_RMS:
-                        chosen = ds_idx
-                        break
+                    (non_silent if wav.pow(2).mean().sqrt().item() >= _SILENCE_RMS else silent).append(ds_idx)
                 except Exception:
-                    pass
-            pair_idx, start = dataset.index[chosen]
-            lq_path, hq_path = dataset.pairs[pair_idx]
-            locked[song_key] = (lq_path, hq_path, start, dataset.segment_samples)
+                    silent.append(ds_idx)
+            ordered = non_silent + silent
+            chosen  = ordered[:chunks_per_song] if ordered else shuffled[:1]
+            for chunk_idx, ds_idx in enumerate(chosen):
+                pair_idx, start = dataset.index[ds_idx]
+                lq_path, hq_path = dataset.pairs[pair_idx]
+                locked[f"{song_key}:{chunk_idx}"] = (lq_path, hq_path, start, dataset.segment_samples)
 
+        print(f"[val audio] Locked {len(locked)} chunk refs across {n_songs} songs "
+              f"({chunks_per_song} chunks/song).")
         self._val_locked_refs = locked
-        print(f"[val audio] Locked {len(locked)} stable chunk refs.")
 
-    def _build_val_refs_for_slot(self, slot_songs: list) -> list:
+    def _build_val_refs_for_slot(self, slot_entries: list) -> list:
         """
-        Given a list of song keys for this slot, return the pre-locked refs.
-        Each song always uses the exact same chunk across all val runs.
+        Given a list of (song_key, chunk_idx) tuples for this slot,
+        return the pre-locked refs. Each entry maps to a stable chunk
+        locked at the start of training.
         """
         refs = []
-        for song_key in slot_songs:
-            if song_key in self._val_locked_refs:
-                lq_path, hq_path, start, seg_samples = self._val_locked_refs[song_key]
-                refs.append((song_key, lq_path, hq_path, start, seg_samples))
+        for entry in slot_entries:
+            if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                song_key, chunk_idx = entry
+            else:
+                song_key, chunk_idx = entry, 0
+            ref_key = f"{song_key}:{chunk_idx}"
+            # Fall back to chunk 0 if this specific chunk wasn't locked
+            if ref_key not in self._val_locked_refs:
+                ref_key = f"{song_key}:0"
+            if ref_key in self._val_locked_refs:
+                lq_path, hq_path, start, seg_samples = self._val_locked_refs[ref_key]
+                label = f"{song_key}_c{chunk_idx}"
+                refs.append((label, lq_path, hq_path, start, seg_samples))
         return refs
 
     # ------------------------------------------------------------------
@@ -784,10 +807,16 @@ class AudioLightningModule(pl.LightningModule):
                 n_slots  = math.ceil(n_songs / per_set)
                 self._val_rotate_cadence = max(1, total_val_runs // n_slots)
             else:
-                self._val_rotate_cadence = int(self.val_rotate_every)
+                # val_rotate_every is in training steps; convert to val-run cadence
+                try:
+                    val_interval = self.trainer.val_check_interval or 1
+                except Exception:
+                    val_interval = 1
+                self._val_rotate_cadence = max(1, int(self.val_rotate_every) // val_interval)
 
             print(f"[val audio] {len(all_songs)} songs available, "
-                  f"rotate every {self._val_rotate_cadence} val runs.")
+                  f"rotate every {self._val_rotate_cadence} val runs "
+                  f"(= {self._val_rotate_cadence * (self.trainer.val_check_interval or 1)} steps).")
 
         # Increment run counter then save audio (metrics computed synchronously inside)
         self._val_run_count += 1
