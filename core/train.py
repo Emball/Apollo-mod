@@ -1462,7 +1462,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     best_path = getattr(checkpoint, "best_model_path", "") or "" if checkpoint is not None else ""
     if best_path and os.path.isfile(best_path):
-        state_dict = torch.load(best_path, map_location="cpu", weights_only=True)
+        try:
+            state_dict = torch.load(best_path, map_location="cpu", weights_only=True)
+        except Exception:
+            state_dict = torch.load(best_path, map_location="cpu", weights_only=False)
         system.load_state_dict(state_dict=state_dict["state_dict"])
         system.cpu()
         to_save = system.audio_model.serialize()

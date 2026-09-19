@@ -142,14 +142,14 @@ early_stopping:
   _target_: pytorch_lightning.callbacks.EarlyStopping
   monitor: val_sfr
   patience: 2000
-  mode: min
+  mode: max
   verbose: true
 
 checkpoint:
   _target_: pytorch_lightning.callbacks.ModelCheckpoint
   dirpath: ${exp.dir}/${exp.name}/checkpoints
   monitor: val_sfr
-  mode: min
+  mode: max
   verbose: true
   save_top_k: -1
   save_last: false
