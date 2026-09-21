@@ -1136,8 +1136,20 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # Instantiate system
     print_only(f"Instantiating system <{cfg.system._target_}>")
     val_audio_dir = os.path.join(_run_dir, "val_audio")
+    # Strip keys that train.py manages explicitly to avoid double-pass crash when
+    # a user config accidentally defines them under system: as well as training:
+    _SYSTEM_MANAGED = {
+        "model", "discriminator", "loss_func", "metrics", "optimizer", "scheduler",
+        "val_audio_dir", "val_preview_samples", "val_metric_samples", "val_rotate_every",
+        "gradient_checkpointing", "grad_accum_steps", "visqol_fraction",
+        "target_band_loss_enabled", "target_band_loss_lo_hz", "target_band_loss_hi_hz",
+        "val_songs", "val_audio_pairs",
+    }
+    from omegaconf import OmegaConf
+    _sys_cfg = OmegaConf.to_container(cfg.system, resolve=True)
+    _sys_cfg = {k: v for k, v in _sys_cfg.items() if k not in _SYSTEM_MANAGED}
     system: LightningModule = hydra.utils.instantiate(
-        cfg.system,
+        _sys_cfg,
         model=model,
         discriminator=discriminator,
         loss_func=losses,
