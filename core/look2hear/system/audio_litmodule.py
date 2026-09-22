@@ -190,8 +190,7 @@ class AudioLightningModule(pl.LightningModule):
         scheduler=None,
         val_save_interval=5,
         val_audio_dir=None,
-        val_preview_samples=6,      # ignored -- full songs are saved, kept for config compat
-        val_metric_songs=3,         # number of songs for full-song metric computation (fixed forever)
+        val_songs=3,                # number of val songs to evaluate (full-song metrics + saved audio)
         val_rotate_every="auto",    # "auto" or int steps between preview-clip position rotations
         gradient_checkpointing=False,
         grad_accum_steps=1,
@@ -211,8 +210,7 @@ class AudioLightningModule(pl.LightningModule):
         self.scheduler        = list(scheduler)
         self.val_save_interval    = val_save_interval
         self.val_audio_dir        = val_audio_dir
-        self.val_preview_samples  = val_preview_samples
-        self.val_metric_songs     = val_metric_songs
+        self.val_songs            = val_songs
         self.val_rotate_every     = val_rotate_every
         self.target_band_loss_enabled = target_band_loss_enabled
         self.target_band_loss_lo_hz   = target_band_loss_lo_hz
@@ -439,7 +437,7 @@ class AudioLightningModule(pl.LightningModule):
         """Lock one LQ/HQ file path per val song. Fixed for the entire run."""
         dataset = self.trainer.datamodule.data_val
         self._val_song_refs = {}
-        for song_key, indices in by_song.items():
+        for song_key, indices in list(by_song.items())[:self.val_songs]:
             pair_idx, _ = dataset.index[indices[0]]
             lq_path, hq_path = dataset.pairs[pair_idx]
             self._val_song_refs[song_key] = (lq_path, hq_path)
