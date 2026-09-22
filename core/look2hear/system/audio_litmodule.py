@@ -558,6 +558,7 @@ class AudioLightningModule(pl.LightningModule):
             epoch_dir = os.path.join(self.val_audio_dir, f"step_{self.global_step:06d}")
             os.makedirs(epoch_dir, exist_ok=True)
 
+        torch.cuda.empty_cache()
         self.audio_model.eval()
         with torch.no_grad():
             for i, (song_key, (lq_path, hq_path)) in enumerate(song_items):

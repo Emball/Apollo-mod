@@ -1550,24 +1550,35 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # Skipped on resume since the checkpoint already has training history.
     if ckpt_path is None and not val_disabled:
         print_only("\n[baseline] Evaluating pretrained weights before training...")
+        _baseline_ok = True
         try:
-            datamodule.setup("fit")
-            # Offload discriminator to CPU during baseline to free RAM for full-song inference.
-            # The generator stays on GPU; discriminator is not needed for val.
-            disc = getattr(system, "discriminator", None)
-            if disc is not None:
-                disc.cpu()
+            import psutil as _ps
+            _vm = _ps.virtual_memory()
+            _headroom = (_vm.total * opt.get("ram_limit_fraction", 0.95)) - _vm.used
+            if _headroom < 1.5 * (1024 ** 3):  # less than 1.5 GB headroom
+                print_only(f"[baseline] Skipped -- only {_headroom/(1024**3):.1f} GB RAM headroom "
+                           f"(system RAM already near threshold). First val run after training starts will serve as baseline.")
+                _baseline_ok = False
+        except Exception:
+            pass
+        if _baseline_ok:
+            try:
+                datamodule.setup("fit")
+                disc = getattr(system, "discriminator", None)
+                if disc is not None:
+                    disc.cpu()
+                import gc; gc.collect()
                 torch.cuda.empty_cache()
-            baseline_results = trainer.validate(system, datamodule=datamodule, verbose=False)
-            if disc is not None:
-                disc.cuda()
-            if baseline_results:
-                bl = baseline_results[0]
-                bl_sisdr = bl.get("val_loss", None)
-                if bl_sisdr is not None:
-                    print_only(f"[baseline] sisdr={-float(bl_sisdr):.3f}  (pretrained, before any training)")
-        except Exception as e:
-            print_only(f"[baseline] Skipped: {e}")
+                baseline_results = trainer.validate(system, datamodule=datamodule, verbose=False)
+                if disc is not None:
+                    disc.cuda()
+                if baseline_results:
+                    bl = baseline_results[0]
+                    bl_sisdr = bl.get("val_loss", None)
+                    if bl_sisdr is not None:
+                        print_only(f"[baseline] sisdr={-float(bl_sisdr):.3f}  (pretrained, before any training)")
+            except Exception as e:
+                print_only(f"[baseline] Skipped: {e}")
 
     if ckpt_path is not None:
         _ckpt_data = torch.load(ckpt_path, map_location="cpu", weights_only=False)
