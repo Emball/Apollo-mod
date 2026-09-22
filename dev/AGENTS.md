@@ -4,7 +4,7 @@ Read `README.md` for usage, config reference, data layout, commands, and augment
 
 ## Coding Rules
 
-Unless explicitly instructed to make a change on a specific branch only, all changes must be applied to both `main` and `diagnostic/revert-training-step`.
+All changes go to `main`. The `diagnostic/revert-training-step` branch has been deleted — all its fixes are now in main.
 
 ## README Editing Guidelines
 
@@ -23,8 +23,6 @@ The GitHub wiki (`Changes-and-improvements` page, repo `Emball/Apollo-mod.wiki.g
 
 ---
 
-## Architecture
-
 ## Folder Structure
 
 ```
@@ -39,14 +37,16 @@ utils/                   -- TUI and tools
   tui.py                 -- keyboard-navigated launcher (primary interface)
   degrade_audio.py       -- synthetic degradation pipeline
   degrade/               -- degradation JSON configs
-configs/                 -- training YAML configs (apollo.yaml, apollo_uni.yaml)
-dev/                     -- internal docs and dev-only configs (stfl, stfl-og, stfl2)
+configs/                 -- training YAML configs
+  apollo.yaml            -- base config (feature_dim=256)
+  apollo_uni.yaml        -- universal config (feature_dim=384)
+  apollo_stfl.yaml       -- stfl active run config
+  apollo_stfl-og.yaml    -- original stfl config (reference baseline, resume: false)
+  apollo_stfl2.yaml      -- stfl2 experimental (deep_gain, silence_dip, all layers unfrozen)
+  apollo_stfl_new.yaml   -- stfl_new run with piecewise band weighting
+dev/                     -- internal docs (not user-facing)
   AGENTS.md
-  apollo_stfl.yaml       -- active stfl run config (diagnostic branch)
-  apollo_stfl-og.yaml    -- original stfl config (reference)
-  apollo_stfl2.yaml      -- stfl2 experimental config
 data/                    -- training source audio (LQ/ + HQ/ pairs per split)
-chunks/                  -- legacy placeholder (unused; chunks live in usr/cache/chunks/)
 models/                  -- pretrained / downloaded weights
 runs/                    -- training run output (checkpoints, logs)
 input/ output/           -- inference I/O staging dirs
@@ -56,80 +56,52 @@ input/ output/           -- inference I/O staging dirs
 
 | File | Role |
 |---|---|
-| `core/look2hear/models/apollo.py` | Generator. BSNet + Roformer layers. STFT/iSTFT always in float32. |
-| `core/look2hear/discriminators/frequencydis.py` | Frequency discriminator. Hann windows cached as plain tensors in `_hann_cache` (not `register_buffer` — keeps them out of checkpoint state_dict). Mono input auto-expanded to stereo via `.expand()`. `window_weight_boost` config param (default `false`) enables inverse-size window weighting — only useful for severely degraded sources, causes HF artifact reproduction on mildly degraded audio. |
-| `core/look2hear/system/audio_litmodule.py` | Lightning module. Manual optimization, gradient checkpointing (BSNet only), val audio saving, RAM/CUDA OOM watchdogs, val index locking, rotation schedule, background write thread. Training step follows original two-pass structure (discriminator first, fresh feature maps for generator loss). TF32 disabled. AMP handled by Lightning's built-in precision plugin, not manual autocast. |
-| `core/look2hear/losses/gan_losses.py` | GAN losses. Hann windows and weight tensors in `_hann_cache`/`_weight_cache` dicts (not buffers). Gaussian band weight curve replaces the old flat `hf_boost` step function — peaks at `band_weight_center_hz` with `band_weight_sigma_hz` width. Set `band_weight_gain: 0` for flat loss. `hf_band_mae()` exposed as standalone function for val metrics. |
-| `core/paired_datamodule.py` | Loads chunked LQ/HQ WAV pairs. Live + cached augmentation pipeline. Val dataloader shuffles; dataset index passed through batch for stable audio monitoring. |
-| `core/train.py` | Entry point. Source files decoded to `usr/cache/<md5>.wav` (FFmpeg, parallel, skips if already cached). Chunks written to `usr/cache/chunks/<key>/<split>/` keyed on source md5s + chunk params + aug config — shared across configs that use the same dataset. `cfg.datas.train_dir`/`eval_dir` are overwritten with the resolved absolute cache paths after `prepare_data()`. Pretrained checkpoint selection is `feature_dim`-aware: `feature_dim=256` → `apollo_model.ckpt` / `pytorch_model.bin`; `feature_dim=384` → `apollo_model_uni.ckpt` / `pytorch_model_uni.bin`. Auto-scan checks `models/` first in the correct dim-matched order, falls back to HuggingFace hub with the matching file. Override with `weights_path` in the config. `RankBadger` callback renames checkpoints with `[rank]` prefix after each save. Baseline val pass runs before training on fresh runs. Checkpoint and early stopping monitor `val_composite` (weighted perceptual composite), not `val_loss`. All paths resolved from `_REPO_ROOT` (two levels up from `core/`). |
-| `core/inference.py` | Entry point. Chunked inference, streams output to disk. Auto-selects latest checkpoint when `--weights` is omitted. `_ensure_wav` converts any non-WAV input to 32-bit float WAV in-place via FFmpeg before loading — eliminates encoder-delay mismatches between tools. `_spectral_merge` blends original and enhanced in the STFT domain (4096-point Hann, OLA) per user-defined frequency bands. Chunks shorter than `n_fft` are zero-padded before STFT and trimmed back after iSTFT — prevents crash on short tail chunks. Modes: `max_fft`, `min_fft`, `avg`, `original`, `enhanced`. `--low_end_preserve` applies `max_fft` below `--low_end_hz` (default 700 Hz). `--ensemble` accepts a JSON list of band specs for full control. `--aux_weights` / `--aux_conf_dir` / `--aux_ensemble` add a second checkpoint blended at specified bands. Phase always comes from the primary enhanced output; only magnitude is blended. |
-| `utils/tui.py` | Keyboard-navigated TUI (Rich). Primary interface, launched by `apollo.bat`/`apollo.sh`. Shows Latest and Best checkpoint options separately in inference. Ctrl+C during training saves a checkpoint and returns to menu. Inference screen includes an ensemble picker (`_pick_ensemble`) between output selection and run — offers no ensemble, low-end preserve, low-end + transition blend preset, and custom JSON input. Selected ensemble flags are forwarded to inference.py. Utilities screen includes "Update Apollo" — runs `git pull --ff-only`, then relaunches itself in place via `os.execv`. `ROOT` resolves to repo root (parent of `utils/`); `core/` is added to `sys.path` for lazy imports. |
-| `core/evaluate.py` | Offline checkpoint evaluator. Launched from TUI (Evaluate screen) or standalone (`python core/evaluate.py --conf_dir ...`). Reads metrics already encoded in checkpoint filenames; only runs inference for missing ones. Adds SDR and optional VISQOL (requires `pip install pyvisqol`). VISQOL scores cached in `<ckpt_dir>/.eval_cache.json`. Ranking weights: visqol=0.40, hfmae=0.25, msstft=0.20, sfr=0.10, sdr=0.05 — separate from RankBadger's training-time weights. |
-| `configs/apollo.yaml` | Base config (`feature_dim=256`). |
-| `configs/apollo_uni.yaml` | Universal config (`feature_dim=384`). |
-| `utils/align_audio.py` | LQ/HQ temporal alignment tool. Global sinc resample corrects end-to-end speed drift (PPM), then chunked cross-correlation micro-aligns with Hann crossfade. Low-confidence chunks are interpolated from neighbours. Outputs peak-normalized 24-bit WAV. Launched from TUI Utilities ("Align audio") or standalone (`python utils/align_audio.py --hq ... --lq ... --out ...`). Requires `scipy`. |
-| `utils/degrade_audio.py` | Synthetic degradation pipeline. Chain of codec/filter steps defined in a JSON config under `utils/degrade/` -- step types: `wma_encode`, `mp3_lame`, `lowpass`, `highpass` (all ffmpeg, shippable with no setup), and `mp3_fhg` (Fraunhofer IIS via `acmenc` -- requires `external_codecs.acmenc` set to a local `acmenc.exe` path; acmenc is a custom install, not shipped). Compressed steps auto-decode to WAV before the next step; the config only lists degradation passes, not the plumbing. Single file or `--bulk` folder mode. `utils/degrade/default.json` is ffmpeg-only (WMA 128k → LAME q5 → LAME q2); `utils/degrade/fhg_original.json` reproduces the original 7-pass FhG chain and requires acmenc. Launched from TUI Utilities (`Degrade audio`) or standalone. |
+| `core/look2hear/models/apollo.py` | Generator. BSNet + Roformer layers. Band-split STFT/iSTFT always in float32. Time dimension processed by `ICB` (stacked depthwise-separable Conv1d) — scales linearly with sequence length, no attention blowup. Band dimension processed by `Roformer` (fixed small count). |
+| `core/look2hear/discriminators/frequencydis.py` | Frequency discriminator. Hann windows cached as plain tensors in `_hann_cache` (not `register_buffer` — keeps them out of checkpoint state_dict). Mono input auto-expanded to stereo via `.expand()`. `window_weight_boost` (default `false`) — only useful for severely degraded sources. |
+| `core/look2hear/system/audio_litmodule.py` | Lightning module. Manual optimization, gradient checkpointing (BSNet only), full-song val inference, live perceptual metrics (VISQOL/SDR/SFR), preview clip saving, RAM/CUDA OOM watchdogs. Training step: discriminator-first, two-pass, fresh feature maps for generator loss. TF32 disabled globally. AMP via Lightning's precision plugin. |
+| `core/look2hear/losses/gan_losses.py` | GAN losses. Band weight curve shapes: `"gaussian"` (raised bump at `band_weight_center_hz`, width `band_weight_sigma_hz`), `"trapezoid"` (flat-topped between `band_weight_lo_hz`/`band_weight_hi_hz` with `band_weight_ramp_hz` edges), `"piecewise"` (arbitrary breakpoints list `[[hz, weight], ...]`, linear interpolation). `band_weight_gain=0` = perfectly flat. |
+| `core/paired_datamodule.py` | Loads chunked LQ/HQ WAV pairs. Live augmentation pipeline. Val dataloader uses `FullLengthPairDataset` (whole files). Chunk dataloader uses `ChunkedPairDataset`. |
+| `core/train.py` | Entry point. Chunk cache keyed on source md5s + chunk params. Pretrained checkpoint selection is `feature_dim`-aware. `val_metric_samples` config key accepted as fallback alias for `val_metric_songs`. Baseline val pass on fresh runs. Checkpoint monitor: `val_sdr`, `mode: max`. |
+| `core/inference.py` | Chunked OLA inference. Auto-selects latest checkpoint. `_ensure_wav` converts input to WAV before loading. `_spectral_merge` blends original/enhanced in STFT domain. `--low_end_preserve`, `--ensemble` JSON, `--aux_weights` blending all supported. |
+| `utils/tui.py` | Keyboard-navigated TUI. Latest/Best checkpoint options in inference picker. Ctrl+C during training saves checkpoint. Ensemble picker after output path selection. "Update Apollo" in Utilities runs `git pull --ff-only`. `--dev` flag adds `dev/*.yaml` to config picker. |
+| `core/evaluate.py` | Offline checkpoint evaluator. Reads metrics from filenames; runs inference only for missing ones. VISQOL via `visqol-python`. Scores cached in `<ckpt_dir>/.eval_cache.json`. |
+| `utils/align_audio.py` | LQ/HQ temporal alignment. Global sinc resample for speed drift, chunked cross-correlation micro-alignment. |
+| `utils/degrade_audio.py` | Synthetic degradation pipeline via JSON configs. |
 
 ---
 
 ## Internal Behavior
 
-**Chunk cache:** Chunks live in `usr/cache/chunks/<key>/<split>/LQ|HQ` — keyed on an MD5 hash of (source file contents + `segment_sec` + `overlap` + `fixed_delay` + augmentation config). Any training config that requests the same dataset with the same parameters reuses the cached chunks without re-chunking. The cache is global: different configs can share a chunk set if their source data and params match. A `.manifest.json` is written after each successful chunk run for legacy skip-if-present logic inside `_chunk_split`.
+**Chunk cache:** `usr/cache/chunks/<key>/<split>/` — keyed on MD5 of (source contents + `segment_sec` + overlap + `fixed_delay` + aug config). Shared across configs with matching dataset and params. `.manifest.json` written after each successful run.
 
-**Source conversion:** On chunk prep, any non-WAV source files (MP3, FLAC, etc.) are converted in-place to 32-bit float WAV via FFmpeg in parallel threads. The alignment trim (`align_data`) is baked in during this pass via FFmpeg's `atrim` filter. Already-WAV files are never re-converted. Conversion is skipped entirely if all sources are already WAV.
+**Source conversion:** Non-WAV sources converted to 32-bit float WAV via FFmpeg in parallel threads. `align_data` integer offset baked in via `atrim`. Already-WAV files are never re-converted.
 
-**Run isolation:** Each fresh run creates `runs/<name>/<timestamp>/`. Resume finds the most recently modified timestamped subfolder with a `checkpoints/` dir and picks the newest `.ckpt` by mtime.
+**Run isolation:** Each fresh run creates `runs/<name>/<timestamp>/`. Resume finds the most recently modified timestamped subfolder with a `checkpoints/` dir.
 
-**Val fixed evaluation set:** On the first real val run, `_lock_val_fixed_indices` groups all seen dataset indices by song, then samples `limit_val_batches / num_songs` chunks from each song (stratified). The result is locked into `_val_fixed_indices` — all subsequent val runs skip any chunk not in this set, so the loss is always computed on the exact same fixed chunks. Both `_val_fixed_indices` and the rotation schedule are persisted in the checkpoint and restored on resume.
+**Val system — full-song metric computation:** At the first val run, `_lock_val_songs` picks `val_metric_songs` songs from the full val set (or all songs if fewer are available), and locks their file paths permanently in `_val_song_refs`. Every subsequent val run runs OLA chunked inference over each locked song's complete LQ file and scores SDR, SFR, and VISQOL against the full HQ reference. Results are averaged across songs. The full-song approach gives honest metrics with real temporal context — no per-chunk normalization seams, no boundary artifacts from independent 3-second windows. Locked paths are checkpointed and resume-stable.
 
-**Val audio rotation:** Saves exactly `val_songs` songs × 3 files (LQ/HQ/Restored) = N×3 files per val run. At training start a rotation schedule is computed so that every val song gets equal coverage by end of training. Each song's chunk is picked once at schedule-build time (`_lock_val_refs`) — one specific non-silent chunk, never re-picked — and stored in `_val_locked_refs`, so the same audio is always compared across val steps for a given song. `val_rotate_every: auto` derives the cadence from total configured steps; an integer overrides it manually. The schedule and locked refs are checkpointed and resume-stable. File writes run in a background thread so training resumes immediately. Old configs using `val_audio_pairs` still work via fallback.
+**Val system — preview clips:** After the full-song inference pass, `_compute_val_metrics` stores restored tensors in `_pending_preview_data`. `_save_val_audio` cuts `val_preview_samples` short clips from those tensors — no second inference pass. Preview clips rotate across different offsets per `val_rotate_every` (steps). Equal coverage across all available songs. LQ/HQ/Restored triplets saved to `runs/<name>/<timestamp>/val_audio/`. Writes happen in a background thread.
 
-**Val perceptual metrics (diagnostic branch):** Four metrics computed live after each val run: `visqol` (perceptual quality score via pyvisqol — primary quality signal; lazy-loaded, silently skipped if not installed; runs on `visqol_fraction` of val pairs, default 1.0), `sdr` (Signal-to-Distortion Ratio), `sfr` (spectral flatness ratio 8-22kHz — rising above 1.05 is an early overfitting/artifact signal), `sisdr` (legacy, noisy). Optional `target_band_loss` (configurable Hz range, off by default) appends `tbl=` to console and checkpoint names when enabled. All metrics logged to TensorBoard. `msstft` and `hf_band_mae` removed from live val; available as offline helpers via `evaluate.py` for legacy checkpoint scoring.
+**Val perceptual metrics:** Four metrics after each val run: `val_visqol` (ViSQOL via `visqol-python`; lazy-loaded, silently skipped if not installed; runs on `visqol_fraction` of locked songs), `val_sdr` (Signal-to-Distortion Ratio — primary monitor), `val_sfr` (spectral flatness ratio 8–22kHz — useful as a canary for HF noise injection, not as a primary quality metric; rising is expected for MP3 restoration since the model reconstructs frequencies the codec removed), `val_loss` (negated SI-SDR, computed over the fixed chunk batch in `validation_step`). All logged to TensorBoard. Checkpoint monitor: `val_sdr`, `mode: max`.
 
-**Checkpoint monitoring (diagnostic branch):** Two separate weighting systems exist:
+**VISQOL:** Uses the `visqol-python` package (pip-installable, pure-Python port of ViSQOL v3.3.3, Windows-compatible). Install: `uv pip install "visqol-python[all]"`. Added to `requirements.txt`. If not installed, `val_visqol=0.000` with no crash. Both `audio_litmodule.py` and `evaluate.py` use the same `_get_visqol_api()` / `_visqol_score()` helpers.
 
-1. **Checkpoint save trigger** — `AudioLightningModule.on_validation_epoch_end()` logs `val_composite` using weights `visqol=0.50, sdr=0.25, sfr=0.15, sisdr=0.10`. The `ModelCheckpoint` callback monitors `val_composite` (min) to decide whether to save.
+**Band weight:** `MultiFrequencyGenLoss` applies a penalty curve over STFT bins. Three shapes: `"gaussian"` (bump centered at `band_weight_center_hz`), `"trapezoid"` (flat band with soft ramps), `"piecewise"` (list of `[hz, weight]` breakpoints, linearly interpolated — use to match the exact codec damage curve for your material). `band_weight_gain=0` is flat regardless of shape. `apollo_stfl_new.yaml` uses piecewise shape tuned for MP3 restoration: flat at 0.15 below 550Hz, peaks at 1.0 from 12–14kHz, drops to 0.1 above 16.5kHz.
 
-2. **Filename rank badge** — `RankBadger` in `train.py` renames checkpoints after save using the same weights. `[1]` = lowest composite score (best).
+**Mid/side isolation augmentation:** Live augmentation option (`mid_side_isolation` block). When enabled, randomly collapses the LQ/HQ pair to mid `(L+R)/2` or side `(L-R)/2`, duplicated to both channels. Applied identically to LQ and HQ. Rolls before `stereo_alternation` — if mid/side fires, stereo_alternation is skipped for that chunk. Only runs on stereo input. Off by default. Config keys: `enabled`, `prob_mid`, `prob_side`.
 
-All checkpoints are kept (`save_top_k=-1` enforced in code). `evaluate.py` uses a separate weighting that includes msstft/hfmae for legacy checkpoint compatibility — offline ranking only.
+**Training step structure:** Two-pass discriminator-first: (1) discriminator forward on detached output → `loss_d` → backward → step; (2) generator forward on live output → fresh feature maps → `loss_g` → backward → step. Feature matching uses fresh feature maps from the generator step. TF32 disabled globally. AMP via Lightning `precision_plugin`, not manual autocast. Gradient clipping via manual `unscale_` + `clip_grad_norm_`.
 
-**Checkpoint filenames (diagnostic branch):** Format is `[rank]-step={step:06d}-sisdr={val_loss:.3f}-visqol={val_visqol:.3f}-sdr={val_sdr:.3f}-sfr={val_sfr:.3f}.ckpt`. `tbl={val_tbl:.4f}` is appended when `target_band_loss_enabled: true`. `[rank]` is prepended by the `RankBadger` callback after each save.
+**CRITICAL — never call `torch.cuda.empty_cache()` in any training or validation hook.** Only acceptable inside an OOM recovery handler.
 
-**Baseline eval:** On fresh runs (no resume), `trainer.validate()` is called on the pretrained weights before `trainer.fit()`. Prints `[baseline] sisdr=XX.XXX` so improvement is immediately visible against the starting point.
+**Alignment:** `align_data` integer offset baked into WAV at conversion time. Positive trims LQ, negative trims HQ. `false` to disable.
 
-**StepPrinter (diagnostic branch):** TQDM is disabled. Prints one line per optimizer step. `it/s` counts every batch (including accumulation batches) for consistency with pre-accumulation baselines. Val time is excluded from the rate. Last val metrics shown inline once available: `visqol, sdr, sfr, sisdr` (perceptual zoom-out first, sisdr last). `tbl=` appended when target band loss is enabled.
+**Augmentation — mid/side priority:** `mid_side_isolation` rolls first. If it fires, `stereo_alternation` is skipped. If not, `stereo_alternation` runs normally. They cannot both apply to the same chunk.
 
-**Band weight:** `MultiFrequencyGenLoss` applies a penalty curve over STFT bins, shape controlled by `band_weight_shape`: `"gaussian"` (default, raised curve peaking at `band_weight_center_hz` with width `band_weight_sigma_hz`) or `"trapezoid"` (flat-topped between `band_weight_lo_hz`/`band_weight_hi_hz` with `band_weight_ramp_hz` soft edges — useful for targeting a specific rolloff/transition band). `band_weight_gain=0` is perfectly flat regardless of shape. Replaces the old `hf_boost` + `hf_threshold_ratio` step function. Config keys `hf_boost` and `hf_threshold_ratio` are accepted for back-compat but ignored.
+**Startup update check:** `apollo.bat` runs `git pull --ff-only` on startup. Failure is non-fatal.
 
-**Alignment:** `align_data` accepts an integer offset in samples — positive trims LQ, negative trims HQ. Baked into WAV files at conversion time via FFmpeg, never applied at chunk or training time. iTunes-encoded MP3s have a consistent 1057-sample encoder delay. Set `false` to disable.
+**Dev mode:** `apollo.bat --dev` sets `APOLLO_DEV=1`. `tui.py` includes `dev/*.yaml` in the config picker.
 
-**Augmentation internals:** `normalize_pair` scales by joint peak — pre-existing flat-top clipping is preserved as valid training signal. `stereo_alternation` picks L or R by sample index (even → L, odd → R) — `prob: 1.0` alternates systematically.
+**Pretrained checkpoint loading:** `BaseModel.from_pretrain()` allow-lists OmegaConf types via `add_safe_globals` before `torch.load(..., weights_only=True)`.
 
-**Inference normalization:** Input normalized by peak before chunked inference, rescaled back after. Preserves transient headroom.
-
-**Training step structure (diagnostic branch):** Two-pass discriminator-first structure restored from original working code:
-
-1. `optimizer_d.zero_grad()` then discriminator forward on `output.detach()` → `loss_d` → `manual_backward` → clip → `optimizer_d.step()`
-2. `optimizer_g.zero_grad()` then discriminator forward on `output` (live, not detached) → compute fresh `targets_feature_maps` → `loss_g` → `manual_backward` → clip → `optimizer_g.step()`
-
-Feature matching loss uses fresh feature maps from the generator step, not stale ones from the discriminator update. TF32 disabled globally (`torch.set_float32_matmul_precision("highest")`; `allow_tf32=False`). AMP managed by Lightning's `precision_plugin`; no manual `torch.amp.autocast` wrapping. Gradient clipping uses manual `scaler.unscale_(optimizer)` + `torch.nn.utils.clip_grad_norm_()`, not `self.clip_gradients()`.
-
-**CRITICAL — never call `torch.cuda.empty_cache()` in any training or validation hook.** Only acceptable inside an OOM recovery handler (`except torch.cuda.OutOfMemoryError`).
-
-**Startup update check:** `apollo.bat` runs `git pull --ff-only` before installing dependencies, if the working dir is a git checkout and `git` is on PATH. Failure is non-fatal — a warning is printed and it continues with the local copy.
-
-**Dev mode:** `apollo.bat --dev` sets `APOLLO_DEV=1` before launching the TUI. When set, `_list_configs()` in `tui.py` includes `dev/*.yaml` in the config picker alongside `configs/*.yaml`. The flag is stripped before any other arg parsing — `apollo.bat --dev train ...` works as expected.
-
-**Pretrained checkpoint loading:** `BaseModel.from_pretrain()` allow-lists OmegaConf's `DictConfig`/`ListConfig` classes via `torch.serialization.add_safe_globals` before `torch.load(..., weights_only=True)`, since the upstream HuggingFace checkpoint's `infos` dict contains a pickled `DictConfig`.
-
----
-
-## Current Branch State
-
-| Branch | Contains |
-|--------|----------|
-| `main` | Spectral merge engine, TUI ensemble picker, aux checkpoint blending, `_ensure_wav` in-place MP3→WAV conversion, short-chunk STFT fix, noise augmentation disabled. Dev mode (`--dev` flag). Dev configs (`dev/`) on both branches. |
-| `diagnostic/revert-training-step` | All of main plus: training step revert (discriminator-first, fresh feature maps), configurable TF32, AMP via Lightning precision plugin, VISQOL live metrics. |
-
-The diagnostic branch contains four training fixes that have not yet been validated. If they resolve the stfl regression, they will be merged to main.
+**Config key aliases:** `val_metric_songs` is the current key. `val_metric_samples` and `val_songs` and `val_audio_pairs` are accepted as fallbacks in `train.py` for old configs.

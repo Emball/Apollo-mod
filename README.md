@@ -57,9 +57,7 @@ On first run, sources are converted to WAV and chunked into fixed-length segment
 
 ### Validation Set Guidelines
 
-The val set is used to lock a fixed evaluation sample (`limit_val_batches` chunks) on the first val run. That same fixed set is used for every subsequent val check, giving you a perfectly comparable loss signal across all checkpoints. The selection is stratified by song so no single song dominates.
-
-A rotating set of `val_songs` songs (LQ/HQ/Restored triplets) is saved to `runs/<name>/<timestamp>/val_audio/` after each val run. The rotation schedule is computed at training start so every val song gets equal coverage by end of training, and it's checkpointed so resume doesn't change the sequence. Each song's chunk is locked once and reused for every val run, so the same audio is compared across the whole training run rather than a different random chunk each time.
+On the first val run, `val_metric_songs` songs are selected from the val set and locked permanently. Each subsequent val run runs OLA inference over each locked song's complete LQ file and scores against the full HQ reference — giving honest metrics with real temporal context rather than averaging independent 3-second windows. Preview clips (`val_preview_samples` triplets of LQ/HQ/Restored) are cut from the same inference pass; no second model run. Clips rotate across different offsets on `val_rotate_every` so you hear different parts of each song over the course of training.
 
 After each val run the console prints:
 
@@ -67,19 +65,18 @@ After each val run the console prints:
   [val] visqol=3.821  sdr=10.234  sfr=0.968  sisdr=12.458  (18.8s)
 ```
 
-- **visqol** — perceptual quality score (0-5). The primary signal. Correlates with human listening judgement; insensitive to fine spectral deviations the model may be synthesizing rather than reconstructing. Higher is better.
-- **sdr** — Signal-to-Distortion Ratio. Less noisy than sisdr; a honest secondary check that overall waveform quality is improving. Higher is better.
-- **sfr** — spectral flatness ratio in the 8-22kHz band. A canary, not a quality metric. Rising toward or above 1.05 means the model may be injecting noise rather than reconstructing content. Watch for trend changes.
-- **sisdr** — waveform fidelity. Higher is better, but architecture-capped and noisy. Treat as a sanity check, not a primary signal.
+- **visqol** — perceptual quality score (0-5). Correlates with human listening judgement. Higher is better. Requires `visqol-python` (`uv pip install "visqol-python[all]"`); silently skipped and reported as 0.0 if not installed.
+- **sdr** — Signal-to-Distortion Ratio. Primary checkpoint monitor. Higher is better.
+- **sfr** — spectral flatness ratio in the 8-22kHz band. Rising is expected for MP3 restoration (the model is reconstructing frequencies the codec removed). Watch for abrupt changes, not absolute values.
+- **sisdr** — waveform fidelity, noisy. Logged for reference.
 
-All four are logged to TensorBoard. `visqol` requires `pyvisqol` — if not installed it is silently skipped and reported as 0.0.
+All four are logged to TensorBoard.
 
 **What to put in your val set:**
 
 - Use your most representative and challenging material.
 - Match the degradation type exactly to your training data.
 - A few songs of similar character is better than many songs of mixed difficulty.
-- Aim for at least enough audio to fill `limit_val_batches` chunks. With a 3-second chunk size and `limit_val_batches: 100`, that is 5 minutes minimum.
 
 ---
 
@@ -122,7 +119,7 @@ All checkpoints are kept. Each is named with full stats and a rank badge:
 [2]-step=001100-sisdr=-12.398-visqol=3.891-sdr=10.120-sfr=0.975.ckpt
 ```
 
-`[1]` = best by a weighted composite: `visqol=0.50, sdr=0.25, sfr=0.15, sisdr=0.10`. The rank badges are updated after every new checkpoint save. Offline `evaluate.py` runs additional metrics (msstft, hfmae, VISQOL on more samples) and re-ranks the full set.
+`[1]` = best by `val_sdr`. The rank badges are updated after every new checkpoint save. Offline `evaluate.py` re-ranks the full set and can add additional metrics.
 
 ---
 
@@ -217,8 +214,9 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 | Key | Description |
 |---|---|
 | `n_layers_to_freeze` | Freeze the first N BSNet layers. Apollo has 6 total. `4` is recommended for synthetic/noisy degradation; `0` for clean/consistent degradation like real iTunes encodes. |
-| `val_songs` | Number of songs saved per val run as LQ/HQ/Restored triplets. |
-| `val_rotate_every` | `auto` = derive rotation cadence from total configured steps for full song coverage. Integer = switch every N val runs. |
+| `val_metric_songs` | Number of full songs used for metric computation per val run. Locked on the first val run and never changed. |
+| `val_preview_samples` | Number of short LQ/HQ/Restored clip triplets saved to `val_audio/` per val run. Clips come from the metric inference pass — no extra model run. |
+| `val_rotate_every` | Steps between preview clip rotation. `auto` = derived from total configured steps. Integer = explicit step count. |
 | `grad_accum_steps` | Accumulate gradients over N steps to simulate a larger batch without extra VRAM. |
 
 ### datas
@@ -238,9 +236,12 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 
 | Augmentation | Type | Notes |
 |---|---|---|
-| `stereo_alternation` | Live | Alternates L/R by sample index. Balanced stereo exposure without random channel collapse. |
+| `stereo_alternation` | Live | Alternates L/R by sample index. Balanced stereo exposure without random channel collapse. Skipped if `mid_side_isolation` fires on the same chunk. |
 | `gain` | Live | Random gain shift applied identically to LQ and HQ. Never hard-clamps. |
+| `deep_gain` | Live | Large gain reduction (e.g. -10 to -6 dB) at low probability. Trains robustness to quiet passages. |
+| `silence_dip` | Live | Briefly fades signal toward silence with configurable ramp shapes. Trains robustness to dynamic dips. |
 | `polarity` | Live | Randomly flips signal polarity. |
+| `mid_side_isolation` | Live | Collapses the pair to mid `(L+R)/2` or side `(L-R)/2`, duplicated to both channels. Applied identically to LQ and HQ. Helps the model generalize to stereo field components. Rolls before stereo_alternation; if it fires, stereo_alternation is skipped. |
 | `noise` | Live | Matched Gaussian noise added to both LQ and HQ. **Do not use with fragile/synthetic degradation** — it pollutes the gradient signal. Safe for clean/consistent degradation. |
 | `pitch_shift` | Cached | Disabled recommended for codec restoration. |
 | `mp3_degradation` | Cached | CBR MP3 re-encode on LQ only. |
@@ -249,15 +250,16 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 
 | Key | Description |
 |---|---|
-| `band_weight_shape` | `gaussian` (default) or `trapezoid`. |
+| `band_weight_shape` | `gaussian`, `trapezoid`, or `piecewise`. |
 | `band_weight_center_hz` | Gaussian only. Center frequency of the penalty bump in Hz. Default `15000`. |
 | `band_weight_sigma_hz` | Gaussian only. Width of the bump (1-sigma) in Hz. Default `3000`. |
 | `band_weight_lo_hz` | Trapezoid only. Low edge of the boosted band in Hz. Default `4500`. |
 | `band_weight_hi_hz` | Trapezoid only. High edge of the boosted band in Hz. Default `18500`. |
 | `band_weight_ramp_hz` | Trapezoid only. Width of the soft ramp at each edge in Hz. Default `1500`. |
-| `band_weight_gain` | Peak gain above baseline. `0` = flat loss regardless of shape. `1.5` applies meaningful focus on the target band. |
+| `band_weight_breakpoints` | Piecewise only. List of `[hz, weight]` pairs defining the curve; linearly interpolated between points. Weight range is 0–1. |
+| `band_weight_gain` | Peak gain above baseline. `0` = flat loss regardless of shape. |
 
-The gaussian shape adds a raised bump of extra penalty centered on a single frequency without over-boosting already-fine content nearby — good for a general HF-quality push. The trapezoid shape targets a specific flat band with soft edges — better when you know the exact transition range of the encoder you're targeting (e.g. an MP3 rolloff zone) and want even penalty across it rather than a single peak. Both are more surgical than the old `hf_boost` step function. Start with `gain: 0` for a baseline run, then enable if the model is neglecting the target zone.
+`gaussian` adds a bump centered on one frequency — good for a targeted HF push. `trapezoid` targets a flat band with soft edges — useful for a known codec rolloff zone. `piecewise` takes arbitrary `[hz, weight]` breakpoints and interpolates linearly — use this when you have actual null-test data showing where the codec does damage and want to match the weighting to that curve exactly. Start with `gain: 0` for a baseline run.
 
 ### discriminator
 
@@ -288,7 +290,7 @@ The gaussian shape adds a raised bump of extra penalty centered on a single freq
 | Key | Description |
 |---|---|
 | `gradient_checkpointing` | Recomputes activations during backward. Saves 30-40% VRAM at ~30% compute cost. |
-| `visqol_fraction` | Fraction of val pairs to score with VISQOL per val run. `1.0` = all; lower values reduce val time if VISQOL is slow. Default `1.0`. |
+| `visqol_fraction` | Fraction of locked metric songs to score with VISQOL per val run. `1.0` = all. Requires `visqol-python` installed. Default `1.0`. |
 | `target_band_loss_enabled` | Adds a configurable-range band loss to live val metrics. Off by default. When enabled, appears as `tbl=` in console and checkpoint filenames. |
 | `target_band_loss_lo_hz` | Low edge of the target band in Hz. Default `13000`. |
 | `target_band_loss_hi_hz` | High edge of the target band in Hz. Default `19000`. |
@@ -297,8 +299,8 @@ The gaussian shape adds a raised bump of extra penalty centered on a single freq
 
 | Key | Description |
 |---|---|
-| `val_check_interval` | Validate every N training steps. For synthetic/noisy degradation, use 200-300 for cleaner metrics. For clean degradation, 50-100 is fine. |
-| `limit_val_batches` | Cap val batches per run. `100` gives good coverage at 3s chunk size. |
+| `val_check_interval` | Validate every N training steps. |
+| `limit_val_batches` | Cap on the fixed chunk batch used for `val_loss` (sisdr) computation. `100` is typical. |
 | `max_epochs` | Hard epoch cap. Early stopping usually triggers before this. |
 | `precision` | `16-mixed` for fp16 mixed precision. |
 | `patience` | Early stopping patience in val runs. `100` is reasonable; set higher or disable for exploratory runs. |
