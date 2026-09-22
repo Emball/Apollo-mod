@@ -1084,6 +1084,15 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     def _make_optimizer(params, lr, weight_decay, betas):
         opt_type = opt_cfg.get("type", "adamw").lower()
 
+        if opt_type == "gefen":
+            try:
+                from gefen import Gefen
+                opt = Gefen(params, lr=lr, weight_decay=weight_decay, betas=betas, fused=True)
+                print_only(f"[optimizer] Gefen -- lr={lr}")
+                return opt
+            except ImportError:
+                print_only("[optimizer] gefen not installed -- falling back to AdamW32bit (pip install gefen)")
+
         if opt_type == "adamw_8bit":
             try:
                 import bitsandbytes as bnb

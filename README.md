@@ -279,7 +279,7 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 
 | Key | Description |
 |---|---|
-| `type` | `adamw`, `adamw_8bit` (recommended, cuts optimizer VRAM ~75%), or `cpu_offload`. |
+| `type` | `adamw`, `gefen` (recommended — lower memory, faster optimizer steps; requires `pip install gefen`), `adamw_8bit` (bitsandbytes), or `cpu_offload`. |
 | `lr_g` | Generator learning rate. `3e-6` recommended for fine-tuning close to the target distribution; `1e-5` for more aggressive adaptation. |
 | `lr_d` | Discriminator learning rate. Keep ~10x lower than `lr_g`. |
 | `betas_g` | Generator Adam betas. Default `[0.9, 0.999]`. |

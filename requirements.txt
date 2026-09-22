@@ -42,6 +42,7 @@ sympy==1.12
 packaging==23.2
 setuptools
 bitsandbytes>=0.43.0; sys_platform != 'darwin'
+gefen
 
 # Augmentation
 ffmpeg-python
