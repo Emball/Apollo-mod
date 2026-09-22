@@ -612,7 +612,7 @@ class PairedAudioDataModule(LightningDataModule):
     def val_dataloader(self) -> DataLoader:
         return DataLoader(
             self.data_val,
-            batch_size=self.batch_size,
+            batch_size=1,
             shuffle=True,
             num_workers=0,
             pin_memory=False,
