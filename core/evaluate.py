@@ -5,7 +5,7 @@ Launched from tui.py as a TUI screen, or standalone:
     python evaluate.py --conf_dir configs/apollo_stfl2.yaml
 
 Metrics computed per checkpoint:
-    visqol  -- ViSQOL perceptual score (primary; requires: pip install pyvisqol)
+    visqol  -- ViSQOL perceptual score (primary; requires: uv pip install "visqol-python[all]")
     sdr     -- Signal-to-Distortion Ratio (waveform integrity)
     sfr     -- Spectral flatness ratio (artifact canary)
     sisdr   -- SI-SDR (legacy, noisy -- low weight)
@@ -43,7 +43,10 @@ from omegaconf import OmegaConf
 _CORE_DIR  = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(_CORE_DIR)
 sys.path.insert(0, _CORE_DIR)
-from look2hear.system.audio_litmodule import _ms_log_stft_loss, _spectral_flatness_ratio, _hf_band_mae_cpu
+from look2hear.system.audio_litmodule import (
+    _ms_log_stft_loss, _spectral_flatness_ratio, _hf_band_mae_cpu,
+    _get_visqol_api, _visqol_score,
+)
 import look2hear.models.apollo
 import look2hear.losses
 
@@ -79,31 +82,17 @@ _FILENAME_PATS = {
 # ---------------------------------------------------------------------------
 
 def _visqol_available() -> bool:
-    try:
-        import pyvisqol  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    return _get_visqol_api() is not None
 
 
 def _compute_visqol(ref: torch.Tensor, deg: torch.Tensor, sr: int = _SR) -> Optional[float]:
-    """Compute ViSQOL score. Returns None if pyvisqol is unavailable."""
-    try:
-        import pyvisqol
-        import tempfile, soundfile as sf
-        with tempfile.TemporaryDirectory() as tmp:
-            ref_path = os.path.join(tmp, "ref.wav")
-            deg_path = os.path.join(tmp, "deg.wav")
-            # pyvisqol expects mono float32
-            r = ref[0].numpy() if ref.ndim == 2 else ref.numpy()
-            d = deg[0].numpy() if deg.ndim == 2 else deg.numpy()
-            sf.write(ref_path, r, sr)
-            sf.write(deg_path, d, sr)
-            result = pyvisqol.visqol(ref_path, deg_path, sr=sr)
-            return float(result)
-    except Exception as ex:
-        print(f"  [visqol] {ex}")
-        return None
+    """Compute ViSQOL score. Returns None if visqol-python is unavailable.
+
+    Delegates to the same _visqol_score() used during live training, so
+    evaluate.py and the training-time metric always agree on how the
+    score is computed (mono mix, resampled to 48kHz internally).
+    """
+    return _visqol_score(deg, ref, sr=sr)
 
 
 # ---------------------------------------------------------------------------
@@ -438,7 +427,7 @@ def run_evaluation(
 
     has_visqol = _visqol_available()
     if run_visqol and not has_visqol:
-        print_fn("[eval] WARNING: pyvisqol not installed -- skipping VISQOL. Run: pip install pyvisqol")
+        print_fn('[eval] WARNING: visqol-python not installed -- skipping VISQOL. Run: uv pip install "visqol-python[all]"')
         run_visqol = False
 
     cache = _load_cache(ckpt_dir)
@@ -572,7 +561,7 @@ def screen_evaluate(state: dict, console, _pick, _run_with_live_output, ROOT: Pa
 
     # VISQOL option
     has_visqol = _visqol_available()
-    visqol_label = "Run VISQOL (slow -- perceptual score)" if has_visqol else "Run VISQOL  [not installed -- pip install pyvisqol]"
+    visqol_label = "Run VISQOL (slow -- perceptual score)" if has_visqol else 'Run VISQOL  [not installed -- uv pip install "visqol-python[all]"]'
     mode_items = [
         "Fast  (read filename metrics + SDR only)",
         visqol_label,
@@ -622,7 +611,7 @@ def main() -> None:
     parser.add_argument("--conf_dir",  required=True, help="Path to yaml config")
     parser.add_argument("--ckpt_dir",  default=None,  help="Checkpoint folder (auto-detected if omitted)")
     parser.add_argument("--limit",     type=int, default=None, help="Total val chunks across songs (default: val_metric_samples from config)")
-    parser.add_argument("--visqol",    action="store_true",   help="Run VISQOL (requires pyvisqol)")
+    parser.add_argument("--visqol",    action="store_true",   help="Run VISQOL (requires visqol-python)")
     parser.add_argument("--pattern",   default=None,          help="Only evaluate checkpoints matching this substring")
     args = parser.parse_args()
 

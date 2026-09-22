@@ -34,6 +34,7 @@ torch-mir-eval==0.4
 
 # Metrics
 fast-bss-eval==0.1.4
+visqol-python[all]==3.8.0
 
 # Misc
 psutil

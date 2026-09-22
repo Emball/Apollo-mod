@@ -132,23 +132,18 @@ _visqol_api = None
 _visqol_available = None
 
 def _get_visqol_api():
+    # Uses the "visqol-python" package (pure-Python port, pip-installable on
+    # Windows -- the official google/visqol pybind11 bindings only ship for
+    # Linux/Mac and require a Bazel build from source).
     global _visqol_api, _visqol_available
     if _visqol_available is False:
         return None
     if _visqol_api is not None:
         return _visqol_api
     try:
-        from visqol import visqol_lib_py
-        from visqol.pb2 import visqol_config_pb2
-        import os as _os
-        cfg = visqol_config_pb2.VisqolConfig()
-        cfg.audio.sample_rate = 48000
-        cfg.options.use_speech_scoring = False
-        cfg.options.svr_model_path = _os.path.join(
-            _os.path.dirname(visqol_lib_py.__file__), "model", "libsvm_nu_svr_model.txt"
-        )
-        api = visqol_lib_py.VisqolApi()
-        api.Create(cfg)
+        from visqol import VisqolApi
+        api = VisqolApi()
+        api.create(mode="audio")
         _visqol_api = api
         _visqol_available = True
         return _visqol_api
@@ -173,7 +168,8 @@ def _visqol_score(est: "torch.Tensor", ref: "torch.Tensor", sr: int = 44100) -> 
         if sr != 48000:
             mono_est = librosa.resample(mono_est, orig_sr=sr, target_sr=48000)
             mono_ref = librosa.resample(mono_ref, orig_sr=sr, target_sr=48000)
-        return float(api.Measure(mono_ref, mono_est).moslqo)
+        result = api.measure_from_arrays(mono_ref, mono_est, 48000)
+        return float(result.moslqo)
     except Exception as e:
         print(f"[visqol] Measure failed: {e}")
         return None
