@@ -40,7 +40,8 @@ visqol-python[all]==3.8.0
 psutil
 sympy==1.12
 packaging==23.2
-setuptools>=80.0.0
+setuptools>=68.0.0
+packaging>=21.0
 bitsandbytes>=0.43.0; sys_platform != 'darwin'
 gefen
 

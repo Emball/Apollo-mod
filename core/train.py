@@ -1217,7 +1217,14 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         if opt_type == "gefen_muon":
             try:
                 from gefen import Gefen, GefenMuon
-                # preflight: trigger CUDA kernel load now so any build/compat failure is caught here
+                # preflight: ensure pkg_resources.packaging exists (removed in setuptools>=71)
+                try:
+                    import pkg_resources as _pr
+                    if not hasattr(_pr, "packaging"):
+                        import packaging as _pkg
+                        _pr.packaging = _pkg
+                except Exception:
+                    pass
                 try:
                     from gefen.kernels.period_variance import find_period_by_block_variance  # noqa: F401
                 except Exception as _e:
@@ -1240,6 +1247,13 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         if opt_type == "gefen":
             try:
                 from gefen import Gefen
+                try:
+                    import pkg_resources as _pr
+                    if not hasattr(_pr, "packaging"):
+                        import packaging as _pkg
+                        _pr.packaging = _pkg
+                except Exception:
+                    pass
                 try:
                     from gefen.kernels.period_variance import find_period_by_block_variance  # noqa: F401
                 except Exception as _e:
