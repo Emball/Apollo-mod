@@ -619,10 +619,11 @@ class AudioLightningModule(pl.LightningModule):
         if visqol_count > 0:
             self._last_val_visqol    = visqol_sum / visqol_count
             self._cached_val_visqol  = self._last_val_visqol
-        elif skip_visqol and self._cached_val_visqol is not None:
-            # carry forward last real score so logging and checkpointing don't break
-            self._last_val_visqol = self._cached_val_visqol
-            print(f"[val] VISQOL skipped this run -- carrying forward {self._cached_val_visqol:.3f}")
+        elif skip_visqol:
+            # _last_val_visqol stays None -- checkpoint filename will get val_visqol=-1.000
+            # Log the carried value for display only
+            if self._cached_val_visqol is not None:
+                print(f"[val] VISQOL skipped -- last real score was {self._cached_val_visqol:.3f}")
         if tbl_count > 0:
             self._last_val_tbl = tbl_sum / tbl_count
 
@@ -711,7 +712,7 @@ class AudioLightningModule(pl.LightningModule):
 
         self.log("val_sfr",    float(_sfr)    if _sfr    is not None else 0.0, prog_bar=False, logger=True)
         self.log("val_sdr",    float(_sdr)    if _sdr    is not None else 0.0, prog_bar=False, logger=True)
-        self.log("val_visqol", float(_visqol) if _visqol is not None else 0.0, prog_bar=False, logger=True)
+        self.log("val_visqol", float(_visqol) if _visqol is not None else -1.0, prog_bar=False, logger=True)
         if self.target_band_loss_enabled:
             self.log("val_tbl", float(_tbl) if _tbl is not None else 0.0, prog_bar=False, logger=True)
 
