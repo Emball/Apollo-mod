@@ -1227,7 +1227,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 opt_2d   = GefenMuon(params_2d,   lr=lr, weight_decay=weight_decay) if params_2d   else None
                 opt_rest = Gefen(params_rest, lr=lr, weight_decay=weight_decay, betas=betas, fused=True) if params_rest else None
                 if opt_2d is None:
-                    print_only(f"[optimizer] GefenMuon (no 2D params found) -- using Gefen only -- lr={lr}")
+                    print_only(f"[optimizer] Gefen (no 2D params -- gefen_muon falls back to Gefen) -- lr={lr}")
                     return opt_rest
                 if opt_rest is None:
                     print_only(f"[optimizer] GefenMuon (all params 2D) -- lr={lr}")
