@@ -729,10 +729,16 @@ class AudioLightningModule(pl.LightningModule):
         checkpoint["val_next_rotate"]   = self._val_next_rotate
         checkpoint["val_window_best"]   = self._val_window_best
 
+        checkpoint["val_run_count"]     = self._val_run_count
+        checkpoint["cached_val_visqol"] = self._cached_val_visqol
+
     def on_load_checkpoint(self, checkpoint: dict) -> None:
         self._val_fixed_indices = checkpoint.get("val_fixed_indices", None)
         self._val_song_refs     = checkpoint.get("val_song_refs",     {})
         self._val_all_songs     = checkpoint.get("val_all_songs",     [])
+
+        self._val_run_count     = checkpoint.get("val_run_count",     0)
+        self._cached_val_visqol = checkpoint.get("cached_val_visqol", None)
 
         self._val_window_idx    = checkpoint.get("val_window_idx",    0)
         self._val_next_rotate   = checkpoint.get("val_next_rotate",   -1)
