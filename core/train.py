@@ -894,7 +894,6 @@ def prepare_data(cfg: DictConfig) -> None:
         _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, fixed_delay=fixed_delay)
 
     # Val chunks at 10x training segment_sec (default 30s) for meaningful VISQOL scoring.
-    global _CHUNK_SEC, _CHUNK_SAMPLES, _HOP_SAMPLES
     _orig_chunk_sec = _CHUNK_SEC
     _orig_chunk_samples = _CHUNK_SAMPLES
     _orig_hop_samples = _HOP_SAMPLES
