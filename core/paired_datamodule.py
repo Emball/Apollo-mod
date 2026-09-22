@@ -321,33 +321,33 @@ def augment_pair(
     if not cfg.enabled:
         return lq, hq
 
-    # stereo_alternation: deterministic by song half.
-    # First half gets L channel, second half gets R channel, giving the model
-    # both stereo perspectives of every repeated musical idea.
-    if cfg.stereo_alternation.enabled:
-        ch = 1 if in_second_half else 0
-        lq = lq[ch:ch+1]
-        hq = hq[ch:ch+1]
-
-    # Mid/side isolation: randomly collapse the pair into mid or side signal,
-    # summed to both channels so the model sees a 2-channel mono-like input.
-    # Applied identically to LQ and HQ to keep them aligned.
-    # Teaches the model to work on the side (difference) channel, which is where
+    # Mid/side isolation: rolls first. If it fires, stereo_alternation is skipped
+    # so the model sees the full stereo difference/sum signal rather than a single channel.
+    # Teaches the model to work on mid and side signals independently, which is where
     # MP3 joint-stereo does the most damage at low bitrates.
+    _mid_side_fired = False
     if cfg.mid_side_isolation.enabled and lq.shape[0] == 2:
         r = random.random()
         if r < cfg.mid_side_isolation.prob_mid:
-            # Mid = (L + R) / 2, duplicated to both channels
             mid_lq = (lq[0:1] + lq[1:2]) * 0.5
             mid_hq = (hq[0:1] + hq[1:2]) * 0.5
-            lq = mid_lq.expand(2, -1)
-            hq = mid_hq.expand(2, -1)
+            lq = mid_lq.expand(2, -1).clone()
+            hq = mid_hq.expand(2, -1).clone()
+            _mid_side_fired = True
         elif r < cfg.mid_side_isolation.prob_mid + cfg.mid_side_isolation.prob_side:
-            # Side = (L - R) / 2, duplicated to both channels
             side_lq = (lq[0:1] - lq[1:2]) * 0.5
             side_hq = (hq[0:1] - hq[1:2]) * 0.5
-            lq = side_lq.expand(2, -1)
-            hq = side_hq.expand(2, -1)
+            lq = side_lq.expand(2, -1).clone()
+            hq = side_hq.expand(2, -1).clone()
+            _mid_side_fired = True
+
+    # stereo_alternation: deterministic by song half. Skipped if mid/side fired.
+    # First half gets L channel, second half gets R channel, giving the model
+    # both stereo perspectives of every repeated musical idea.
+    if cfg.stereo_alternation.enabled and not _mid_side_fired:
+        ch = 1 if in_second_half else 0
+        lq = lq[ch:ch+1]
+        hq = hq[ch:ch+1]
 
     # Gain: per-chunk random draw (realistic intra-song amplitude variance).
     if cfg.gain.enabled and random.random() < cfg.gain.prob:
