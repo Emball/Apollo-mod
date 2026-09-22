@@ -33,6 +33,10 @@ datas:
       stereo_alternation:
         enabled: true
         prob: 1.0
+      mid_side_isolation:
+        enabled: false
+        prob_mid: 0.1
+        prob_side: 0.1
       gain:
         enabled: true
         prob: 0.5
@@ -55,6 +59,14 @@ datas:
       polarity:
         enabled: true
         prob: 0.5
+      pitch_shift:
+        enabled: false
+        prob: 0.5
+        semitones_max: 1.5
+      noise:
+        enabled: false
+        prob: 0.5
+        sigma: 0.002
       mp3_degradation:
         enabled: false
         prob: 0.5
@@ -73,6 +85,14 @@ datas:
       polarity:
         enabled: false
         fraction: 0.5
+      pitch_shift:
+        enabled: false
+        fraction: 0.5
+        semitones_max: 1.5
+      noise:
+        enabled: false
+        fraction: 0.5
+        sigma: 0.002
       mp3_degradation:
         enabled: false
         fraction: 0.5
@@ -116,8 +136,8 @@ loss_g:
   band_weight_shape: gaussian
   band_weight_center_hz: 15000.0
   band_weight_sigma_hz: 3000.0
-  band_weight_gain: 0.0            # disabled -- flat loss for baseline run
-  band_weight_lo_hz: 4500.0        # trapezoid params (unused when shape=gaussian)
+  band_weight_gain: 0.0  # flat -- baseline run
+  band_weight_lo_hz: 4500.0
   band_weight_hi_hz: 18500.0
   band_weight_ramp_hz: 1500.0
 
@@ -133,6 +153,9 @@ system:
   _target_: look2hear.system.audio_litmodule.AudioLightningModule
   gradient_checkpointing: true
   grad_accum_steps: ${training.grad_accum_steps}
+  val_preview_samples: ${training.val_preview_samples}
+  val_metric_samples: ${training.val_metric_samples}
+  val_rotate_every: ${training.val_rotate_every}
   visqol_fraction: 1.0
   target_band_loss_enabled: false
   target_band_loss_lo_hz: 13000.0
@@ -140,7 +163,7 @@ system:
 
 early_stopping:
   _target_: pytorch_lightning.callbacks.EarlyStopping
-  monitor: val_sfr
+  monitor: val_sdr
   patience: 100
   mode: max
   verbose: true
@@ -148,12 +171,12 @@ early_stopping:
 checkpoint:
   _target_: pytorch_lightning.callbacks.ModelCheckpoint
   dirpath: ${exp.dir}/${exp.name}/checkpoints
-  monitor: val_sfr
+  monitor: val_sdr
   mode: max
   verbose: true
   save_top_k: -1
   save_last: false
-  filename: 'step={step:06d}-sisdr={val_loss:.3f}-visqol={val_visqol:.3f}-sdr={val_sdr:.3f}-sfr={val_sfr:.3f}'
+  filename: 'step={step:06d}-val_loss={val_loss:.3f}-val_visqol={val_visqol:.3f}-val_sdr={val_sdr:.3f}-val_sfr={val_sfr:.3f}'
 
 logger:
   _target_: pytorch_lightning.loggers.TensorBoardLogger
