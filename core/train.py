@@ -470,7 +470,7 @@ def _source_md5s(src_root: str) -> str:
     return h.hexdigest()
 
 
-def _chunk_cache_key(src_root: str, fixed_delay, aug_cfg) -> str:
+def _chunk_cache_key(src_root: str, fixed_delay, aug_cfg, extra: str = "") -> str:
     """Stable cache key: source file md5s + chunk params + aug params."""
     import hashlib, json as _json
     params = {
@@ -480,6 +480,7 @@ def _chunk_cache_key(src_root: str, fixed_delay, aug_cfg) -> str:
         "aug": aug_cfg if aug_cfg is None else _json.dumps(
             OmegaConf.to_container(aug_cfg, resolve=True), sort_keys=True
         ),
+        "extra": extra,
     }
     h = hashlib.md5()
     h.update(_source_md5s(src_root).encode())
@@ -892,13 +893,26 @@ def prepare_data(cfg: DictConfig) -> None:
         train_chunks = os.path.join(_CHUNK_CACHE_DIR, train_key, "train")
         _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, fixed_delay=fixed_delay)
 
-    # Val uses full-file WAV cache (no chunking) -- full songs are loaded at eval time.
-    val_wav_dir = os.path.join(_CHUNK_CACHE_DIR, val_key, "val")
+    # Val chunks at 10x training segment_sec (default 30s) for meaningful VISQOL scoring.
+    global _CHUNK_SEC, _CHUNK_SAMPLES, _HOP_SAMPLES
+    _orig_chunk_sec = _CHUNK_SEC
+    _orig_chunk_samples = _CHUNK_SAMPLES
+    _orig_hop_samples = _HOP_SAMPLES
+    val_chunk_sec = float(getattr(cfg.datas, "segment_sec", 3)) * 10
+    _CHUNK_SEC     = val_chunk_sec
+    _CHUNK_SAMPLES = int(_CHUNK_SEC * _SR)
+    _HOP_SAMPLES   = _CHUNK_SAMPLES  # no overlap for val chunks
+    val_key_30s = _chunk_cache_key(data_val, fixed_delay, None, extra=f"val30s_{val_chunk_sec:.0f}")
+    val_wav_dir = os.path.join(_CHUNK_CACHE_DIR, val_key_30s, "val")
     val_lq_check = os.path.join(val_wav_dir, "LQ")
     if os.path.isdir(val_lq_check) and any(f.endswith(".wav") for f in os.listdir(val_lq_check)):
-        print_only(f"[data/val]   Cache hit ({val_key[:8]}...) -- skipping WAV conversion.")
+        print_only(f"[data/val]   Cache hit ({val_key_30s[:8]}...) -- skipping chunking.")
     else:
-        _wav_cache_val(data_val, val_wav_dir)
+        _chunk_split(data_val, val_wav_dir, "val", fixed_delay=fixed_delay)
+    # Restore training chunk globals
+    _CHUNK_SEC     = _orig_chunk_sec
+    _CHUNK_SAMPLES = _orig_chunk_samples
+    _HOP_SAMPLES   = _orig_hop_samples
 
     # Expose resolved absolute paths back into cfg so the datamodule picks them up.
     with open_dict(cfg):

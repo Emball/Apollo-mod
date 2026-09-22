@@ -442,7 +442,7 @@ def get_matched_pairs(lq_dir: str, hq_dir: str) -> List[Tuple[str, str]]:
 # Training dataset -- loads pre-chunked files
 
 class ChunkedPairDataset(Dataset):
-    def __init__(self, chunks_dir: str, sr: int = SR, aug_cfg: AugmentationCfg = None):
+    def __init__(self, chunks_dir: str, sr: int = SR, aug_cfg: AugmentationCfg = None, label: str = "Training"):
         lq_dir = os.path.join(chunks_dir, "LQ")
         hq_dir = os.path.join(chunks_dir, "HQ")
         self.pairs   = get_matched_pairs(lq_dir, hq_dir)
@@ -471,6 +471,9 @@ class ChunkedPairDataset(Dataset):
                 self._in_second_half[global_idx] = (i >= midpoint)
 
         aug = self.aug_cfg
+        if label == "Validation":
+            print(f"Validation dataset: {len(self.pairs)} 30s chunk pairs")
+            return
         print(f"Training dataset : {len(self.pairs)} chunk pairs")
         print(
             f"Augmentation     : enabled={aug.enabled}  "
@@ -579,10 +582,11 @@ class PairedAudioDataModule(LightningDataModule):
                 aug_cfg=self.aug_cfg,
             )
         if self.data_val is None:
-            self.data_val = FullLengthPairDataset(
-                eval_dir=self.eval_dir,
+            self.data_val = ChunkedPairDataset(
+                chunks_dir=self.eval_dir,
                 sr=self.sr,
-                segment_sec=self.segment_sec,
+                aug_cfg=None,
+                label="Validation",
             )
 
     def train_dataloader(self) -> DataLoader:

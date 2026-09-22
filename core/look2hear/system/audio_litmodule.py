@@ -223,8 +223,8 @@ class AudioLightningModule(pl.LightningModule):
 
         # Full-song val refs: active window of songs for metric computation.
         self._val_song_refs:   dict = {}   # song_key -> (lq_path, hq_path) -- current window
-        self._val_all_songs:   list = []   # [(song_key, lq_path, hq_path)] -- full pool, ordered
-        self._val_clip_offsets: dict = {}  # song_key -> locked clip start sample
+        self._val_all_songs:   list = []   # [(song_key, lq_path, hq_path, indices)] -- full pool, ordered
+
         self._val_window_idx: int  = 0    # which rotation window we're on
         self._val_next_rotate: int = -1   # global_step at which to rotate next (-1 = never)
         self._val_window_best: dict = {}  # best metrics seen in the current window
@@ -414,8 +414,7 @@ class AudioLightningModule(pl.LightningModule):
 
         by_song = {}
         for ds_idx in seen:
-            pair_idx, _ = dataset.index[ds_idx]
-            _, hq_path  = dataset.pairs[pair_idx]
+            _, hq_path = dataset.pairs[ds_idx]
             stem  = os.path.splitext(os.path.basename(hq_path))[0]
             parts = stem.rsplit("_", 1)
             key   = parts[0] if len(parts) == 2 and parts[1].isdigit() else stem
@@ -443,9 +442,8 @@ class AudioLightningModule(pl.LightningModule):
         dataset = self.trainer.datamodule.data_val
         self._val_all_songs = []
         for song_key, indices in by_song.items():
-            pair_idx, _ = dataset.index[indices[0]]
-            lq_path, hq_path = dataset.pairs[pair_idx]
-            self._val_all_songs.append((song_key, lq_path, hq_path))
+            lq_path, hq_path = dataset.pairs[indices[0]]
+            self._val_all_songs.append((song_key, lq_path, hq_path, indices))
 
         rotate_steps = self.val_rotate_every
         if rotate_steps == "auto" or rotate_steps is None:
@@ -483,46 +481,6 @@ class AudioLightningModule(pl.LightningModule):
     # ------------------------------------------------------------------
     # Full-song inference helper
     # ------------------------------------------------------------------
-
-    def _infer_full_song(self, lq_path: str) -> torch.Tensor:
-        """
-        Load a full LQ file and run chunked OLA inference over it.
-        Returns restored [2, T] float32 CPU tensor, normalized to the input peak.
-        """
-        lq_full, _ = torchaudio.load(lq_path)
-        if lq_full.shape[0] == 1:
-            lq_full = lq_full.repeat(2, 1)
-        peak    = lq_full.abs().max().clamp(min=1e-8)
-        lq_norm = lq_full / peak
-
-        try:
-            chunk_sec = float(self.trainer.datamodule.segment_sec)
-        except Exception:
-            chunk_sec = 3.0
-
-        chunk_samples   = max(1, int(round(chunk_sec * 44100)))
-        overlap_samples = max(0, int(round(min(0.5, chunk_sec * 0.25) * 44100)))
-        hop_samples     = max(1, chunk_samples - overlap_samples)
-
-        T       = lq_norm.shape[-1]
-        out_buf = torch.zeros(2, T)
-        wt_buf  = torch.zeros(T)
-
-        start = 0
-        while start < T:
-            end = min(start + chunk_samples, T)
-            n   = end - start
-            inp = lq_norm[..., start:end].unsqueeze(0).to(self.device)
-            out = self.audio_model(inp)
-            if out.ndim == 3:
-                out = out[0]
-            out = out.float().cpu()[..., :n]
-            w = torch.hann_window(n, periodic=False) if n >= 2 else torch.ones(n)
-            out_buf[..., start:end] += out * w
-            wt_buf[start:end]       += w
-            start += hop_samples
-
-        return (out_buf / wt_buf.clamp(min=1e-8)).clamp(-1.0, 1.0)
 
     def _infer_clip(self, lq_norm: torch.Tensor) -> torch.Tensor:
         """
@@ -570,15 +528,13 @@ class AudioLightningModule(pl.LightningModule):
 
     def _compute_val_metrics(self):
         """
-        Run full-song OLA inference on each locked metric song.
-        Computes val_sdr / val_sfr / val_visqol over complete files.
-        Stores restored tensors in _pending_preview_data for _save_val_audio().
+        Run model inference on each locked 30-second val chunk.
+        Computes val_sdr / val_sfr / val_visqol. Saves LQ/HQ/Restored audio to disk.
         """
         if not self._val_song_refs:
             return
 
         import look2hear.losses as _ll
-        from paired_datamodule import normalize_pair
 
         _sdr_fn = _ll.MultiSrcNegSDR("snr", zero_mean=True)
 
@@ -594,35 +550,15 @@ class AudioLightningModule(pl.LightningModule):
             epoch_dir = os.path.join(self.val_audio_dir, f"step_{self.global_step:06d}")
             os.makedirs(epoch_dir, exist_ok=True)
 
-        # clip length: 10x the training segment (e.g. 3s → 30s)
-        try:
-            seg_sec = float(self.trainer.datamodule.segment_sec)
-        except Exception:
-            seg_sec = 3.0
-        clip_samples = int(round(seg_sec * 10 * 44100))
-
         torch.cuda.empty_cache()
         self.audio_model.eval()
         with torch.no_grad():
             for i, (song_key, (lq_path, hq_path)) in enumerate(song_items):
                 try:
-                    lq_full, _ = torchaudio.load(lq_path)
-                    hq_full, _ = torchaudio.load(hq_path)
-                    if lq_full.shape[0] == 1: lq_full = lq_full.repeat(2, 1)
-                    if hq_full.shape[0] == 1: hq_full = hq_full.repeat(2, 1)
-
-                    # slice a locked clip: use the stored offset or pick a random one
-                    T = lq_full.shape[-1]
-                    max_start = max(0, T - clip_samples)
-                    clip_start = self._val_clip_offsets.get(song_key)
-                    if clip_start is None or clip_start > max_start:
-                        clip_start = int(torch.randint(0, max_start + 1, (1,)).item()) if max_start > 0 else 0
-                        self._val_clip_offsets[song_key] = clip_start
-                    clip_end = min(clip_start + clip_samples, T)
-
-                    lq_clip = lq_full[..., clip_start:clip_end]
-                    hq_clip = hq_full[..., clip_start:clip_end]
-                    del lq_full, hq_full
+                    lq_clip, _ = torchaudio.load(lq_path)
+                    hq_clip, _ = torchaudio.load(hq_path)
+                    if lq_clip.shape[0] == 1: lq_clip = lq_clip.repeat(2, 1)
+                    if hq_clip.shape[0] == 1: hq_clip = hq_clip.repeat(2, 1)
 
                     peak    = lq_clip.abs().max().clamp(min=1e-8)
                     lq_norm = (lq_clip / peak).clamp(-1.0, 1.0)
@@ -708,8 +644,7 @@ class AudioLightningModule(pl.LightningModule):
             all_songs = []
             seen_keys = set()
             for ds_idx in self._val_seen_indices or self._val_fixed_indices:
-                pair_idx, _ = dataset.index[ds_idx]
-                _, hq_path  = dataset.pairs[pair_idx]
+                _, hq_path = dataset.pairs[ds_idx]
                 stem  = os.path.splitext(os.path.basename(hq_path))[0]
                 parts = stem.rsplit("_", 1)
                 key   = parts[0] if len(parts) == 2 and parts[1].isdigit() else stem
@@ -718,7 +653,7 @@ class AudioLightningModule(pl.LightningModule):
                     seen_keys.add(key)
                     all_songs.append(key)
             self._lock_val_songs(by_song)
-            print(f"[val] {len(self._val_song_refs)} songs locked for full-song metric evaluation.")
+            print(f"[val] {len(self._val_song_refs)} songs locked for 30s clip metric evaluation.")
 
         # --- Check if it's time to rotate the song window ---
         rotate_steps = getattr(self, "_val_rotate_steps", None)
@@ -737,7 +672,7 @@ class AudioLightningModule(pl.LightningModule):
                     print(f"[val] Window {self._val_window_idx + 1} best: {' '.join(parts)}  -- rotating songs")
                 self._val_window_idx  += 1
                 self._val_window_best  = {}
-                self._val_clip_offsets = {}   # new songs get fresh random clips
+
                 self._val_next_rotate  = step + rotate_steps
                 self._apply_val_window(announce=True)
 
@@ -772,7 +707,7 @@ class AudioLightningModule(pl.LightningModule):
         checkpoint["val_fixed_indices"] = self._val_fixed_indices
         checkpoint["val_song_refs"]     = self._val_song_refs
         checkpoint["val_all_songs"]     = self._val_all_songs
-        checkpoint["val_clip_offsets"]  = self._val_clip_offsets
+
         checkpoint["val_window_idx"]    = self._val_window_idx
         checkpoint["val_next_rotate"]   = self._val_next_rotate
         checkpoint["val_window_best"]   = self._val_window_best
@@ -781,7 +716,7 @@ class AudioLightningModule(pl.LightningModule):
         self._val_fixed_indices = checkpoint.get("val_fixed_indices", None)
         self._val_song_refs     = checkpoint.get("val_song_refs",     {})
         self._val_all_songs     = checkpoint.get("val_all_songs",     [])
-        self._val_clip_offsets  = checkpoint.get("val_clip_offsets",  {})
+
         self._val_window_idx    = checkpoint.get("val_window_idx",    0)
         self._val_next_rotate   = checkpoint.get("val_next_rotate",   -1)
         self._val_window_best   = checkpoint.get("val_window_best",   {})
