@@ -495,6 +495,100 @@ def _chunk_cache_lookup(key: str, split: str) -> str | None:
     return None
 
 
+def _wav_cache_val(src_root: str, dst_root: str) -> None:
+    """
+    Convert val source files to WAV and copy full files (no chunking) into dst_root/LQ/ and dst_root/HQ/.
+    Reuses the same per-file WAV cache as _chunk_split so nothing is re-encoded.
+    """
+    import shutil
+
+    lq_src = os.path.join(src_root, "LQ")
+    hq_src = os.path.join(src_root, "HQ")
+    lq_dst = os.path.join(dst_root, "LQ")
+    hq_dst = os.path.join(dst_root, "HQ")
+    os.makedirs(lq_dst, exist_ok=True)
+    os.makedirs(hq_dst, exist_ok=True)
+
+    def _has_ffmpeg():
+        try:
+            import ffmpeg
+            return True
+        except ImportError:
+            return False
+
+    def _file_md5(path):
+        import hashlib
+        h = hashlib.md5()
+        with open(path, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block)
+        return h.hexdigest()
+
+    def _cached_wav_path(src):
+        md5 = _file_md5(src)
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        return os.path.join(_CACHE_DIR, f"{md5}.wav")
+
+    def _to_wav_ffmpeg(src):
+        import ffmpeg, tempfile
+        dst = _cached_wav_path(src)
+        if os.path.isfile(dst):
+            return dst
+        fd, tmp = tempfile.mkstemp(suffix=".wav", dir=_CACHE_DIR)
+        os.close(fd)
+        try:
+            (ffmpeg.input(src).output(tmp, format="wav", acodec="pcm_f32le", ar=_SR, ac=2)
+             .overwrite_output().run(capture_stdout=True, capture_stderr=True))
+        except Exception:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
+        os.replace(tmp, dst)
+        print_only(f"[cache] Wrote {os.path.basename(dst)}  ({os.path.basename(src)})")
+        return dst
+
+    def _to_wav_torchaudio(src):
+        import torchaudio
+        dst = _cached_wav_path(src)
+        if os.path.isfile(dst):
+            return dst
+        wav, sr = torchaudio.load(src)
+        wav = wav.float()
+        if sr != _SR:
+            wav = torchaudio.functional.resample(wav, sr, _SR)
+        if wav.shape[0] == 1:
+            wav = wav.repeat(2, 1)
+        elif wav.shape[0] > 2:
+            wav = wav[:2]
+        torchaudio.save(dst, wav, _SR)
+        print_only(f"[cache] Wrote {os.path.basename(dst)}  ({os.path.basename(src)})")
+        return dst
+
+    use_ffmpeg = _has_ffmpeg()
+    to_wav = _to_wav_ffmpeg if use_ffmpeg else _to_wav_torchaudio
+
+    for side, src_dir, dst_dir in [("LQ", lq_src, lq_dst), ("HQ", hq_src, hq_dst)]:
+        if not os.path.isdir(src_dir):
+            continue
+        for fname in sorted(os.listdir(src_dir)):
+            src_path = os.path.join(src_dir, fname)
+            if not os.path.isfile(src_path):
+                continue
+            ext = os.path.splitext(fname)[1].lower()
+            stem = os.path.splitext(fname)[0]
+            dst_path = os.path.join(dst_dir, stem + ".wav")
+            if os.path.isfile(dst_path):
+                continue
+            if ext == ".wav":
+                shutil.copy2(src_path, dst_path)
+            else:
+                wav_path = to_wav(src_path)
+                shutil.copy2(wav_path, dst_path)
+
+    n = len([f for f in os.listdir(lq_dst) if f.endswith(".wav")])
+    print_only(f"[data/val] WAV cache ready -- {n} file(s) -> {dst_root}")
+
+
 def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=None, fixed_delay: int = None) -> int:
     """
     Normalize src_root into LQ/ + HQ/ layout (if not already), then chunk all
@@ -791,25 +885,26 @@ def prepare_data(cfg: DictConfig) -> None:
         train_chunks = os.path.join(_CHUNK_CACHE_DIR, train_key, "train")
         _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, fixed_delay=fixed_delay)
 
-    val_chunks = _chunk_cache_lookup(val_key, "val")
-    if val_chunks:
-        print_only(f"[data/val]   Cache hit ({val_key[:8]}...) -- skipping chunking.")
+    # Val uses full-file WAV cache (no chunking) -- full songs are loaded at eval time.
+    val_wav_dir = os.path.join(_CHUNK_CACHE_DIR, val_key, "val")
+    val_lq_check = os.path.join(val_wav_dir, "LQ")
+    if os.path.isdir(val_lq_check) and any(f.endswith(".wav") for f in os.listdir(val_lq_check)):
+        print_only(f"[data/val]   Cache hit ({val_key[:8]}...) -- skipping WAV conversion.")
     else:
-        val_chunks = os.path.join(_CHUNK_CACHE_DIR, val_key, "val")
-        _chunk_split(data_val, val_chunks, "val", cached_aug_fn=None, fixed_delay=fixed_delay)
+        _wav_cache_val(data_val, val_wav_dir)
 
     # Expose resolved absolute paths back into cfg so the datamodule picks them up.
     with open_dict(cfg):
         cfg.datas.train_dir = train_chunks
-        cfg.datas.eval_dir  = val_chunks
+        cfg.datas.eval_dir  = val_wav_dir
 
     # Val bootstrap from train chunks
-    # If val is still empty after chunking (no data/val source exists),
+    # If val is still empty after WAV conversion (no data/val source exists),
     # copy a random selection of train chunks into val -- without removing
     # them from training. Chunks are picked by randomly selecting songs first,
     # then random chunks from those songs, so val covers diverse source material.
-    val_lq = os.path.join(val_chunks, "LQ")
-    val_hq = os.path.join(val_chunks, "HQ")
+    val_lq = os.path.join(val_wav_dir, "LQ")
+    val_hq = os.path.join(val_wav_dir, "HQ")
     val_has_files = (
         os.path.isdir(val_lq)
         and any(f.endswith(".wav") for f in os.listdir(val_lq))
