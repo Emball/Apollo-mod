@@ -1548,37 +1548,75 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     # Baseline val pass on pretrained weights before any training begins.
     # Skipped on resume since the checkpoint already has training history.
+    # Results are cached in usr/cache/baseline/ keyed on (weights md5 + val clip key)
+    # so restarting a fresh run with the same pretrain + dataset skips the pass entirely.
     if ckpt_path is None and not val_disabled:
-        print_only("\n[baseline] Evaluating pretrained weights before training...")
-        _baseline_ok = True
-        try:
-            import psutil as _ps
-            _vm = _ps.virtual_memory()
-            _headroom = (_vm.total * opt.get("ram_limit_fraction", 0.95)) - _vm.used
-            if _headroom < 1.5 * (1024 ** 3):  # less than 1.5 GB headroom
-                print_only(f"[baseline] Skipped -- only {_headroom/(1024**3):.1f} GB RAM headroom "
-                           f"(system RAM already near threshold). First val run after training starts will serve as baseline.")
-                _baseline_ok = False
-        except Exception:
-            pass
-        if _baseline_ok:
+        import hashlib as _hashlib, json as _json
+
+        def _baseline_cache_key(weights_path: str, val_clip_key: str) -> str:
+            h = _hashlib.md5()
+            if weights_path and os.path.isfile(weights_path):
+                wh = _hashlib.md5()
+                with open(weights_path, "rb") as _wf:
+                    for _blk in iter(lambda: _wf.read(1 << 20), b""):
+                        wh.update(_blk)
+                h.update(wh.hexdigest().encode())
+            h.update(val_clip_key.encode())
+            return h.hexdigest()[:16]
+
+        _baseline_cache_dir  = os.path.join(_CACHE_DIR, "baseline")
+        _baseline_cache_key_ = _baseline_cache_key(
+            local_path or "",
+            val_clip_key,
+        )
+        _baseline_cache_file = os.path.join(_baseline_cache_dir, f"{_baseline_cache_key_}.json")
+
+        if os.path.isfile(_baseline_cache_file):
             try:
-                datamodule.setup("fit")
-                disc = getattr(system, "discriminator", None)
-                if disc is not None:
-                    disc.cpu()
-                import gc; gc.collect()
-                torch.cuda.empty_cache()
-                baseline_results = trainer.validate(system, datamodule=datamodule, verbose=False)
-                if disc is not None:
-                    disc.cuda()
-                if baseline_results:
-                    bl = baseline_results[0]
-                    bl_sisdr = bl.get("val_loss", None)
-                    if bl_sisdr is not None:
-                        print_only(f"[baseline] sisdr={-float(bl_sisdr):.3f}  (pretrained, before any training)")
-            except Exception as e:
-                print_only(f"[baseline] Skipped: {e}")
+                with open(_baseline_cache_file) as _bcf:
+                    _cached_bl = _json.load(_bcf)
+                _parts = "  ".join(f"{k}={v:.3f}" for k, v in _cached_bl.items())
+                print_only(f"\n[baseline] Cache hit ({_baseline_cache_key_[:8]}...) -- skipping val pass.")
+                print_only(f"[baseline] {_parts}  (pretrained, before any training)")
+            except Exception as _e:
+                print_only(f"[baseline] Cache read failed ({_e}) -- will re-run.")
+                os.remove(_baseline_cache_file)
+        else:
+            print_only("\n[baseline] Evaluating pretrained weights before training...")
+            _baseline_ok = True
+            try:
+                import psutil as _ps
+                _vm = _ps.virtual_memory()
+                _headroom = (_vm.total * opt.get("ram_limit_fraction", 0.95)) - _vm.used
+                if _headroom < 1.5 * (1024 ** 3):
+                    print_only(f"[baseline] Skipped -- only {_headroom/(1024**3):.1f} GB RAM headroom "
+                               f"(system RAM already near threshold). First val run after training starts will serve as baseline.")
+                    _baseline_ok = False
+            except Exception:
+                pass
+            if _baseline_ok:
+                try:
+                    datamodule.setup("fit")
+                    disc = getattr(system, "discriminator", None)
+                    if disc is not None:
+                        disc.cpu()
+                    import gc; gc.collect()
+                    torch.cuda.empty_cache()
+                    baseline_results = trainer.validate(system, datamodule=datamodule, verbose=False)
+                    if disc is not None:
+                        disc.cuda()
+                    if baseline_results:
+                        bl = baseline_results[0]
+                        _to_cache = {k: float(v) for k, v in bl.items() if v is not None}
+                        os.makedirs(_baseline_cache_dir, exist_ok=True)
+                        with open(_baseline_cache_file, "w") as _bcf:
+                            _json.dump(_to_cache, _bcf, indent=2)
+                        print_only(f"[baseline] Cached to {_baseline_cache_key_[:8]}...")
+                        bl_sisdr = bl.get("val_loss", None)
+                        if bl_sisdr is not None:
+                            print_only(f"[baseline] sisdr={-float(bl_sisdr):.3f}  (pretrained, before any training)")
+                except Exception as e:
+                    print_only(f"[baseline] Skipped: {e}")
 
     if ckpt_path is not None:
         _ckpt_data = torch.load(ckpt_path, map_location="cpu", weights_only=False)
