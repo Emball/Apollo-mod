@@ -104,6 +104,8 @@ input/ output/           -- inference I/O staging dirs
 
 **Pretrained checkpoint loading:** `BaseModel.from_pretrain()` allow-lists OmegaConf types via `add_safe_globals` before `torch.load(..., weights_only=True)`.
 
-**Gefen optimizer:** `type: gefen` in the optimizer config. Drop-in AdamW replacement with ~8x lower optimizer-state memory and faster optimizer steps. Requires `pip install gefen`; builds CUDA kernels via JIT on first run (needs `nvcc` in PATH). Falls back to AdamW32bit with a warning if not installed. Recommended over `adamw_8bit` for new runs — similar or better memory savings without the bitsandbytes dependency.
+**Gefen optimizer:** `type: gefen` in the optimizer config. Drop-in AdamW replacement with ~8x lower optimizer-state memory and faster optimizer steps. Requires `pip install gefen`; builds CUDA kernels via JIT on first run (needs `nvcc` in PATH). Falls back to AdamW32bit with a warning if not installed. Recommended over `adamw_8bit` for new runs.
+
+**GefenMuon optimizer:** `type: gefen_muon`. Routes 2D parameters (Linear weights — attention layers) to GefenMuon (no second-moment state, momentum-only) and all other parameters (Conv1d, norms, biases) to Gefen. Gefen's paper recommends this split for fine-tuning over plain Gefen. Implemented via `_ComboOpt` wrapper that exposes a unified `param_groups`, `step()`, `zero_grad()`, `state_dict()`, and `load_state_dict()` so PyTorch schedulers and Lightning checkpointing work transparently. If no 2D params exist, falls back to Gefen-only; if no non-2D params exist, uses GefenMuon-only.
 
 **Config key aliases:** `val_metric_songs` is the current key. `val_metric_samples` and `val_songs` and `val_audio_pairs` are accepted as fallbacks in `train.py` for old configs.

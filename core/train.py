@@ -1078,11 +1078,57 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     # Optimizer factory
     # Reads cfg.optimizer.type to select the optimizer:
-    #   adamw       -- standard 32-bit AdamW
-    #   adamw_8bit  -- 8-bit AdamW via bitsandbytes (pip install bitsandbytes)
-    #   cpu_offload -- 32-bit AdamW with momentum states in CPU RAM
+    #   adamw        -- standard 32-bit AdamW
+    #   adamw_8bit   -- 8-bit AdamW via bitsandbytes (pip install bitsandbytes)
+    #   cpu_offload  -- 32-bit AdamW with momentum states in CPU RAM
+    #   gefen        -- Gefen (drop-in AdamW, ~8x lower optimizer memory, pip install gefen)
+    #   gefen_muon   -- GefenMuon for 2D params + Gefen for rest (recommended for fine-tuning)
+
+    class _ComboOpt:
+        """Thin wrapper combining two optimizers into one interface for StepLR + Lightning."""
+        def __init__(self, opt_2d, opt_rest):
+            self.opt_2d   = opt_2d
+            self.opt_rest = opt_rest
+            # expose param_groups and defaults so StepLR doesn't choke
+            self.param_groups = opt_2d.param_groups + opt_rest.param_groups
+            self.defaults = opt_2d.defaults
+
+        def step(self, closure=None):
+            self.opt_2d.step(closure)
+            self.opt_rest.step(closure)
+
+        def zero_grad(self, set_to_none=True):
+            self.opt_2d.zero_grad(set_to_none=set_to_none)
+            self.opt_rest.zero_grad(set_to_none=set_to_none)
+
+        def state_dict(self):
+            return {"opt_2d": self.opt_2d.state_dict(), "opt_rest": self.opt_rest.state_dict()}
+
+        def load_state_dict(self, sd):
+            self.opt_2d.load_state_dict(sd["opt_2d"])
+            self.opt_rest.load_state_dict(sd["opt_rest"])
+            self.param_groups = self.opt_2d.param_groups + self.opt_rest.param_groups
+
     def _make_optimizer(params, lr, weight_decay, betas):
         opt_type = opt_cfg.get("type", "adamw").lower()
+
+        if opt_type == "gefen_muon":
+            try:
+                from gefen import Gefen, GefenMuon
+                params_2d   = [p for p in params if p.ndim == 2]
+                params_rest = [p for p in params if p.ndim != 2]
+                opt_2d   = GefenMuon(params_2d,   lr=lr, weight_decay=weight_decay) if params_2d   else None
+                opt_rest = Gefen(params_rest, lr=lr, weight_decay=weight_decay, betas=betas, fused=True) if params_rest else None
+                if opt_2d is None:
+                    print_only(f"[optimizer] GefenMuon (no 2D params found) -- using Gefen only -- lr={lr}")
+                    return opt_rest
+                if opt_rest is None:
+                    print_only(f"[optimizer] GefenMuon (all params 2D) -- lr={lr}")
+                    return opt_2d
+                print_only(f"[optimizer] GefenMuon (2D) + Gefen (rest) -- lr={lr} -- 2D={len(params_2d)} rest={len(params_rest)}")
+                return _ComboOpt(opt_2d, opt_rest)
+            except ImportError:
+                print_only("[optimizer] gefen not installed -- falling back to AdamW32bit (pip install gefen)")
 
         if opt_type == "gefen":
             try:
