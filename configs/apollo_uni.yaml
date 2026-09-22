@@ -14,7 +14,7 @@ optimizations:
 training:
   n_layers_to_freeze: 4
   val_preview_samples: 5
-  val_metric_samples: 15
+  val_metric_songs: 3
   val_rotate_every: auto
   grad_accum_steps: 1
 
@@ -154,7 +154,7 @@ system:
   gradient_checkpointing: true
   grad_accum_steps: ${training.grad_accum_steps}
   val_preview_samples: ${training.val_preview_samples}
-  val_metric_samples: ${training.val_metric_samples}
+  val_metric_songs: ${training.val_metric_songs}
   val_rotate_every: ${training.val_rotate_every}
   visqol_fraction: 1.0
   target_band_loss_enabled: false

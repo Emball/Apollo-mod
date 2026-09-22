@@ -1139,7 +1139,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # a user config accidentally defines them under system: as well as training:
     _SYSTEM_MANAGED = {
         "model", "discriminator", "loss_func", "metrics", "optimizer", "scheduler",
-        "val_audio_dir", "val_preview_samples", "val_metric_samples", "val_rotate_every",
+        "val_audio_dir", "val_preview_samples", "val_metric_songs", "val_rotate_every",
         "gradient_checkpointing", "grad_accum_steps", "visqol_fraction",
         "target_band_loss_enabled", "target_band_loss_lo_hz", "target_band_loss_hi_hz",
         "val_songs", "val_audio_pairs",
@@ -1157,7 +1157,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         scheduler=[scheduler_g, scheduler_d],
         val_audio_dir=val_audio_dir,
         val_preview_samples=cfg.training.get("val_preview_samples", cfg.training.get("val_songs", cfg.training.get("val_audio_pairs", 6))),
-        val_metric_samples=cfg.training.get("val_metric_samples", 15),
+        val_metric_songs=cfg.training.get("val_metric_songs", cfg.training.get("val_metric_samples", 3)),
         val_rotate_every=cfg.training.get("val_rotate_every", "auto"),
         gradient_checkpointing=cfg.system.get("gradient_checkpointing", False),
         grad_accum_steps=cfg.training.get("grad_accum_steps", 1),
