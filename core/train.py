@@ -751,7 +751,6 @@ def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 30.0, fix
     import random as _random
     import hashlib, tempfile
     import torchaudio
-    from paired_datamodule import get_matched_pairs
 
     lq_src = os.path.join(src_root, "LQ")
     hq_src = os.path.join(src_root, "HQ")
@@ -793,7 +792,19 @@ def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 30.0, fix
         return dst
 
     clip_samples = int(clip_sec * _SR)
-    pairs = get_matched_pairs(lq_src, hq_src)
+
+    # Match LQ/HQ pairs by stem, supporting any audio format (wav, flac, mp3)
+    def _find_audio_pairs(lq_dir, hq_dir):
+        lq_map = {os.path.splitext(f)[0]: os.path.join(lq_dir, f)
+                  for f in os.listdir(lq_dir)
+                  if os.path.splitext(f)[1].lower() in _SUPPORTED_EXTS}
+        hq_map = {os.path.splitext(f)[0]: os.path.join(hq_dir, f)
+                  for f in os.listdir(hq_dir)
+                  if os.path.splitext(f)[1].lower() in _SUPPORTED_EXTS}
+        matched = sorted(set(lq_map) & set(hq_map))
+        return [(lq_map[s], hq_map[s]) for s in matched]
+
+    pairs = _find_audio_pairs(lq_src, hq_src)
 
     print_only(f"\n[data/val] ==========================================================")
     print_only(f"[data/val] Extracting {clip_sec:.0f}s clips from {len(pairs)} val pair(s)")
