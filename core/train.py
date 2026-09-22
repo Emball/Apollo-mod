@@ -1115,6 +1115,11 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         if opt_type == "gefen_muon":
             try:
                 from gefen import Gefen, GefenMuon
+                # preflight: trigger CUDA kernel load now so any build/compat failure is caught here
+                try:
+                    from gefen.kernels.period_variance import find_period_by_block_variance  # noqa: F401
+                except Exception as _e:
+                    raise ImportError(f"gefen CUDA kernel unavailable: {_e}") from _e
                 params_2d   = [p for p in params if p.ndim == 2]
                 params_rest = [p for p in params if p.ndim != 2]
                 opt_2d   = GefenMuon(params_2d,   lr=lr, weight_decay=weight_decay) if params_2d   else None
@@ -1127,17 +1132,21 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                     return opt_2d
                 print_only(f"[optimizer] GefenMuon (2D) + Gefen (rest) -- lr={lr} -- 2D={len(params_2d)} rest={len(params_rest)}")
                 return _ComboOpt(opt_2d, opt_rest)
-            except ImportError:
-                print_only("[optimizer] gefen not installed -- falling back to AdamW32bit (pip install gefen)")
+            except ImportError as _e:
+                print_only(f"[optimizer] gefen unavailable ({_e}) -- falling back to AdamW32bit")
 
         if opt_type == "gefen":
             try:
                 from gefen import Gefen
+                try:
+                    from gefen.kernels.period_variance import find_period_by_block_variance  # noqa: F401
+                except Exception as _e:
+                    raise ImportError(f"gefen CUDA kernel unavailable: {_e}") from _e
                 opt = Gefen(params, lr=lr, weight_decay=weight_decay, betas=betas, fused=True)
                 print_only(f"[optimizer] Gefen -- lr={lr}")
                 return opt
-            except ImportError:
-                print_only("[optimizer] gefen not installed -- falling back to AdamW32bit (pip install gefen)")
+            except ImportError as _e:
+                print_only(f"[optimizer] gefen unavailable ({_e}) -- falling back to AdamW32bit")
 
         if opt_type == "adamw_8bit":
             try:
