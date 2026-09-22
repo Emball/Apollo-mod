@@ -1219,16 +1219,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 from gefen import Gefen, GefenMuon
                 # preflight: ensure pkg_resources.packaging exists (removed in setuptools>=71)
                 try:
-                    import pkg_resources as _pr
-                    if not hasattr(_pr, "packaging"):
-                        import packaging as _pkg
-                        _pr.packaging = _pkg
-                except Exception:
-                    pass
-                try:
-                    from gefen.kernels.period_variance import find_period_by_block_variance  # noqa: F401
+                    from gefen.partitioning import find_period_by_block_variance  # noqa: F401
                 except Exception as _e:
-                    raise ImportError(f"gefen CUDA kernel unavailable: {_e}") from _e
+                    raise ImportError(f"gefen unavailable: {_e}") from _e
                 params_2d   = [p for p in params if p.ndim == 2]
                 params_rest = [p for p in params if p.ndim != 2]
                 opt_2d   = GefenMuon(params_2d,   lr=lr, weight_decay=weight_decay) if params_2d   else None
@@ -1248,16 +1241,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             try:
                 from gefen import Gefen
                 try:
-                    import pkg_resources as _pr
-                    if not hasattr(_pr, "packaging"):
-                        import packaging as _pkg
-                        _pr.packaging = _pkg
-                except Exception:
-                    pass
-                try:
-                    from gefen.kernels.period_variance import find_period_by_block_variance  # noqa: F401
+                    from gefen.partitioning import find_period_by_block_variance  # noqa: F401
                 except Exception as _e:
-                    raise ImportError(f"gefen CUDA kernel unavailable: {_e}") from _e
+                    raise ImportError(f"gefen unavailable: {_e}") from _e
                 opt = Gefen(params, lr=lr, weight_decay=weight_decay, betas=betas, fused=True)
                 print_only(f"[optimizer] Gefen -- lr={lr}")
                 return opt
