@@ -249,6 +249,10 @@ class AudioLightningModule(pl.LightningModule):
         self._last_val_visqol = None
         self._last_val_tbl    = None   # target_band_loss (None when disabled)
 
+        # VISQOL alternation: compute every other val run, carry forward on skipped runs
+        self._val_run_count    = 0     # incremented at the start of each _compute_val_metrics call
+        self._cached_val_visqol = None  # last real VISQOL score, reused on skipped runs
+
         # Background write thread tracking
         self._write_thread: threading.Thread | None = None
 
@@ -541,9 +545,16 @@ class AudioLightningModule(pl.LightningModule):
         sfr_sum = sdr_sum = visqol_sum = tbl_sum = 0.0
         count = visqol_count = tbl_count = 0
 
+        self._val_run_count += 1
+        skip_visqol = (self._val_run_count % 2 == 0)  # skip on even runs, compute on odd
+
         song_items = list(self._val_song_refs.items())
-        do_visqol  = set(range(len(song_items))) if self.visqol_fraction >= 1.0 else \
-                     set(range(max(1, round(len(song_items) * self.visqol_fraction))))
+        if skip_visqol:
+            do_visqol = set()
+        elif self.visqol_fraction >= 1.0:
+            do_visqol = set(range(len(song_items)))
+        else:
+            do_visqol = set(range(max(1, round(len(song_items) * self.visqol_fraction))))
 
         epoch_dir = None
         if self.val_audio_dir is not None:
@@ -606,7 +617,12 @@ class AudioLightningModule(pl.LightningModule):
             self._last_val_sdr = sdr_sum / count
             self._last_val_sfr = sfr_sum / count
         if visqol_count > 0:
-            self._last_val_visqol = visqol_sum / visqol_count
+            self._last_val_visqol    = visqol_sum / visqol_count
+            self._cached_val_visqol  = self._last_val_visqol
+        elif skip_visqol and self._cached_val_visqol is not None:
+            # carry forward last real score so logging and checkpointing don't break
+            self._last_val_visqol = self._cached_val_visqol
+            print(f"[val] VISQOL skipped this run -- carrying forward {self._cached_val_visqol:.3f}")
         if tbl_count > 0:
             self._last_val_tbl = tbl_sum / tbl_count
 

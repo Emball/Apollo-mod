@@ -203,5 +203,5 @@ trainer:
   limit_train_batches: 1.0
   limit_val_batches: 1.0
   fast_dev_run: false
-  val_check_interval: 50
+  val_check_interval: 200
   check_val_every_n_epoch: null
