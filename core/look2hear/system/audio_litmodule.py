@@ -528,34 +528,9 @@ class AudioLightningModule(pl.LightningModule):
     # ------------------------------------------------------------------
 
     def _save_val_audio(self):
-        """
-        Save full-song LQ/HQ/Restored triplets from _pending_preview_data.
-        Tensors are already computed by _compute_val_metrics -- no extra inference.
-        """
-        if self.val_audio_dir is None or not self._pending_preview_data:
-            return
-
-        epoch_dir = os.path.join(self.val_audio_dir, f"step_{self.global_step:06d}")
-        os.makedirs(epoch_dir, exist_ok=True)
-
-        write_jobs = [(song_key, lq_t.clone(), hq_t.clone(), restored_t.clone())
-                      for song_key, lq_t, hq_t, restored_t in self._pending_preview_data]
-        self._pending_preview_data = []
-
-        if self._write_thread is not None and self._write_thread.is_alive():
-            self._write_thread.join(timeout=120)
-
-        def _write_files():
-            for tag, lq_s, hq_s, out_s in write_jobs:
-                try:
-                    torchaudio.save(os.path.join(epoch_dir, f"{tag}_LQ.wav"),       lq_s,  44100)
-                    torchaudio.save(os.path.join(epoch_dir, f"{tag}_HQ.wav"),       hq_s,  44100)
-                    torchaudio.save(os.path.join(epoch_dir, f"{tag}_Restored.wav"), out_s, 44100)
-                except Exception as ex:
-                    print(f"[val] Write error {tag}: {ex}")
-
-        self._write_thread = threading.Thread(target=_write_files, daemon=True)
-        self._write_thread.start()
+        # no-op: audio is written inline during _compute_val_metrics to avoid
+        # holding all song tensors in memory simultaneously.
+        pass
 
     def _compute_val_metrics(self):
         """
@@ -578,7 +553,10 @@ class AudioLightningModule(pl.LightningModule):
         do_visqol  = set(range(len(song_items))) if self.visqol_fraction >= 1.0 else \
                      set(range(max(1, round(len(song_items) * self.visqol_fraction))))
 
-        preview_data = []
+        epoch_dir = None
+        if self.val_audio_dir is not None:
+            epoch_dir = os.path.join(self.val_audio_dir, f"step_{self.global_step:06d}")
+            os.makedirs(epoch_dir, exist_ok=True)
 
         self.audio_model.eval()
         with torch.no_grad():
@@ -614,7 +592,16 @@ class AudioLightningModule(pl.LightningModule):
                                                       hi_hz=self.target_band_loss_hi_hz)
                         tbl_count += 1
 
-                    preview_data.append((song_key, lq_norm, hq_norm, restored))
+                    # write audio immediately and release tensors
+                    if epoch_dir is not None:
+                        try:
+                            torchaudio.save(os.path.join(epoch_dir, f"{song_key}_LQ.wav"),       lq_norm.cpu(),  44100)
+                            torchaudio.save(os.path.join(epoch_dir, f"{song_key}_HQ.wav"),       hq_norm.cpu(),  44100)
+                            torchaudio.save(os.path.join(epoch_dir, f"{song_key}_Restored.wav"), restored.cpu(), 44100)
+                        except Exception as ex:
+                            print(f"[val] Write error {song_key}: {ex}")
+
+                    del lq_full, hq_full, lq_norm, hq_norm, restored, e, r
 
                 except Exception as ex:
                     print(f"[val] Error on {song_key}: {ex}")
@@ -628,8 +615,6 @@ class AudioLightningModule(pl.LightningModule):
             self._last_val_visqol = visqol_sum / visqol_count
         if tbl_count > 0:
             self._last_val_tbl = tbl_sum / tbl_count
-
-        self._pending_preview_data = preview_data
 
     # ------------------------------------------------------------------
     # Validation epoch end
