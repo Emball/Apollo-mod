@@ -595,7 +595,7 @@ class AudioLightningModule(pl.LightningModule):
                         except Exception as ex:
                             print(f"[val] Write error {song_key}: {ex}")
 
-                    del lq_full, hq_full, lq_norm, hq_norm, restored, e, r
+                    del lq_norm, hq_norm, restored, e, r
 
                 except Exception as ex:
                     print(f"[val] Error on {song_key}: {ex}")
