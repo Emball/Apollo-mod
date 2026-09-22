@@ -57,7 +57,7 @@ On first run, sources are converted to WAV and chunked into fixed-length segment
 
 ### Validation Set Guidelines
 
-On the first val run, `val_metric_songs` songs are selected from the val set and locked permanently. Each subsequent val run runs OLA inference over each locked song's complete LQ file and scores against the full HQ reference — giving honest metrics with real temporal context rather than averaging independent 3-second windows. Preview clips (`val_preview_samples` triplets of LQ/HQ/Restored) are cut from the same inference pass; no second model run. Clips rotate across different offsets on `val_rotate_every` so you hear different parts of each song over the course of training.
+On the first val run, `val_songs` songs are selected from the val set and locked. Each subsequent val run runs OLA inference over each locked song's complete LQ file and scores SDR, SFR, and VISQOL against the full HQ reference — giving honest metrics with real temporal context rather than averaging independent short windows. The full LQ/HQ/Restored triplet for each song is written to `val_audio/` after every val run so you can listen and judge quality directly. If you have more songs in your val set than `val_songs`, the active window rotates on `val_rotate_every` steps, and the console prints a summary of the best metrics achieved in the previous window before switching.
 
 After each val run the console prints:
 
@@ -115,8 +115,8 @@ Each run creates a timestamped folder under `runs/<name>/<timestamp>/`. Set `res
 All checkpoints are kept. Each is named with full stats and a rank badge:
 
 ```
-[1]-step=001200-sisdr=-12.470-visqol=3.940-sdr=10.143-sfr=0.973.ckpt
-[2]-step=001100-sisdr=-12.398-visqol=3.891-sdr=10.120-sfr=0.975.ckpt
+[1]-step=001200-val_loss=-12.470-val_visqol=3.940-val_sdr=10.143-val_sfr=0.973.ckpt
+[2]-step=001100-val_loss=-12.398-val_visqol=3.891-val_sdr=10.120-val_sfr=0.975.ckpt
 ```
 
 `[1]` = best by `val_sdr`. The rank badges are updated after every new checkpoint save. Offline `evaluate.py` re-ranks the full set and can add additional metrics.
@@ -214,9 +214,8 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 | Key | Description |
 |---|---|
 | `n_layers_to_freeze` | Freeze the first N BSNet layers. Apollo has 6 total. `4` is recommended for synthetic/noisy degradation; `0` for clean/consistent degradation like real iTunes encodes. |
-| `val_metric_songs` | Number of full songs used for metric computation per val run. Locked on the first val run and never changed. |
-| `val_preview_samples` | Number of short LQ/HQ/Restored clip triplets saved to `val_audio/` per val run. Clips come from the metric inference pass — no extra model run. |
-| `val_rotate_every` | Steps between preview clip rotation. `auto` = derived from total configured steps. Integer = explicit step count. |
+| `val_songs` | Number of full songs evaluated per val run. Locked on the first val run. Full LQ/HQ/Restored files are saved to `val_audio/` after each run. |
+| `val_rotate_every` | Steps between val song window rotation. Only meaningful when the val set is larger than `val_songs`. Integer step count or omit to disable. |
 | `grad_accum_steps` | Accumulate gradients over N steps to simulate a larger batch without extra VRAM. |
 
 ### datas
@@ -279,7 +278,7 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 
 | Key | Description |
 |---|---|
-| `type` | `adamw`, `gefen` (recommended — lower memory, faster optimizer steps; requires `pip install gefen`), `adamw_8bit` (bitsandbytes), or `cpu_offload`. |
+| `type` | `adamw`, `gefen` (recommended — lower memory, faster steps; `uv pip install gefen`), `gefen_muon` (same as `gefen` for Apollo — no 2D params), `adamw_8bit` (bitsandbytes), or `cpu_offload`. |
 | `lr_g` | Generator learning rate. `3e-6` recommended for fine-tuning close to the target distribution; `1e-5` for more aggressive adaptation. |
 | `lr_d` | Discriminator learning rate. Keep ~10x lower than `lr_g`. |
 | `betas_g` | Generator Adam betas. Default `[0.9, 0.999]`. |
@@ -290,7 +289,7 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 | Key | Description |
 |---|---|
 | `gradient_checkpointing` | Recomputes activations during backward. Saves 30-40% VRAM at ~30% compute cost. |
-| `visqol_fraction` | Fraction of locked metric songs to score with VISQOL per val run. `1.0` = all. Requires `visqol-python` installed. Default `1.0`. |
+| `visqol_fraction` | Fraction of val songs to score with VISQOL per val run. `1.0` = all. Requires `visqol-python` (`uv pip install "visqol-python[all]"`); silently skipped and reported as 0.0 if not installed. Default `1.0`. |
 | `target_band_loss_enabled` | Adds a configurable-range band loss to live val metrics. Off by default. When enabled, appears as `tbl=` in console and checkpoint filenames. |
 | `target_band_loss_lo_hz` | Low edge of the target band in Hz. Default `13000`. |
 | `target_band_loss_hi_hz` | High edge of the target band in Hz. Default `19000`. |
