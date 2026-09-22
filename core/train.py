@@ -1001,6 +1001,12 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # Auto-preprocess raw data and bootstrap eval if needed
     prepare_data(cfg)
 
+    # Recompute val_clip_key here (same formula as prepare_data) for use in the baseline cache.
+    _vck_data_val    = os.path.join(_REPO_ROOT, "data", cfg.exp.name, "val")
+    _vck_fixed_delay = int(cfg.datas.fixed_align_samples) if getattr(cfg.datas, "fixed_align_samples", None) else None
+    _vck_clip_sec    = float(getattr(cfg.datas, "segment_sec", 3)) * 10
+    val_clip_key     = _chunk_cache_key(_vck_data_val, _vck_fixed_delay, None, extra=f"valclip_{_vck_clip_sec:.0f}")
+
     # Verify chunks exist -- if data/ was empty, provide a clear error
     train_lq   = os.path.join(cfg.datas.train_dir, "LQ")
     if not os.path.isdir(train_lq) or not any(f.endswith(".wav") for f in os.listdir(train_lq)):
