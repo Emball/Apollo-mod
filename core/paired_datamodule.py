@@ -443,6 +443,7 @@ def get_matched_pairs(lq_dir: str, hq_dir: str) -> List[Tuple[str, str]]:
 
 class ChunkedPairDataset(Dataset):
     def __init__(self, chunks_dir: str, sr: int = SR, aug_cfg: AugmentationCfg = None, label: str = "Training"):
+        self._is_val = (label == "Validation")
         lq_dir = os.path.join(chunks_dir, "LQ")
         hq_dir = os.path.join(chunks_dir, "HQ")
         self.pairs   = get_matched_pairs(lq_dir, hq_dir)
@@ -493,10 +494,17 @@ class ChunkedPairDataset(Dataset):
     def __len__(self) -> int:
         return len(self.pairs)
 
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int):
         lq_path, hq_path = self.pairs[idx]
         lq = load_wav(lq_path, self.sr)
         hq = load_wav(hq_path, self.sr)
+
+        if self._is_val:
+            # Val mode: normalize and return idx + song_key so validation_step can do index locking
+            lq, hq = normalize_pair(lq, hq)
+            song_key = os.path.splitext(os.path.basename(lq_path))[0]
+            return hq, lq, idx, song_key
+
         # No per-chunk normalize_pair here -- chunks are already normalized at
         # the full-song level during _slice_and_save. Normalizing again per-chunk
         # would re-introduce inconsistent gain riding at chunk boundaries.

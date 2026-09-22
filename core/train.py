@@ -496,106 +496,6 @@ def _chunk_cache_lookup(key: str, split: str) -> str | None:
     return None
 
 
-def _wav_cache_val(src_root: str, dst_root: str) -> None:
-    """
-    Convert val source files to WAV and copy full files (no chunking) into dst_root/LQ/ and dst_root/HQ/.
-    Reuses the same per-file WAV cache as _chunk_split so nothing is re-encoded.
-    """
-    import shutil
-
-    lq_src = os.path.join(src_root, "LQ")
-    hq_src = os.path.join(src_root, "HQ")
-    lq_dst = os.path.join(dst_root, "LQ")
-    hq_dst = os.path.join(dst_root, "HQ")
-    os.makedirs(lq_dst, exist_ok=True)
-    os.makedirs(hq_dst, exist_ok=True)
-
-    def _has_ffmpeg():
-        try:
-            import ffmpeg
-            return True
-        except ImportError:
-            return False
-
-    def _file_md5(path):
-        import hashlib
-        h = hashlib.md5()
-        with open(path, "rb") as f:
-            for block in iter(lambda: f.read(1 << 20), b""):
-                h.update(block)
-        return h.hexdigest()
-
-    def _cached_wav_path(src):
-        md5 = _file_md5(src)
-        os.makedirs(_CACHE_DIR, exist_ok=True)
-        return os.path.join(_CACHE_DIR, f"{md5}.wav")
-
-    def _to_wav_ffmpeg(src, silent=False):
-        import ffmpeg, tempfile
-        dst = _cached_wav_path(src)
-        if os.path.isfile(dst):
-            return dst
-        fd, tmp = tempfile.mkstemp(suffix=".wav", dir=_CACHE_DIR)
-        os.close(fd)
-        try:
-            (ffmpeg.input(src).output(tmp, format="wav", acodec="pcm_f32le", ar=_SR, ac=2)
-             .overwrite_output().run(capture_stdout=True, capture_stderr=True))
-        except Exception:
-            if os.path.exists(tmp):
-                os.unlink(tmp)
-            raise
-        os.replace(tmp, dst)
-        if not silent:
-            print_only(f"[cache] Wrote {os.path.basename(dst)}  ({os.path.basename(src)})")
-        return dst
-
-    def _to_wav_torchaudio(src, silent=False):
-        import torchaudio
-        dst = _cached_wav_path(src)
-        if os.path.isfile(dst):
-            return dst
-        wav, sr = torchaudio.load(src)
-        wav = wav.float()
-        if sr != _SR:
-            wav = torchaudio.functional.resample(wav, sr, _SR)
-        if wav.shape[0] == 1:
-            wav = wav.repeat(2, 1)
-        elif wav.shape[0] > 2:
-            wav = wav[:2]
-        torchaudio.save(dst, wav, _SR)
-        if not silent:
-            print_only(f"[cache] Wrote {os.path.basename(dst)}  ({os.path.basename(src)})")
-        return dst
-
-    use_ffmpeg = _has_ffmpeg()
-    to_wav = _to_wav_ffmpeg if use_ffmpeg else _to_wav_torchaudio
-
-    # Collect pairs so we can log one line per song
-    lq_files = sorted(f for f in os.listdir(lq_src) if os.path.isfile(os.path.join(lq_src, f))) if os.path.isdir(lq_src) else []
-    hq_files = sorted(f for f in os.listdir(hq_src) if os.path.isfile(os.path.join(hq_src, f))) if os.path.isdir(hq_src) else []
-
-    for side, src_dir, dst_dir, file_list in [("LQ", lq_src, lq_dst, lq_files), ("HQ", hq_src, hq_dst, hq_files)]:
-        if not os.path.isdir(src_dir):
-            continue
-        for fname in file_list:
-            src_path = os.path.join(src_dir, fname)
-            ext      = os.path.splitext(fname)[1].lower()
-            stem     = os.path.splitext(fname)[0]
-            dst_path = os.path.join(dst_dir, stem + ".wav")
-            if os.path.isfile(dst_path):
-                continue
-            if ext == ".wav":
-                shutil.copy2(src_path, dst_path)
-            else:
-                wav_path = to_wav(src_path, silent=True)
-                shutil.copy2(wav_path, dst_path)
-
-    songs = [os.path.splitext(f)[0] for f in lq_files]
-    for s in songs:
-        print_only(f"[data/val]   Cached: {s}  (LQ + HQ)")
-    n = len([f for f in os.listdir(lq_dst) if f.endswith(".wav")])
-    print_only(f"[data/val] WAV cache ready -- {n} song(s) -> {dst_root}")
-
 
 def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=None, fixed_delay: int = None) -> int:
     """
@@ -842,6 +742,94 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         _json.dump(_manifest_params(), _f, indent=2)
     return total
 
+def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 30.0, fixed_delay: int = None) -> None:
+    """
+    Extract exactly one random clip of clip_sec from each LQ/HQ pair in src_root.
+    Reuses the per-file WAV cache from _chunk_split. Writes one LQ and one HQ WAV
+    per song into dst_root/LQ/ and dst_root/HQ/.
+    """
+    import random as _random
+    import hashlib, tempfile
+    import torchaudio
+    from paired_datamodule import get_matched_pairs
+
+    lq_src = os.path.join(src_root, "LQ")
+    hq_src = os.path.join(src_root, "HQ")
+    if not os.path.isdir(lq_src) or not os.path.isdir(hq_src):
+        return
+
+    os.makedirs(os.path.join(dst_root, "LQ"), exist_ok=True)
+    os.makedirs(os.path.join(dst_root, "HQ"), exist_ok=True)
+
+    # Reuse the same per-file WAV cache key as _chunk_split
+    def _file_md5(path):
+        h = hashlib.md5()
+        with open(path, "rb") as f:
+            for block in iter(lambda: f.read(1 << 20), b""):
+                h.update(block)
+        return h.hexdigest()
+
+    def _cached_wav(src):
+        md5 = _file_md5(src)
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        dst = os.path.join(_CACHE_DIR, f"{md5}.wav")
+        if os.path.isfile(dst):
+            return dst
+        try:
+            import ffmpeg, tempfile as _tmp
+            fd, tmp = _tmp.mkstemp(suffix=".wav", dir=_CACHE_DIR)
+            os.close(fd)
+            (ffmpeg.input(src).output(tmp, format="wav", acodec="pcm_f32le", ar=_SR, ac=2)
+             .overwrite_output().run(capture_stdout=True, capture_stderr=True))
+            os.replace(tmp, dst)
+        except Exception:
+            wav, sr = torchaudio.load(src)
+            wav = wav.float()
+            if sr != _SR:
+                wav = torchaudio.functional.resample(wav, sr, _SR)
+            if wav.shape[0] == 1: wav = wav.repeat(2, 1)
+            elif wav.shape[0] > 2: wav = wav[:2]
+            torchaudio.save(dst, wav, _SR)
+        return dst
+
+    clip_samples = int(clip_sec * _SR)
+    pairs = get_matched_pairs(lq_src, hq_src)
+
+    print_only(f"\n[data/val] ==========================================================")
+    print_only(f"[data/val] Extracting {clip_sec:.0f}s clips from {len(pairs)} val pair(s)")
+    print_only(f"[data/val] ==========================================================\n")
+    n = 0
+    for song_idx, (lq_path, hq_path) in enumerate(pairs):
+        lq_wav = _cached_wav(lq_path)
+        hq_wav = _cached_wav(hq_path)
+
+        lq_info = torchaudio.info(lq_wav)
+        hq_info = torchaudio.info(hq_wav)
+        min_frames = min(lq_info.num_frames, hq_info.num_frames)
+
+        if min_frames <= clip_samples:
+            start = 0
+        else:
+            start = _random.randint(0, min_frames - clip_samples)
+
+        lq_start = max(0, start - fixed_delay) if fixed_delay and fixed_delay > 0 else start
+        hq_start = max(0, start + fixed_delay) if fixed_delay and fixed_delay < 0 else start
+
+        lq_clip, _ = torchaudio.load(lq_wav, frame_offset=lq_start, num_frames=clip_samples)
+        hq_clip, _ = torchaudio.load(hq_wav, frame_offset=hq_start, num_frames=clip_samples)
+        if lq_clip.shape[0] == 1: lq_clip = lq_clip.repeat(2, 1)
+        if hq_clip.shape[0] == 1: hq_clip = hq_clip.repeat(2, 1)
+
+        stem = os.path.splitext(os.path.basename(lq_path))[0]
+        torchaudio.save(os.path.join(dst_root, "LQ", f"{stem}.wav"), lq_clip, _SR)
+        torchaudio.save(os.path.join(dst_root, "HQ", f"{stem}.wav"), hq_clip, _SR)
+
+        print_only(f"[data/val]   {stem}: {clip_sec:.0f}s clip @ {start//_SR}s  [{song_idx+1}/{len(pairs)}]")
+        n += 1
+
+    print_only(f"[data/val] Done -- {n} clip pairs -> {dst_root}")
+
+
 def prepare_data(cfg: DictConfig) -> None:
     # Sync chunk size globals from config so _slice_and_save uses the correct sizes.
     global _CHUNK_SEC, _CHUNK_SAMPLES, _HOP_SAMPLES
@@ -893,25 +881,16 @@ def prepare_data(cfg: DictConfig) -> None:
         train_chunks = os.path.join(_CHUNK_CACHE_DIR, train_key, "train")
         _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, fixed_delay=fixed_delay)
 
-    # Val chunks at 10x training segment_sec (default 30s) for meaningful VISQOL scoring.
-    _orig_chunk_sec = _CHUNK_SEC
-    _orig_chunk_samples = _CHUNK_SAMPLES
-    _orig_hop_samples = _HOP_SAMPLES
-    val_chunk_sec = float(getattr(cfg.datas, "segment_sec", 3)) * 10
-    _CHUNK_SEC     = val_chunk_sec
-    _CHUNK_SAMPLES = int(_CHUNK_SEC * _SR)
-    _HOP_SAMPLES   = _CHUNK_SAMPLES  # no overlap for val chunks
-    val_key_30s = _chunk_cache_key(data_val, fixed_delay, None, extra=f"val30s_{val_chunk_sec:.0f}")
-    val_wav_dir = os.path.join(_CHUNK_CACHE_DIR, val_key_30s, "val")
+    # Val clips: one random 30s clip per song, cached to disk.
+    # Reuses the WAV conversion cache from _chunk_split so no re-encoding.
+    val_clip_sec = float(getattr(cfg.datas, "segment_sec", 3)) * 10
+    val_clip_key = _chunk_cache_key(data_val, fixed_delay, None, extra=f"valclip_{val_clip_sec:.0f}")
+    val_wav_dir  = os.path.join(_CHUNK_CACHE_DIR, val_clip_key, "val")
     val_lq_check = os.path.join(val_wav_dir, "LQ")
     if os.path.isdir(val_lq_check) and any(f.endswith(".wav") for f in os.listdir(val_lq_check)):
-        print_only(f"[data/val]   Cache hit ({val_key_30s[:8]}...) -- skipping chunking.")
+        print_only(f"[data/val]   Cache hit ({val_clip_key[:8]}...) -- skipping clip extraction.")
     else:
-        _chunk_split(data_val, val_wav_dir, "val", fixed_delay=fixed_delay)
-    # Restore training chunk globals
-    _CHUNK_SEC     = _orig_chunk_sec
-    _CHUNK_SAMPLES = _orig_chunk_samples
-    _HOP_SAMPLES   = _orig_hop_samples
+        _extract_val_clips(data_val, val_wav_dir, clip_sec=val_clip_sec, fixed_delay=fixed_delay)
 
     # Expose resolved absolute paths back into cfg so the datamodule picks them up.
     with open_dict(cfg):
