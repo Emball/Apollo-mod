@@ -190,7 +190,7 @@ class AudioLightningModule(pl.LightningModule):
         scheduler=None,
         val_save_interval=5,
         val_audio_dir=None,
-        val_preview_samples=6,      # max songs to save preview clips for per val run
+        val_preview_samples=6,      # ignored -- full songs are saved, kept for config compat
         val_metric_songs=3,         # number of songs for full-song metric computation (fixed forever)
         val_rotate_every="auto",    # "auto" or int steps between preview-clip position rotations
         gradient_checkpointing=False,
@@ -225,11 +225,6 @@ class AudioLightningModule(pl.LightningModule):
 
         # Full-song val refs: locked once for metric computation, never changes.
         self._val_song_refs: dict = {}   # song_key -> (lq_path, hq_path)
-
-        # Preview rotation schedule and locked preview chunks
-        self._val_rotation_schedule: list = []
-        self._val_locked_refs: dict       = {}  # "song_key:N" -> (lq_path, hq_path, start, seg_samples)
-        self._val_run_count: int          = 0
 
         # Pending preview tensors from _compute_val_metrics, consumed by _save_val_audio
         self._pending_preview_data: list  = []
@@ -450,121 +445,7 @@ class AudioLightningModule(pl.LightningModule):
             self._val_song_refs[song_key] = (lq_path, hq_path)
         print(f"[val] Locked {len(self._val_song_refs)} songs for full-song metric evaluation.")
 
-    def _lock_val_refs(self, by_song: dict) -> None:
-        """Lock preview chunks for audio file output. Rotation cycles through these."""
-        import math as _math
-        n_songs         = len(by_song)
-        chunks_per_song = max(1, _math.ceil(self.val_preview_samples / max(1, n_songs)))
-        total_preview   = n_songs * chunks_per_song
-        self._val_locked_refs = self._pick_chunks(by_song, total_preview, "val preview")
 
-    def _pick_chunks(self, by_song: dict, total: int, label: str) -> dict:
-        """
-        Pick `total` chunks from `by_song` with equal distribution across songs.
-        Prefers non-silent chunks. Returns dict keyed as "song_key:N".
-        """
-        import random
-        import torchaudio as _ta
-
-        dataset      = self.trainer.datamodule.data_val
-        _SILENCE_RMS = 0.01
-        n_songs      = len(by_song)
-        if n_songs == 0:
-            return {}
-
-        base      = total // n_songs
-        remainder = total % n_songs
-        song_keys = list(by_song.keys())
-        random.shuffle(song_keys)
-        chunks_for = {k: base + (1 if i < remainder else 0) for i, k in enumerate(song_keys)}
-
-        locked = {}
-        for song_key, n_chunks in chunks_for.items():
-            if n_chunks == 0:
-                continue
-            candidates = by_song[song_key]
-            non_silent, silent = [], []
-            shuffled = candidates[:]
-            random.shuffle(shuffled)
-            for ds_idx in shuffled:
-                pair_idx, s = dataset.index[ds_idx]
-                lq_p, _ = dataset.pairs[pair_idx]
-                try:
-                    wav, _ = _ta.load(lq_p, frame_offset=s, num_frames=dataset.segment_samples)
-                    (non_silent if wav.pow(2).mean().sqrt().item() >= _SILENCE_RMS else silent).append(ds_idx)
-                except Exception:
-                    silent.append(ds_idx)
-            ordered = non_silent + silent
-            chosen  = ordered[:n_chunks] if ordered else shuffled[:1]
-            for chunk_idx, ds_idx in enumerate(chosen):
-                pair_idx, start = dataset.index[ds_idx]
-                lq_path, hq_path = dataset.pairs[pair_idx]
-                locked[f"{song_key}:{chunk_idx}"] = (lq_path, hq_path, start, dataset.segment_samples)
-
-        per_song_counts = list(chunks_for.values())
-        print(f"[{label}] Locked {len(locked)} chunks across {n_songs} songs "
-              f"(~{min(per_song_counts)}-{max(per_song_counts)} per song).")
-        return locked
-
-    def _build_rotation_schedule(self, all_songs: list) -> list:
-        """Build preview rotation schedule for the entire training run."""
-        import random
-        import math
-
-        n_songs         = len(all_songs)
-        chunks_per_song = max(1, math.ceil(self.val_preview_samples / max(1, n_songs)))
-        per_set         = min(self.val_preview_samples, n_songs * chunks_per_song)
-
-        try:
-            max_epochs    = self.trainer.max_epochs or 1
-            batches       = self.trainer.num_training_batches or 1
-            total_steps   = (max_epochs * batches) // self.grad_accum_steps
-            val_interval  = self.trainer.val_check_interval or 100
-            total_val_runs = max(1, total_steps // val_interval)
-        except Exception:
-            total_val_runs = 50
-            val_interval   = 100
-
-        if str(self.val_rotate_every).lower() == "auto":
-            n_slots      = max(1, chunks_per_song)
-            rotate_every = max(1, total_val_runs // n_slots)
-        else:
-            rotate_every = max(1, int(self.val_rotate_every) // max(1, val_interval))
-
-        total_slots = max(1, math.ceil(total_val_runs / rotate_every))
-
-        schedule = []
-        for slot_i in range(total_slots):
-            slot = [(song_key, slot_i % chunks_per_song) for song_key in all_songs]
-            if len(slot) > per_set:
-                offset = (slot_i * per_set) % len(slot)
-                slot = (slot + slot)[offset : offset + per_set]
-            schedule.append(slot)
-
-        mode = "chunk" if n_songs <= self.val_preview_samples else "song"
-        print(f"[val preview] {n_songs} songs x {chunks_per_song} chunks, "
-              f"{per_set} per slot, {mode} rotation every {rotate_every} val runs.")
-        return schedule
-
-    def _current_slot_songs(self) -> list:
-        if not self._val_rotation_schedule:
-            return []
-        cadence  = getattr(self, "_val_rotate_cadence", 5)
-        slot_idx = (self._val_run_count - 1) // max(1, cadence)
-        slot_idx = min(slot_idx, len(self._val_rotation_schedule) - 1)
-        return self._val_rotation_schedule[slot_idx]
-
-    def _build_val_refs_for_slot(self, slot_entries: list) -> list:
-        refs = []
-        for entry in slot_entries:
-            song_key, chunk_idx = entry if isinstance(entry, (list, tuple)) and len(entry) == 2 else (entry, 0)
-            ref_key = f"{song_key}:{chunk_idx}"
-            if ref_key not in self._val_locked_refs:
-                ref_key = f"{song_key}:0"
-            if ref_key in self._val_locked_refs:
-                lq_path, hq_path, start, seg_samples = self._val_locked_refs[ref_key]
-                refs.append((f"{song_key}_c{chunk_idx}", lq_path, hq_path, start, seg_samples))
-        return refs
 
     # ------------------------------------------------------------------
     # Full-song inference helper
@@ -616,48 +497,21 @@ class AudioLightningModule(pl.LightningModule):
 
     def _save_val_audio(self):
         """
-        Save preview clips from _pending_preview_data (already computed by
-        _compute_val_metrics). Cuts val_preview_samples short clips from each
-        restored full-song tensor. Writes are handed off to a background thread.
+        Save full-song LQ/HQ/Restored triplets from _pending_preview_data.
+        Tensors are already computed by _compute_val_metrics -- no extra inference.
         """
         if self.val_audio_dir is None or not self._pending_preview_data:
             return
 
-        import math
         epoch_dir = os.path.join(self.val_audio_dir, f"step_{self.global_step:06d}")
         os.makedirs(epoch_dir, exist_ok=True)
 
-        # How many clips per song to cut from the full restored tensor
-        n_songs       = len(self._pending_preview_data)
-        clips_per_song = max(1, math.ceil(self.val_preview_samples / max(1, n_songs)))
-
-        # Derive clip offset from rotation run count
-        try:
-            chunk_sec  = float(self.trainer.datamodule.segment_sec)
-        except Exception:
-            chunk_sec  = 3.0
-        clip_samples   = int(round(chunk_sec * 44100))
-        cadence        = getattr(self, "_val_rotate_cadence", 5)
-        clip_offset_idx = (self._val_run_count - 1) // max(1, cadence)
-
-        write_jobs = []
-        for song_key, lq_t, hq_t, restored_t in self._pending_preview_data:
-            T = lq_t.shape[-1]
-            for ci in range(clips_per_song):
-                idx   = (clip_offset_idx * clips_per_song + ci)
-                start = min((idx * clip_samples) % max(1, T - clip_samples), T - clip_samples)
-                start = max(0, start)
-                end   = min(start + clip_samples, T)
-                tag   = f"{song_key}_c{ci}"
-                write_jobs.append((tag,
-                                   lq_t[..., start:end].clone(),
-                                   hq_t[..., start:end].clone(),
-                                   restored_t[..., start:end].clone()))
-
+        write_jobs = [(song_key, lq_t.clone(), hq_t.clone(), restored_t.clone())
+                      for song_key, lq_t, hq_t, restored_t in self._pending_preview_data]
         self._pending_preview_data = []
 
         if self._write_thread is not None and self._write_thread.is_alive():
-            self._write_thread.join(timeout=60)
+            self._write_thread.join(timeout=120)
 
         def _write_files():
             for tag, lq_s, hq_s, out_s in write_jobs:
@@ -666,7 +520,7 @@ class AudioLightningModule(pl.LightningModule):
                     torchaudio.save(os.path.join(epoch_dir, f"{tag}_HQ.wav"),       hq_s,  44100)
                     torchaudio.save(os.path.join(epoch_dir, f"{tag}_Restored.wav"), out_s, 44100)
                 except Exception as ex:
-                    print(f"[val preview] Write error {tag}: {ex}")
+                    print(f"[val] Write error {tag}: {ex}")
 
         self._write_thread = threading.Thread(target=_write_files, daemon=True)
         self._write_thread.start()
@@ -772,12 +626,10 @@ class AudioLightningModule(pl.LightningModule):
         if self._val_fixed_indices is None and self._val_seen_indices:
             self._lock_val_fixed_indices()
 
-        # --- Build all ref pools and rotation schedule on first real val run ---
-        if not self._val_rotation_schedule and self._val_fixed_indices is not None:
-            dataset  = self.trainer.datamodule.data_val
-
-            # Build full by_song from ALL seen indices (not just fixed loss subset)
-            by_song  = {}
+        # --- Lock full-song metric refs on first real val run ---
+        if not self._val_song_refs and self._val_fixed_indices is not None:
+            dataset   = self.trainer.datamodule.data_val
+            by_song   = {}
             all_songs = []
             seen_keys = set()
             for ds_idx in self._val_seen_indices or self._val_fixed_indices:
@@ -790,43 +642,11 @@ class AudioLightningModule(pl.LightningModule):
                 if key not in seen_keys:
                     seen_keys.add(key)
                     all_songs.append(key)
-
-            # Full-song metric pool: fixed forever
             self._lock_val_songs(by_song)
+            print(f"[val] {len(self._val_song_refs)} songs locked for full-song metric evaluation.")
 
-            # Preview pool and rotation schedule
-            self._lock_val_refs(by_song)
-            self._val_rotation_schedule = self._build_rotation_schedule(all_songs)
-
-            if str(self.val_rotate_every).lower() == "auto":
-                import math
-                try:
-                    max_epochs     = self.trainer.max_epochs or 1
-                    batches        = self.trainer.num_training_batches or 1
-                    total_steps    = (max_epochs * batches) // self.grad_accum_steps
-                    val_interval   = self.trainer.val_check_interval or 200
-                    total_val_runs = max(1, total_steps // val_interval)
-                except Exception:
-                    total_val_runs = 50
-                n_songs         = len(all_songs)
-                chunks_per_song = max(1, math.ceil(self.val_preview_samples / max(1, n_songs)))
-                n_slots         = max(1, chunks_per_song)
-                self._val_rotate_cadence = max(1, total_val_runs // n_slots)
-            else:
-                try:
-                    val_interval = self.trainer.val_check_interval or 1
-                except Exception:
-                    val_interval = 1
-                self._val_rotate_cadence = max(1, int(self.val_rotate_every) // val_interval)
-
-            print(f"[val] {len(self._val_song_refs)} songs (full-song metrics) | "
-                  f"preview: {len(self._val_locked_refs)} chunks, "
-                  f"rotate every {self._val_rotate_cadence} val runs "
-                  f"(= {self._val_rotate_cadence * (self.trainer.val_check_interval or 1)} steps).")
-
-        # Full-song metrics pass (also populates _pending_preview_data), then save clips
+        # Full-song metrics pass (also populates _pending_preview_data), then save files
         self._compute_val_metrics()
-        self._val_run_count += 1
         self._save_val_audio()
 
         _sfr    = self._last_val_sfr
@@ -845,20 +665,12 @@ class AudioLightningModule(pl.LightningModule):
     # ------------------------------------------------------------------
 
     def on_save_checkpoint(self, checkpoint: dict) -> None:
-        checkpoint["val_fixed_indices"]      = self._val_fixed_indices
-        checkpoint["val_rotation_schedule"]  = self._val_rotation_schedule
-        checkpoint["val_run_count"]          = self._val_run_count
-        checkpoint["val_rotate_cadence"]     = getattr(self, "_val_rotate_cadence", 5)
-        checkpoint["val_locked_refs"]        = self._val_locked_refs
-        checkpoint["val_song_refs"]          = self._val_song_refs
+        checkpoint["val_fixed_indices"] = self._val_fixed_indices
+        checkpoint["val_song_refs"]     = self._val_song_refs
 
     def on_load_checkpoint(self, checkpoint: dict) -> None:
-        self._val_fixed_indices     = checkpoint.get("val_fixed_indices",     None)
-        self._val_rotation_schedule = checkpoint.get("val_rotation_schedule", [])
-        self._val_run_count         = checkpoint.get("val_run_count",         0)
-        self._val_rotate_cadence    = checkpoint.get("val_rotate_cadence",    5)
-        self._val_locked_refs       = checkpoint.get("val_locked_refs",       {})
-        self._val_song_refs         = checkpoint.get("val_song_refs",         {})
+        self._val_fixed_indices = checkpoint.get("val_fixed_indices", None)
+        self._val_song_refs     = checkpoint.get("val_song_refs",     {})
 
         # Strip state_dict keys from older checkpoints that no longer exist in model
         sd = checkpoint.get("state_dict", {})
