@@ -529,7 +529,7 @@ def _wav_cache_val(src_root: str, dst_root: str) -> None:
         os.makedirs(_CACHE_DIR, exist_ok=True)
         return os.path.join(_CACHE_DIR, f"{md5}.wav")
 
-    def _to_wav_ffmpeg(src):
+    def _to_wav_ffmpeg(src, silent=False):
         import ffmpeg, tempfile
         dst = _cached_wav_path(src)
         if os.path.isfile(dst):
@@ -544,10 +544,11 @@ def _wav_cache_val(src_root: str, dst_root: str) -> None:
                 os.unlink(tmp)
             raise
         os.replace(tmp, dst)
-        print_only(f"[cache] Wrote {os.path.basename(dst)}  ({os.path.basename(src)})")
+        if not silent:
+            print_only(f"[cache] Wrote {os.path.basename(dst)}  ({os.path.basename(src)})")
         return dst
 
-    def _to_wav_torchaudio(src):
+    def _to_wav_torchaudio(src, silent=False):
         import torchaudio
         dst = _cached_wav_path(src)
         if os.path.isfile(dst):
@@ -561,32 +562,38 @@ def _wav_cache_val(src_root: str, dst_root: str) -> None:
         elif wav.shape[0] > 2:
             wav = wav[:2]
         torchaudio.save(dst, wav, _SR)
-        print_only(f"[cache] Wrote {os.path.basename(dst)}  ({os.path.basename(src)})")
+        if not silent:
+            print_only(f"[cache] Wrote {os.path.basename(dst)}  ({os.path.basename(src)})")
         return dst
 
     use_ffmpeg = _has_ffmpeg()
     to_wav = _to_wav_ffmpeg if use_ffmpeg else _to_wav_torchaudio
 
-    for side, src_dir, dst_dir in [("LQ", lq_src, lq_dst), ("HQ", hq_src, hq_dst)]:
+    # Collect pairs so we can log one line per song
+    lq_files = sorted(f for f in os.listdir(lq_src) if os.path.isfile(os.path.join(lq_src, f))) if os.path.isdir(lq_src) else []
+    hq_files = sorted(f for f in os.listdir(hq_src) if os.path.isfile(os.path.join(hq_src, f))) if os.path.isdir(hq_src) else []
+
+    for side, src_dir, dst_dir, file_list in [("LQ", lq_src, lq_dst, lq_files), ("HQ", hq_src, hq_dst, hq_files)]:
         if not os.path.isdir(src_dir):
             continue
-        for fname in sorted(os.listdir(src_dir)):
+        for fname in file_list:
             src_path = os.path.join(src_dir, fname)
-            if not os.path.isfile(src_path):
-                continue
-            ext = os.path.splitext(fname)[1].lower()
-            stem = os.path.splitext(fname)[0]
+            ext      = os.path.splitext(fname)[1].lower()
+            stem     = os.path.splitext(fname)[0]
             dst_path = os.path.join(dst_dir, stem + ".wav")
             if os.path.isfile(dst_path):
                 continue
             if ext == ".wav":
                 shutil.copy2(src_path, dst_path)
             else:
-                wav_path = to_wav(src_path)
+                wav_path = to_wav(src_path, silent=True)
                 shutil.copy2(wav_path, dst_path)
 
+    songs = [os.path.splitext(f)[0] for f in lq_files]
+    for s in songs:
+        print_only(f"[data/val]   Cached: {s}  (LQ + HQ)")
     n = len([f for f in os.listdir(lq_dst) if f.endswith(".wav")])
-    print_only(f"[data/val] WAV cache ready -- {n} file(s) -> {dst_root}")
+    print_only(f"[data/val] WAV cache ready -- {n} song(s) -> {dst_root}")
 
 
 def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=None, fixed_delay: int = None) -> int:
