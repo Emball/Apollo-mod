@@ -57,7 +57,7 @@ On first run, sources are converted to WAV and chunked into fixed-length segment
 
 ### Validation Set Guidelines
 
-On the first val run, `val_songs` songs are selected from the val set and locked. Each subsequent val run runs OLA inference over each locked song's complete LQ file and scores SDR, SFR, and VISQOL against the full HQ reference — giving honest metrics with real temporal context rather than averaging independent short windows. The full LQ/HQ/Restored triplet for each song is written to `val_audio/` after every val run so you can listen and judge quality directly. If you have more songs in your val set than `val_songs`, the active window rotates on `val_rotate_every` steps, and the console prints a summary of the best metrics achieved in the previous window before switching.
+On the first val run, `val_songs` songs are selected from the val set and their file paths locked permanently. A random 30-second clip (10× `segment_sec`) is picked from each locked song and held fixed for the entire training run. Every val run scores SDR, SFR, and VISQOL on those same clips, and writes the LQ/HQ/Restored triplets to `val_audio/` so you can listen and judge quality directly. Because the same clips are used throughout, scores are directly comparable across every checkpoint. If your val set is larger than `val_songs`, the active window rotates on `val_rotate_every` steps and the console prints a summary of the best metrics from the previous window before switching.
 
 After each val run the console prints:
 
@@ -214,8 +214,8 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 | Key | Description |
 |---|---|
 | `n_layers_to_freeze` | Freeze the first N BSNet layers. Apollo has 6 total. `4` is recommended for synthetic/noisy degradation; `0` for clean/consistent degradation like real iTunes encodes. |
-| `val_songs` | Number of full songs evaluated per val run. Locked on the first val run. Full LQ/HQ/Restored files are saved to `val_audio/` after each run. |
-| `val_rotate_every` | Steps between val song window rotation. Only meaningful when the val set is larger than `val_songs`. Integer step count or omit to disable. |
+| `val_songs` | Number of songs evaluated per val run. Locked on the first val run. A random 30-second clip (10× `segment_sec`) is picked from each song and held fixed for the entire run. LQ/HQ/Restored triplets saved to `val_audio/` after each run. |
+| `val_rotate_every` | Steps between val song window rotation. Only meaningful when the val set is larger than `val_songs`. When the window rotates, new 30-second clips are picked for the incoming songs. Integer step count or omit to disable. |
 | `grad_accum_steps` | Accumulate gradients over N steps to simulate a larger batch without extra VRAM. |
 
 ### datas
