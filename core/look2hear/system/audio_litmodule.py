@@ -222,8 +222,9 @@ class AudioLightningModule(pl.LightningModule):
         self._val_seen_indices  = []     # accumulator during first run
 
         # Full-song val refs: active window of songs for metric computation.
-        self._val_song_refs:  dict = {}   # song_key -> (lq_path, hq_path) -- current window
-        self._val_all_songs:  list = []   # [(song_key, lq_path, hq_path)] -- full pool, ordered
+        self._val_song_refs:   dict = {}   # song_key -> (lq_path, hq_path) -- current window
+        self._val_all_songs:   list = []   # [(song_key, lq_path, hq_path)] -- full pool, ordered
+        self._val_clip_offsets: dict = {}  # song_key -> locked clip start sample
         self._val_window_idx: int  = 0    # which rotation window we're on
         self._val_next_rotate: int = -1   # global_step at which to rotate next (-1 = never)
         self._val_window_best: dict = {}  # best metrics seen in the current window
@@ -523,8 +524,43 @@ class AudioLightningModule(pl.LightningModule):
 
         return (out_buf / wt_buf.clamp(min=1e-8)).clamp(-1.0, 1.0)
 
+    def _infer_clip(self, lq_norm: torch.Tensor) -> torch.Tensor:
+        """
+        Run chunked OLA inference on a pre-loaded, pre-normalized [2, T] clip tensor.
+        Returns restored [2, T] float32 CPU tensor.
+        """
+        try:
+            chunk_sec = float(self.trainer.datamodule.segment_sec)
+        except Exception:
+            chunk_sec = 3.0
+
+        chunk_samples   = max(1, int(round(chunk_sec * 44100)))
+        overlap_samples = max(0, int(round(min(0.5, chunk_sec * 0.25) * 44100)))
+        hop_samples     = max(1, chunk_samples - overlap_samples)
+
+        T       = lq_norm.shape[-1]
+        out_buf = torch.zeros(2, T)
+        wt_buf  = torch.zeros(T)
+
+        start = 0
+        while start < T:
+            end = min(start + chunk_samples, T)
+            n   = end - start
+            inp = lq_norm[..., start:end].unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                out = self.audio_model(inp)
+            if out.ndim == 3:
+                out = out[0]
+            out = out.float().cpu()[..., :n]
+            w = torch.hann_window(n, periodic=False) if n >= 2 else torch.ones(n)
+            out_buf[..., start:end] += out * w
+            wt_buf[start:end]       += w
+            start += hop_samples
+
+        return (out_buf / wt_buf.clamp(min=1e-8)).clamp(-1.0, 1.0)
+
     # ------------------------------------------------------------------
-    # Val audio saving (background thread)
+    # Val audio saving (no-op: written inline in _compute_val_metrics)
     # ------------------------------------------------------------------
 
     def _save_val_audio(self):
@@ -558,6 +594,13 @@ class AudioLightningModule(pl.LightningModule):
             epoch_dir = os.path.join(self.val_audio_dir, f"step_{self.global_step:06d}")
             os.makedirs(epoch_dir, exist_ok=True)
 
+        # clip length: 10x the training segment (e.g. 3s → 30s)
+        try:
+            seg_sec = float(self.trainer.datamodule.segment_sec)
+        except Exception:
+            seg_sec = 3.0
+        clip_samples = int(round(seg_sec * 10 * 44100))
+
         torch.cuda.empty_cache()
         self.audio_model.eval()
         with torch.no_grad():
@@ -568,11 +611,25 @@ class AudioLightningModule(pl.LightningModule):
                     if lq_full.shape[0] == 1: lq_full = lq_full.repeat(2, 1)
                     if hq_full.shape[0] == 1: hq_full = hq_full.repeat(2, 1)
 
-                    peak    = lq_full.abs().max().clamp(min=1e-8)
-                    lq_norm = (lq_full / peak).clamp(-1.0, 1.0)
-                    hq_norm = (hq_full / peak).clamp(-1.0, 1.0)
+                    # slice a locked clip: use the stored offset or pick a random one
+                    T = lq_full.shape[-1]
+                    max_start = max(0, T - clip_samples)
+                    clip_start = self._val_clip_offsets.get(song_key)
+                    if clip_start is None or clip_start > max_start:
+                        clip_start = int(torch.randint(0, max_start + 1, (1,)).item()) if max_start > 0 else 0
+                        self._val_clip_offsets[song_key] = clip_start
+                    clip_end = min(clip_start + clip_samples, T)
 
-                    restored = self._infer_full_song(lq_path)
+                    lq_clip = lq_full[..., clip_start:clip_end]
+                    hq_clip = hq_full[..., clip_start:clip_end]
+                    del lq_full, hq_full
+
+                    peak    = lq_clip.abs().max().clamp(min=1e-8)
+                    lq_norm = (lq_clip / peak).clamp(-1.0, 1.0)
+                    hq_norm = (hq_clip / peak).clamp(-1.0, 1.0)
+                    del lq_clip, hq_clip
+
+                    restored = self._infer_clip(lq_norm)
 
                     e = restored[0:1]
                     r = hq_norm[0:1]
@@ -680,6 +737,7 @@ class AudioLightningModule(pl.LightningModule):
                     print(f"[val] Window {self._val_window_idx + 1} best: {' '.join(parts)}  -- rotating songs")
                 self._val_window_idx  += 1
                 self._val_window_best  = {}
+                self._val_clip_offsets = {}   # new songs get fresh random clips
                 self._val_next_rotate  = step + rotate_steps
                 self._apply_val_window(announce=True)
 
@@ -714,6 +772,7 @@ class AudioLightningModule(pl.LightningModule):
         checkpoint["val_fixed_indices"] = self._val_fixed_indices
         checkpoint["val_song_refs"]     = self._val_song_refs
         checkpoint["val_all_songs"]     = self._val_all_songs
+        checkpoint["val_clip_offsets"]  = self._val_clip_offsets
         checkpoint["val_window_idx"]    = self._val_window_idx
         checkpoint["val_next_rotate"]   = self._val_next_rotate
         checkpoint["val_window_best"]   = self._val_window_best
@@ -722,6 +781,7 @@ class AudioLightningModule(pl.LightningModule):
         self._val_fixed_indices = checkpoint.get("val_fixed_indices", None)
         self._val_song_refs     = checkpoint.get("val_song_refs",     {})
         self._val_all_songs     = checkpoint.get("val_all_songs",     [])
+        self._val_clip_offsets  = checkpoint.get("val_clip_offsets",  {})
         self._val_window_idx    = checkpoint.get("val_window_idx",    0)
         self._val_next_rotate   = checkpoint.get("val_next_rotate",   -1)
         self._val_window_best   = checkpoint.get("val_window_best",   {})
