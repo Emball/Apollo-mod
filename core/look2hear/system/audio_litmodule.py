@@ -221,8 +221,12 @@ class AudioLightningModule(pl.LightningModule):
         self._val_fixed_indices = None   # set[int] locked after first real val run
         self._val_seen_indices  = []     # accumulator during first run
 
-        # Full-song val refs: locked once for metric computation, never changes.
-        self._val_song_refs: dict = {}   # song_key -> (lq_path, hq_path)
+        # Full-song val refs: active window of songs for metric computation.
+        self._val_song_refs:  dict = {}   # song_key -> (lq_path, hq_path) -- current window
+        self._val_all_songs:  list = []   # [(song_key, lq_path, hq_path)] -- full pool, ordered
+        self._val_window_idx: int  = 0    # which rotation window we're on
+        self._val_next_rotate: int = -1   # global_step at which to rotate next (-1 = never)
+        self._val_window_best: dict = {}  # best metrics seen in the current window
 
         # Pending preview tensors from _compute_val_metrics, consumed by _save_val_audio
         self._pending_preview_data: list  = []
@@ -430,19 +434,49 @@ class AudioLightningModule(pl.LightningModule):
         print(f"[val] Locked {len(fixed)} fixed indices -- {per_song} per song across {num_songs} songs.")
 
     # ------------------------------------------------------------------
-    # Full-song val ref locking + preview rotation
+    # Full-song val ref locking + rotation
     # ------------------------------------------------------------------
 
     def _lock_val_songs(self, by_song: dict) -> None:
-        """Lock one LQ/HQ file path per val song. Fixed for the entire run."""
+        """Discover all available val songs and set the initial window."""
         dataset = self.trainer.datamodule.data_val
-        self._val_song_refs = {}
-        for song_key, indices in list(by_song.items())[:self.val_songs]:
+        self._val_all_songs = []
+        for song_key, indices in by_song.items():
             pair_idx, _ = dataset.index[indices[0]]
             lq_path, hq_path = dataset.pairs[pair_idx]
-            self._val_song_refs[song_key] = (lq_path, hq_path)
-        print(f"[val] Locked {len(self._val_song_refs)} songs for full-song metric evaluation.")
+            self._val_all_songs.append((song_key, lq_path, hq_path))
 
+        rotate_steps = self.val_rotate_every
+        if rotate_steps == "auto" or rotate_steps is None:
+            rotate_steps = None
+        else:
+            try:
+                rotate_steps = int(rotate_steps)
+            except (ValueError, TypeError):
+                rotate_steps = None
+
+        self._val_rotate_steps = rotate_steps
+        self._val_window_idx   = 0
+        self._val_window_best  = {}
+        self._apply_val_window(announce=True)
+
+    def _apply_val_window(self, announce: bool = False) -> None:
+        """Slice _val_all_songs into the active window and update _val_song_refs."""
+        n     = len(self._val_all_songs)
+        k     = min(self.val_songs, n)
+        start = (self._val_window_idx * k) % n
+        idxs  = [(start + i) % n for i in range(k)]
+        self._val_song_refs = {
+            self._val_all_songs[i][0]: (self._val_all_songs[i][1], self._val_all_songs[i][2])
+            for i in idxs
+        }
+        if announce:
+            songs_str = ", ".join(self._val_song_refs.keys())
+            n_total   = len(self._val_all_songs)
+            if getattr(self, "_val_rotate_steps", None):
+                print(f"[val] Window {self._val_window_idx + 1}: {k}/{n_total} songs -- {songs_str}  (rotate every {self._val_rotate_steps} steps)")
+            else:
+                print(f"[val] Locked {k}/{n_total} songs -- {songs_str}")
 
 
     # ------------------------------------------------------------------
@@ -643,6 +677,26 @@ class AudioLightningModule(pl.LightningModule):
             self._lock_val_songs(by_song)
             print(f"[val] {len(self._val_song_refs)} songs locked for full-song metric evaluation.")
 
+        # --- Check if it's time to rotate the song window ---
+        rotate_steps = getattr(self, "_val_rotate_steps", None)
+        if rotate_steps and self._val_all_songs and len(self._val_all_songs) > self.val_songs:
+            step = self.trainer.global_step
+            if self._val_next_rotate < 0:
+                self._val_next_rotate = step + rotate_steps
+            elif step >= self._val_next_rotate:
+                # Print window summary before rotating
+                best = self._val_window_best
+                if best:
+                    parts = []
+                    if "sdr"    in best: parts.append(f"sdr={best['sdr']:.3f}")
+                    if "visqol" in best: parts.append(f"visqol={best['visqol']:.3f}")
+                    if "sfr"    in best: parts.append(f"sfr={best['sfr']:.3f}")
+                    print(f"[val] Window {self._val_window_idx + 1} best: {' '.join(parts)}  -- rotating songs")
+                self._val_window_idx  += 1
+                self._val_window_best  = {}
+                self._val_next_rotate  = step + rotate_steps
+                self._apply_val_window(announce=True)
+
         # Full-song metrics pass (also populates _pending_preview_data), then save files
         self._compute_val_metrics()
         self._save_val_audio()
@@ -651,6 +705,14 @@ class AudioLightningModule(pl.LightningModule):
         _sdr    = self._last_val_sdr
         _visqol = self._last_val_visqol
         _tbl    = self._last_val_tbl
+
+        # Update window-best tracking
+        if _sdr    is not None and _sdr    > self._val_window_best.get("sdr",    float("-inf")):
+            self._val_window_best["sdr"]    = float(_sdr)
+        if _visqol is not None and _visqol > self._val_window_best.get("visqol", float("-inf")):
+            self._val_window_best["visqol"] = float(_visqol)
+        if _sfr    is not None and _sfr    > self._val_window_best.get("sfr",    float("-inf")):
+            self._val_window_best["sfr"]    = float(_sfr)
 
         self.log("val_sfr",    float(_sfr)    if _sfr    is not None else 0.0, prog_bar=False, logger=True)
         self.log("val_sdr",    float(_sdr)    if _sdr    is not None else 0.0, prog_bar=False, logger=True)
@@ -665,10 +727,18 @@ class AudioLightningModule(pl.LightningModule):
     def on_save_checkpoint(self, checkpoint: dict) -> None:
         checkpoint["val_fixed_indices"] = self._val_fixed_indices
         checkpoint["val_song_refs"]     = self._val_song_refs
+        checkpoint["val_all_songs"]     = self._val_all_songs
+        checkpoint["val_window_idx"]    = self._val_window_idx
+        checkpoint["val_next_rotate"]   = self._val_next_rotate
+        checkpoint["val_window_best"]   = self._val_window_best
 
     def on_load_checkpoint(self, checkpoint: dict) -> None:
         self._val_fixed_indices = checkpoint.get("val_fixed_indices", None)
         self._val_song_refs     = checkpoint.get("val_song_refs",     {})
+        self._val_all_songs     = checkpoint.get("val_all_songs",     [])
+        self._val_window_idx    = checkpoint.get("val_window_idx",    0)
+        self._val_next_rotate   = checkpoint.get("val_next_rotate",   -1)
+        self._val_window_best   = checkpoint.get("val_window_best",   {})
 
         # Strip state_dict keys from older checkpoints that no longer exist in model
         sd = checkpoint.get("state_dict", {})
