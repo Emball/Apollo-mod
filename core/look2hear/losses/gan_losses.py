@@ -97,7 +97,7 @@ class MultiFrequencyDisLoss(_Loss):
 class MultiFrequencyGenLoss(_Loss):
     def __init__(self,
                  eps=1e-8,
-                 # Band weight shape: "gaussian" or "trapezoid"
+                 # Band weight shape: "gaussian", "trapezoid", or "piecewise"
                  band_weight_shape="gaussian",
                  # Gaussian params
                  band_weight_center_hz=15000.0,
@@ -107,6 +107,11 @@ class MultiFrequencyGenLoss(_Loss):
                  band_weight_lo_hz=4500.0,   # low edge of boosted band
                  band_weight_hi_hz=18500.0,  # high edge of boosted band
                  band_weight_ramp_hz=1500.0, # width of the soft ramp at each edge
+                 # Piecewise params (used when band_weight_shape="piecewise")
+                 # List of [hz, weight] breakpoints in ascending hz order.
+                 # Interpolated linearly between pairs; extrapolated flat at ends.
+                 # Example: [[0,0.15],[550,0.15],[4700,0.5],[8500,0.85],[12000,1.0],[14000,1.0],[16500,0.2],[22050,0.1]]
+                 band_weight_breakpoints=None,
                  sr=44100,
                  # Legacy flat-boost params kept for config back-compat but ignored
                  hf_boost=1.0,
@@ -123,6 +128,17 @@ class MultiFrequencyGenLoss(_Loss):
         self._lo_hz     = band_weight_lo_hz
         self._hi_hz     = band_weight_hi_hz
         self._ramp_hz   = band_weight_ramp_hz
+        # Piecewise breakpoints: list of [hz, weight] pairs
+        self._breakpoints = band_weight_breakpoints if band_weight_breakpoints is not None else [
+            [0,       0.15],
+            [550,     0.15],
+            [4700,    0.5],
+            [8500,    0.85],
+            [12000,   1.0],
+            [14000,   1.0],
+            [16500,   0.2],
+            [22050,   0.1],
+        ]
 
         # Hann windows cached as plain dicts -- NOT register_buffer so they never
         # pollute state_dict or checkpoints. Fully deterministic; no learned state.
@@ -139,12 +155,29 @@ class MultiFrequencyGenLoss(_Loss):
             n_bins     = win // 2 + 1
             hz_per_bin = self._sr / win
             if self._shape == "trapezoid":
-                lo_bin   = int(self._lo_hz   / hz_per_bin)
-                hi_bin   = int(self._hi_hz   / hz_per_bin)
+                lo_bin    = int(self._lo_hz  / hz_per_bin)
+                hi_bin    = int(self._hi_hz  / hz_per_bin)
                 ramp_bins = self._ramp_hz / hz_per_bin
                 self._weight_cache[key] = _trapezoid_weight(
                     n_bins, lo_bin, hi_bin, ramp_bins, self._gain, device
                 )
+            elif self._shape == "piecewise":
+                bins = torch.arange(n_bins, dtype=torch.float32, device=device)
+                weights = torch.zeros(n_bins, dtype=torch.float32, device=device)
+                bps = self._breakpoints
+                for i in range(n_bins):
+                    hz = i * hz_per_bin
+                    if hz <= bps[0][0]:
+                        weights[i] = bps[0][1]
+                    elif hz >= bps[-1][0]:
+                        weights[i] = bps[-1][1]
+                    else:
+                        for j in range(len(bps) - 1):
+                            if bps[j][0] <= hz <= bps[j+1][0]:
+                                t = (hz - bps[j][0]) / (bps[j+1][0] - bps[j][0])
+                                weights[i] = bps[j][1] + t * (bps[j+1][1] - bps[j][1])
+                                break
+                self._weight_cache[key] = weights.view(1, n_bins, 1)
             else:  # gaussian (default)
                 center_bin = self._center_hz / hz_per_bin
                 sigma_bins = self._sigma_hz  / hz_per_bin

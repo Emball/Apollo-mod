@@ -83,6 +83,12 @@ class SilenceDipAugCfg:
     long_ramp_max_ms:    float = 1000.0
 
 @dataclass
+class MidSideAugCfg:
+    enabled:    bool  = False
+    prob_mid:   float = 0.1   # prob of replacing pair with mid (L+R)/2 summed to both channels
+    prob_side:  float = 0.1   # prob of replacing pair with side (L-R)/2 summed to both channels
+
+@dataclass
 class AugmentationCfg:
     enabled:            bool             = True
     gain:               GainAugCfg       = field(default_factory=GainAugCfg)
@@ -91,6 +97,7 @@ class AugmentationCfg:
     silence_dip:        SilenceDipAugCfg = field(default_factory=SilenceDipAugCfg)
     mp3_degradation:    Mp3AugCfg        = field(default_factory=Mp3AugCfg)
     stereo_alternation: SimpleAugCfg     = field(default_factory=SimpleAugCfg)
+    mid_side_isolation: MidSideAugCfg   = field(default_factory=MidSideAugCfg)
 
 def _get(d, key, default):
     try:
@@ -115,6 +122,7 @@ def _parse_aug_cfg(raw) -> AugmentationCfg:
     sil_raw  = _get(raw, "silence_dip", {})
     mp3_raw  = _get(raw, "mp3_degradation", {})
     mono_raw = _get(raw, "stereo_alternation", {})
+    ms_raw   = _get(raw, "mid_side_isolation", {})
 
     return AugmentationCfg(
         enabled=_get(raw, "enabled", True),
@@ -154,6 +162,11 @@ def _parse_aug_cfg(raw) -> AugmentationCfg:
         stereo_alternation=SimpleAugCfg(
             enabled=_get(mono_raw, "enabled", True),
             prob=   _get(mono_raw, "prob",    1.0),
+        ),
+        mid_side_isolation=MidSideAugCfg(
+            enabled=  _get(ms_raw, "enabled",  False),
+            prob_mid= _get(ms_raw, "prob_mid", 0.1),
+            prob_side=_get(ms_raw, "prob_side",0.1),
         ),
     )
 
@@ -316,6 +329,26 @@ def augment_pair(
         lq = lq[ch:ch+1]
         hq = hq[ch:ch+1]
 
+    # Mid/side isolation: randomly collapse the pair into mid or side signal,
+    # summed to both channels so the model sees a 2-channel mono-like input.
+    # Applied identically to LQ and HQ to keep them aligned.
+    # Teaches the model to work on the side (difference) channel, which is where
+    # MP3 joint-stereo does the most damage at low bitrates.
+    if cfg.mid_side_isolation.enabled and lq.shape[0] == 2:
+        r = random.random()
+        if r < cfg.mid_side_isolation.prob_mid:
+            # Mid = (L + R) / 2, duplicated to both channels
+            mid_lq = (lq[0:1] + lq[1:2]) * 0.5
+            mid_hq = (hq[0:1] + hq[1:2]) * 0.5
+            lq = mid_lq.expand(2, -1)
+            hq = mid_hq.expand(2, -1)
+        elif r < cfg.mid_side_isolation.prob_mid + cfg.mid_side_isolation.prob_side:
+            # Side = (L - R) / 2, duplicated to both channels
+            side_lq = (lq[0:1] - lq[1:2]) * 0.5
+            side_hq = (hq[0:1] - hq[1:2]) * 0.5
+            lq = side_lq.expand(2, -1)
+            hq = side_hq.expand(2, -1)
+
     # Gain: per-chunk random draw (realistic intra-song amplitude variance).
     if cfg.gain.enabled and random.random() < cfg.gain.prob:
         db    = random.uniform(-cfg.gain.db_max, cfg.gain.db_max)
@@ -449,7 +482,9 @@ class ChunkedPairDataset(Dataset):
             f"silence_dip={aug.silence_dip.enabled}(p={aug.silence_dip.prob}, "
             f"hold<={aug.silence_dip.max_hold_sec}s)  "
             f"mp3={aug.mp3_degradation.enabled}(p={aug.mp3_degradation.prob}, "
-            f"{aug.mp3_degradation.kbps_min}-{aug.mp3_degradation.kbps_max}kbps)"
+            f"{aug.mp3_degradation.kbps_min}-{aug.mp3_degradation.kbps_max}kbps)  "
+            f"mid_side_isolation={aug.mid_side_isolation.enabled}"
+            f"(p_mid={aug.mid_side_isolation.prob_mid}, p_side={aug.mid_side_isolation.prob_side})"
         )
 
     def __len__(self) -> int:
