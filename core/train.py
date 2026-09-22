@@ -1552,7 +1552,15 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         print_only("\n[baseline] Evaluating pretrained weights before training...")
         try:
             datamodule.setup("fit")
+            # Offload discriminator to CPU during baseline to free RAM for full-song inference.
+            # The generator stays on GPU; discriminator is not needed for val.
+            disc = getattr(system, "discriminator", None)
+            if disc is not None:
+                disc.cpu()
+                torch.cuda.empty_cache()
             baseline_results = trainer.validate(system, datamodule=datamodule, verbose=False)
+            if disc is not None:
+                disc.cuda()
             if baseline_results:
                 bl = baseline_results[0]
                 bl_sisdr = bl.get("val_loss", None)
