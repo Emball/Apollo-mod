@@ -1679,28 +1679,32 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         )
         _baseline_cache_file = os.path.join(_baseline_cache_dir, f"{_baseline_cache_key_}.json")
 
+        def _apply_baseline_to_system(bl_dict: dict) -> None:
+            """Populate system._last_val_* from a baseline results dict so the
+            progress bar shows baseline values before the first training step."""
+            system._last_val_sisdr  = bl_dict.get("val_loss")          # negative SI-SDR
+            system._last_val_sdr    = bl_dict.get("val_sdr")
+            system._last_val_sfr    = bl_dict.get("val_sfr")
+            system._last_val_visqol = bl_dict.get("val_visqol")
+
         if os.path.isfile(_baseline_cache_file):
             try:
                 with open(_baseline_cache_file) as _bcf:
                     _cached_bl = _json.load(_bcf)
-                print_only(f"\n[baseline] Cache hit ({_baseline_cache_key_[:8]}...) -- skipping val pass.")
-                _bl = _cached_bl
-                _sisdr = -_bl.get("val_loss", 0); _vis = _bl.get("val_visqol", 0)
-                _sdr = _bl.get("val_sdr", 0); _sfr = _bl.get("val_sfr", 0)
-                print_only(f"[baseline] visqol={_vis:.3f} sisdr={_sisdr:.3f} sdr={_sdr:.3f} sfr={_sfr:.3f}  (pretrained, before any training)")
+                print_only(f"[baseline] Cached ({_baseline_cache_key_[:8]}...)")
+                _apply_baseline_to_system(_cached_bl)
             except Exception as _e:
                 print_only(f"[baseline] Cache read failed ({_e}) -- will re-run.")
                 os.remove(_baseline_cache_file)
         else:
-            print_only("\n[baseline] Evaluating pretrained weights before training...")
+            print_only("[baseline] Evaluating pretrained weights...")
             _baseline_ok = True
             try:
                 import psutil as _ps
                 _vm = _ps.virtual_memory()
                 _headroom = (_vm.total * opt.get("ram_limit_fraction", 0.95)) - _vm.used
                 if _headroom < 1.5 * (1024 ** 3):
-                    print_only(f"[baseline] Skipped -- only {_headroom/(1024**3):.1f} GB RAM headroom "
-                               f"(system RAM already near threshold). First val run after training starts will serve as baseline.")
+                    print_only(f"[baseline] Skipped -- only {_headroom/(1024**3):.1f} GB RAM headroom.")
                     _baseline_ok = False
             except Exception:
                 pass
@@ -1721,12 +1725,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                         os.makedirs(_baseline_cache_dir, exist_ok=True)
                         with open(_baseline_cache_file, "w") as _bcf:
                             _json.dump(_to_cache, _bcf, indent=2)
-                        print_only(f"[baseline] Cached to {_baseline_cache_key_[:8]}...")
-                        _bl_sisdr = -float(bl.get("val_loss", 0))
-                        _bl_vis   = float(bl.get("val_visqol", 0))
-                        _bl_sdr   = float(bl.get("val_sdr", 0))
-                        _bl_sfr   = float(bl.get("val_sfr", 0))
-                        print_only(f"[baseline] visqol={_bl_vis:.3f} sisdr={_bl_sisdr:.3f} sdr={_bl_sdr:.3f} sfr={_bl_sfr:.3f}  (pretrained, before any training)")
+                        _apply_baseline_to_system(_to_cache)
                 except Exception as e:
                     print_only(f"[baseline] Skipped: {e}")
 
