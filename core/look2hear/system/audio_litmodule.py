@@ -600,9 +600,9 @@ class AudioLightningModule(pl.LightningModule):
                     # write audio immediately and release tensors
                     if epoch_dir is not None:
                         try:
-                            torchaudio.save(os.path.join(epoch_dir, f"{song_key}_LQ.wav"),       lq_norm.cpu(),  44100)
-                            torchaudio.save(os.path.join(epoch_dir, f"{song_key}_HQ.wav"),       hq_norm.cpu(),  44100)
-                            torchaudio.save(os.path.join(epoch_dir, f"{song_key}_Restored.wav"), restored.cpu(), 44100)
+                            torchaudio.save(os.path.join(epoch_dir, f"{song_key}_LQ.wav"),       lq_norm.cpu(),  44100, encoding="PCM_F", bits_per_sample=32)
+                            torchaudio.save(os.path.join(epoch_dir, f"{song_key}_HQ.wav"),       hq_norm.cpu(),  44100, encoding="PCM_F", bits_per_sample=32)
+                            torchaudio.save(os.path.join(epoch_dir, f"{song_key}_Restored.wav"), restored.cpu(), 44100, encoding="PCM_F", bits_per_sample=32)
                         except Exception as ex:
                             print(f"[val] Write error {song_key}: {ex}")
 

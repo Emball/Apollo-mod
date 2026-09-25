@@ -156,35 +156,21 @@ def _align_pair(lq: "torch.Tensor", hq: "torch.Tensor", stem: str, fixed_delay: 
     min_len = min(lq.shape[-1], hq.shape[-1])
     return lq[:, :min_len], hq[:, :min_len]
 
+def _save_wav_f32(tensor, path: str, sr: int = None) -> None:
+    """Save a tensor as 32-bit float WAV. No quantisation — full dynamic range preserved."""
+    import torchaudio
+    torchaudio.save(path, tensor.float().cpu(), sr or _SR, encoding="PCM_F", bits_per_sample=32)
+
+
 def _save_chunk_16bit(tensor, path: str):
-    """Save a chunk as 16-bit PCM WAV. Uses wave module for minimal per-call overhead."""
-    import wave, numpy as np
-    pcm = tensor.float().clamp(-1.0, 1.0)
-    # Interleave channels: (C, T) -> (T, C) -> flat int16
-    data = (pcm.T.numpy() * 32767.0).astype(np.int16)
-    n_ch, n_frames = pcm.shape[0], pcm.shape[1]
-    with wave.open(path, 'wb') as wf:
-        wf.setnchannels(n_ch)
-        wf.setsampwidth(2)
-        wf.setframerate(_SR)
-        wf.writeframes(data.tobytes())
+    """Kept for reference. All chunk writes now use _save_wav_f32."""
+    _save_wav_f32(tensor, path)
 
 
 def _save_chunks_batch(chunks: list, paths: list) -> None:
-    """Write multiple chunks to disk in one pass per file using wave module.
-    chunks: list of (C, T) float tensors
-    paths: list of output file paths (same length)
-    """
-    import wave, numpy as np
+    """Write multiple chunks as 32-bit float WAV."""
     for tensor, path in zip(chunks, paths):
-        pcm  = tensor.float().clamp(-1.0, 1.0)
-        data = (pcm.T.numpy() * 32767.0).astype(np.int16)
-        n_ch = pcm.shape[0]
-        with wave.open(path, 'wb') as wf:
-            wf.setnchannels(n_ch)
-            wf.setsampwidth(2)
-            wf.setframerate(_SR)
-            wf.writeframes(data.tobytes())
+        _save_wav_f32(tensor, path)
 
 
 
@@ -198,8 +184,6 @@ def _slice_and_save(
 
     progress_cb: optional callable(chunks_done, chunks_total) called after each chunk write.
     """
-    import wave, numpy as np
-
     min_len = min(lq_wav.shape[-1], hq_wav.shape[-1])
     lq_wav  = lq_wav[:, :min_len]
     hq_wav  = hq_wav[:, :min_len]
@@ -210,13 +194,7 @@ def _slice_and_save(
         hq_wav = hq_wav / song_peak
 
     def _write_chunk(t, path):
-        pcm  = t.float().clamp(-1.0, 1.0)
-        data = (pcm.T.numpy() * 32767.0).astype(np.int16)
-        with wave.open(path, "wb") as wf:
-            wf.setnchannels(pcm.shape[0])
-            wf.setsampwidth(2)
-            wf.setframerate(_SR)
-            wf.writeframes(data.tobytes())
+        _save_wav_f32(t, path)
 
     # Pre-compute total chunk count for progress reporting without storing chunks
     total_chunks = max(0, (min_len - _CHUNK_SAMPLES) // _HOP_SAMPLES + 1)
@@ -648,7 +626,7 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
             wav = wav.repeat(2, 1)
         elif wav.shape[0] > 2:
             wav = wav[:2]
-        torchaudio.save(dst, wav, _SR)
+        torchaudio.save(dst, wav, _SR, encoding="PCM_F", bits_per_sample=32)
         print_only(f"[cache] Wrote {os.path.basename(dst)}  ({os.path.basename(src)})")
         return dst
 
@@ -788,7 +766,7 @@ def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 30.0, fix
                 wav = torchaudio.functional.resample(wav, sr, _SR)
             if wav.shape[0] == 1: wav = wav.repeat(2, 1)
             elif wav.shape[0] > 2: wav = wav[:2]
-            torchaudio.save(dst, wav, _SR)
+            torchaudio.save(dst, wav, _SR, encoding="PCM_F", bits_per_sample=32)
         return dst
 
     clip_samples = int(clip_sec * _SR)
@@ -832,8 +810,8 @@ def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 30.0, fix
         if hq_clip.shape[0] == 1: hq_clip = hq_clip.repeat(2, 1)
 
         stem = os.path.splitext(os.path.basename(lq_path))[0]
-        torchaudio.save(os.path.join(dst_root, "LQ", f"{stem}.wav"), lq_clip, _SR)
-        torchaudio.save(os.path.join(dst_root, "HQ", f"{stem}.wav"), hq_clip, _SR)
+        torchaudio.save(os.path.join(dst_root, "LQ", f"{stem}.wav"), lq_clip, _SR, encoding="PCM_F", bits_per_sample=32)
+        torchaudio.save(os.path.join(dst_root, "HQ", f"{stem}.wav"), hq_clip, _SR, encoding="PCM_F", bits_per_sample=32)
 
         print_only(f"[data/val]   {stem}: {clip_sec:.0f}s clip @ {start//_SR}s  [{song_idx+1}/{len(pairs)}]")
         n += 1
