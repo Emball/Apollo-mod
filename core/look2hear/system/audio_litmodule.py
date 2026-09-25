@@ -254,8 +254,6 @@ class AudioLightningModule(pl.LightningModule):
         self._last_val_tbl    = None   # target_band_loss (None when disabled)
 
         # VISQOL alternation: compute every other val run, carry forward on skipped runs
-        self._val_run_count    = 0     # incremented at the start of each _compute_val_metrics call
-        self._cached_val_visqol = None  # last real VISQOL score, reused on skipped runs
 
         # Background write thread tracking
         self._write_thread: threading.Thread | None = None
@@ -549,13 +547,9 @@ class AudioLightningModule(pl.LightningModule):
         sfr_sum = sdr_sum = visqol_sum = tbl_sum = 0.0
         count = visqol_count = tbl_count = 0
 
-        self._val_run_count += 1
-        skip_visqol = (self._val_run_count % 2 == 0)  # skip on even runs, compute on odd
 
         song_items = list(self._val_song_refs.items())
-        if skip_visqol:
-            do_visqol = set()
-        elif self.visqol_fraction >= 1.0:
+        if self.visqol_fraction >= 1.0:
             do_visqol = set(range(len(song_items)))
         else:
             do_visqol = set(range(max(1, round(len(song_items) * self.visqol_fraction))))
@@ -621,13 +615,7 @@ class AudioLightningModule(pl.LightningModule):
             self._last_val_sdr = sdr_sum / count
             self._last_val_sfr = sfr_sum / count
         if visqol_count > 0:
-            self._last_val_visqol    = visqol_sum / visqol_count
-            self._cached_val_visqol  = self._last_val_visqol
-        elif skip_visqol:
-            # _last_val_visqol stays None -- checkpoint filename will get val_visqol=-1.000
-            # Log the carried value for display only
-            if self._cached_val_visqol is not None:
-                print(f"[val] VISQOL skipped -- last real score was {self._cached_val_visqol:.3f}")
+            self._last_val_visqol = visqol_sum / visqol_count
         if tbl_count > 0:
             self._last_val_tbl = tbl_sum / tbl_count
 
@@ -733,16 +721,10 @@ class AudioLightningModule(pl.LightningModule):
         checkpoint["val_next_rotate"]   = self._val_next_rotate
         checkpoint["val_window_best"]   = self._val_window_best
 
-        checkpoint["val_run_count"]     = self._val_run_count
-        checkpoint["cached_val_visqol"] = self._cached_val_visqol
-
     def on_load_checkpoint(self, checkpoint: dict) -> None:
         self._val_fixed_indices = checkpoint.get("val_fixed_indices", None)
         self._val_song_refs     = checkpoint.get("val_song_refs",     {})
         self._val_all_songs     = checkpoint.get("val_all_songs",     [])
-
-        self._val_run_count     = checkpoint.get("val_run_count",     0)
-        self._cached_val_visqol = checkpoint.get("cached_val_visqol", None)
 
         self._val_window_idx    = checkpoint.get("val_window_idx",    0)
         self._val_next_rotate   = checkpoint.get("val_next_rotate",   -1)

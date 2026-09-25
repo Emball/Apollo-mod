@@ -1487,9 +1487,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             tbl    = getattr(pl_module, "_last_val_tbl",    None)
             val_parts = []
             if visqol is not None: val_parts.append(f"visqol={float(visqol):.3f}")
+            if sisdr  is not None: val_parts.append(f"sisdr={-float(sisdr):.3f}")
             if sdr    is not None: val_parts.append(f"sdr={float(sdr):.3f}")
             if sfr    is not None: val_parts.append(f"sfr={float(sfr):.3f}")
-            if sisdr  is not None: val_parts.append(f"sisdr={-float(sisdr):.3f}")
             if tbl    is not None: val_parts.append(f"tbl={float(tbl):.4f}")
             val_str = "  " + "  ".join(val_parts) if val_parts else ""
             print(
@@ -1546,11 +1546,11 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 tbl    = getattr(pl_module, "_last_val_tbl",    None)
                 parts = []
                 if visqol is not None: parts.append(f"visqol={float(visqol):.3f}")
+                if sisdr  is not None: parts.append(f"sisdr={-float(sisdr):.3f}")
                 if sdr    is not None: parts.append(f"sdr={float(sdr):.3f}")
                 if sfr    is not None:
                     flag = " noise^" if float(sfr) > 1.05 else ""
                     parts.append(f"sfr={float(sfr):.3f}{flag}")
-                if sisdr  is not None: parts.append(f"sisdr={-float(sisdr):.3f}")
                 if tbl    is not None: parts.append(f"tbl={float(tbl):.4f}")
                 if parts:
                     print(f"\n  [val] {' '.join(parts)}  ({val_dur:.1f}s)", flush=True)
@@ -1676,9 +1676,11 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             try:
                 with open(_baseline_cache_file) as _bcf:
                     _cached_bl = _json.load(_bcf)
-                _parts = "  ".join(f"{k}={v:.3f}" for k, v in _cached_bl.items())
                 print_only(f"\n[baseline] Cache hit ({_baseline_cache_key_[:8]}...) -- skipping val pass.")
-                print_only(f"[baseline] {_parts}  (pretrained, before any training)")
+                _bl = _cached_bl
+                _sisdr = -_bl.get("val_loss", 0); _vis = _bl.get("val_visqol", 0)
+                _sdr = _bl.get("val_sdr", 0); _sfr = _bl.get("val_sfr", 0)
+                print_only(f"[baseline] visqol={_vis:.3f} sisdr={_sisdr:.3f} sdr={_sdr:.3f} sfr={_sfr:.3f}  (pretrained, before any training)")
             except Exception as _e:
                 print_only(f"[baseline] Cache read failed ({_e}) -- will re-run.")
                 os.remove(_baseline_cache_file)
@@ -1713,9 +1715,11 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                         with open(_baseline_cache_file, "w") as _bcf:
                             _json.dump(_to_cache, _bcf, indent=2)
                         print_only(f"[baseline] Cached to {_baseline_cache_key_[:8]}...")
-                        bl_sisdr = bl.get("val_loss", None)
-                        if bl_sisdr is not None:
-                            print_only(f"[baseline] sisdr={-float(bl_sisdr):.3f}  (pretrained, before any training)")
+                        _bl_sisdr = -float(bl.get("val_loss", 0))
+                        _bl_vis   = float(bl.get("val_visqol", 0))
+                        _bl_sdr   = float(bl.get("val_sdr", 0))
+                        _bl_sfr   = float(bl.get("val_sfr", 0))
+                        print_only(f"[baseline] visqol={_bl_vis:.3f} sisdr={_bl_sisdr:.3f} sdr={_bl_sdr:.3f} sfr={_bl_sfr:.3f}  (pretrained, before any training)")
                 except Exception as e:
                     print_only(f"[baseline] Skipped: {e}")
 
