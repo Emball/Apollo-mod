@@ -168,6 +168,10 @@ def _visqol_score(est: "torch.Tensor", ref: "torch.Tensor", sr: int = 44100) -> 
         if sr != 48000:
             mono_est = librosa.resample(mono_est, orig_sr=sr, target_sr=48000)
             mono_ref = librosa.resample(mono_ref, orig_sr=sr, target_sr=48000)
+        # ViSQOL guidelines: ~0.5s silence at start and end of each clip
+        pad = np.zeros(int(0.5 * 48000), dtype=np.float64)
+        mono_est = np.concatenate([pad, mono_est, pad])
+        mono_ref = np.concatenate([pad, mono_ref, pad])
         result = api.measure_from_arrays(mono_ref, mono_est, 48000)
         return float(result.moslqo)
     except Exception as e:
