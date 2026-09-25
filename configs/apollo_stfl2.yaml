@@ -13,6 +13,7 @@ optimizations:
 
 training:
   n_layers_to_freeze: 0
+  extra_layers: 0
   val_songs: 3
   val_rotate_every: 1500
   grad_accum_steps: 2

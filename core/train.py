@@ -969,6 +969,63 @@ def freeze_early_layers(model, n_layers_to_freeze=4):
     total  = sum(p.numel() for p in model.parameters())
     print_only(f"Frozen {frozen:,} / {total:,} parameters ({100*frozen/total:.1f}%)")
 
+def append_extra_layers(model, n_extra: int):
+    """
+    Freeze all pretrained layers (BN + entire net stack) and append n_extra new
+    BSNet blocks to model.net that start as near-identity.
+
+    Each new block is zero-initialized so it passes input through unchanged at
+    the start of training: Roformer.output and Roformer.MLP_output are zeroed
+    (Roformer then acts as identity via its internal residuals), and the final
+    conv of each ICB ConvActNorm1d block is zeroed (so seq_net output ≈ 0,
+    and BSNet output ≈ band_net output ≈ input). The new blocks are the only
+    trainable parameters.
+    """
+    if n_extra <= 0:
+        return
+
+    # Freeze everything pretrained: BN front-end + all existing net layers + output heads
+    for param in model.parameters():
+        param.requires_grad = False
+
+    # Determine feature_dim from the existing net
+    feature_dim = model.feature_dim
+
+    from look2hear.models.apollo import BSNet
+
+    new_layers = nn.ModuleList()
+    for _ in range(n_extra):
+        block = BSNet(feature_dim)
+
+        # Zero-init Roformer output projections so attention + MLP are identity at init
+        nn.init.zeros_(block.band_net.output.weight)
+        nn.init.zeros_(block.band_net.MLP_output.weight)
+
+        # Zero-init the last conv in each ConvActNorm1d inside ICB so seq_net ≈ 0
+        for can in block.seq_net.blocks:
+            # ConvActNorm1d.conv is Sequential; last element is the output Conv1d
+            last_conv = can.conv[-1]
+            nn.init.zeros_(last_conv.weight)
+            if last_conv.bias is not None:
+                nn.init.zeros_(last_conv.bias)
+
+        # New block trains freely
+        for param in block.parameters():
+            param.requires_grad = True
+
+        new_layers.append(block)
+
+    # Extend model.net (nn.Sequential) with the new blocks
+    existing = list(model.net.children())
+    model.net = nn.Sequential(*(existing + list(new_layers)))
+
+    pretrained_frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+    trainable_new    = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total            = pretrained_frozen + trainable_new
+    print_only(f"[extra_layers] Added {n_extra} new BSNet layer(s) (zero-init). "
+               f"Pretrained frozen: {pretrained_frozen:,} | New trainable: {trainable_new:,} | Total: {total:,}")
+
+
 def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # Apply hardware / compiler optimisations declared in cfg.optimizations
     apply_optimizations(cfg)
@@ -1152,9 +1209,15 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             )
             print_only("[weights] Pretrained weights loaded.")
 
-    # Freeze early layers for fine-tuning -- count driven by config
-    # (no-op when resuming since frozen params are restored by the checkpoint too)
-    freeze_early_layers(model, n_layers_to_freeze=cfg.training.n_layers_to_freeze)
+    n_extra = cfg.training.get("extra_layers", 0)
+    if n_extra > 0 and not is_resume:
+        # Freeze all pretrained weights and append new zero-init BSNet layers.
+        # append_extra_layers handles all freezing, so skip freeze_early_layers.
+        append_extra_layers(model, n_extra)
+    else:
+        # Standard partial freeze: BN front-end + first N layers, rest trainable.
+        # (no-op when resuming since frozen params are restored by the checkpoint too)
+        freeze_early_layers(model, n_layers_to_freeze=cfg.training.n_layers_to_freeze)
 
     # Instantiate discriminator fresh -- learns your artifact type from scratch
     print_only(f"Instantiating Discriminator <{cfg.discriminator._target_}>")
