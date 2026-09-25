@@ -242,27 +242,27 @@ def _config_summary(cfg_path: Path) -> str:
             return "no runs yet"
         # find best checkpoint across all timestamped runs
         import re as _re
-        best_sisdr = None
-        best_step  = None
+        best_visqol = None
+        best_step   = None
         for run_dir in sorted(runs_path.iterdir()):
             ckpt_dir = run_dir / "checkpoints"
             if not ckpt_dir.exists():
                 continue
             for ckpt in ckpt_dir.glob("*.ckpt"):
                 stem = _re.sub(r"^\[\d+\]-", "", ckpt.stem)
-                m = _re.search(r"val_loss=(-?[\d.]+)", stem)
+                m = _re.search(r"val_visqol=(-?[\d.]+)", stem)
                 s = _re.search(r"step=(\d+)", stem)
                 if m and s:
                     try:
-                        sisdr = float(m.group(1))
-                        step  = int(s.group(1))
-                        if best_sisdr is None or sisdr > best_sisdr:
-                            best_sisdr = sisdr
-                            best_step  = step
+                        visqol = float(m.group(1))
+                        step   = int(s.group(1))
+                        if visqol >= 0 and (best_visqol is None or visqol > best_visqol):
+                            best_visqol = visqol
+                            best_step   = step
                     except Exception:
                         pass
-        if best_sisdr is not None:
-            return f"best sisdr={-best_sisdr:.3f}  step={best_step}"
+        if best_visqol is not None:
+            return f"best visqol={best_visqol:.3f}  step={best_step}"
         return "checkpoint found (no loss in name)"
     except Exception:
         return ""
@@ -282,21 +282,21 @@ def _find_best_checkpoint(cfg_path: Path) -> Path | None:
         runs_path = RUNS_DIR / name
         if not runs_path.exists():
             return None
-        best_sisdr = None
-        best_ckpt  = None
+        best_visqol = None
+        best_ckpt   = None
         for run_dir in sorted(runs_path.iterdir()):
             ckpt_dir = run_dir / "checkpoints"
             if not ckpt_dir.exists():
                 continue
             for ckpt in ckpt_dir.glob("*.ckpt"):
                 stem = _re.sub(r"^\[\d+\]-", "", ckpt.stem)
-                m = _re.search(r"val_loss=(-?[\d.]+)", stem)
+                m = _re.search(r"val_visqol=(-?[\d.]+)", stem)
                 if m:
                     try:
-                        sisdr = float(m.group(1))
-                        if best_sisdr is None or sisdr > best_sisdr:
-                            best_sisdr = sisdr
-                            best_ckpt  = ckpt
+                        visqol = float(m.group(1))
+                        if visqol >= 0 and (best_visqol is None or visqol > best_visqol):
+                            best_visqol = visqol
+                            best_ckpt   = ckpt
                     except Exception:
                         pass
         return best_ckpt
@@ -379,8 +379,8 @@ def _run_mid_training_inference(state: dict, cfg_path: Path, pause_file: Path) -
     # Build and run inference cmd
     import re as _re2
     stem = _re2.sub(r"^\[\d+\]-", "", latest_ckpt.stem)
-    m = _re2.search(r"val_loss=(-?[\d.]+)", stem)
-    sisdr_str = f"sisdr={-float(m.group(1)):.3f}" if m else ""
+    m = _re2.search(r"val_visqol=(-?[\d.]+)", stem)
+    visqol_str = f"visqol={float(m.group(1)):.3f}" if (m and float(m.group(1)) >= 0) else ""
 
     try:
         cfg_data = __import__("yaml").safe_load(cfg_path.read_text())
@@ -397,7 +397,7 @@ def _run_mid_training_inference(state: dict, cfg_path: Path, pause_file: Path) -
         "--feature_dim", str(feature_dim),
     ]
 
-    console.print(f"\n[cyan]Checkpoint:[/] {latest_ckpt.name}  {sisdr_str}")
+    console.print(f"\n[cyan]Checkpoint:[/] {latest_ckpt.name}  {visqol_str}")
     console.print(f"[cyan]Input:[/]      {Path(input_path).name}")
     console.print(f"[cyan]Output:[/]     {output_path}\n")
 
@@ -754,15 +754,15 @@ def screen_inference(state: dict) -> None:
     latest_ckpt = _find_latest_checkpoint(cfg_path)
     if latest_ckpt:
         stem = _re2.sub(r"^\[\d+\]-", "", latest_ckpt.stem)
-        m = _re2.search(r"val_loss=(-?[\d.]+)", stem)
-        sisdr_str = f"sisdr={-float(m.group(1)):.3f}" if m else ""
-        model_options.append(f"Latest checkpoint  {sisdr_str}  ({latest_ckpt.name})")
+        m = _re2.search(r"val_visqol=(-?[\d.]+)", stem)
+        visqol_str = f"visqol={float(m.group(1)):.3f}" if (m and float(m.group(1)) >= 0) else ""
+        model_options.append(f"Latest checkpoint  {visqol_str}  ({latest_ckpt.name})")
         model_paths.append(str(latest_ckpt))
     if best_ckpt and (not latest_ckpt or best_ckpt != latest_ckpt):
         stem = _re2.sub(r"^\[\d+\]-", "", best_ckpt.stem)
-        m = _re2.search(r"val_loss=(-?[\d.]+)", stem)
-        sisdr_str = f"sisdr={-float(m.group(1)):.3f}" if m else ""
-        model_options.append(f"Best checkpoint  {sisdr_str}  ({best_ckpt.name})")
+        m = _re2.search(r"val_visqol=(-?[\d.]+)", stem)
+        visqol_str = f"visqol={float(m.group(1)):.3f}" if (m and float(m.group(1)) >= 0) else ""
+        model_options.append(f"Best checkpoint  {visqol_str}  ({best_ckpt.name})")
         model_paths.append(str(best_ckpt))
     if model_file:
         model_options.append(f"Model file  ({model_file.name})")

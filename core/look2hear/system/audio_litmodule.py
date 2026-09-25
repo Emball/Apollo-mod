@@ -437,7 +437,6 @@ class AudioLightningModule(pl.LightningModule):
             fixed.update(random.sample(indices, k))
 
         self._val_fixed_indices = fixed
-        print(f"[val] Locked {len(fixed)} fixed indices -- {per_song} per song across {num_songs} songs.")
 
     # ------------------------------------------------------------------
     # Full-song val ref locking + rotation
@@ -476,12 +475,7 @@ class AudioLightningModule(pl.LightningModule):
             for i in idxs
         }
         if announce:
-            songs_str = ", ".join(self._val_song_refs.keys())
-            n_total   = len(self._val_all_songs)
-            if getattr(self, "_val_rotate_steps", None):
-                print(f"[val] Window {self._val_window_idx + 1}: {k}/{n_total} songs -- {songs_str}  (rotate every {self._val_rotate_steps} steps)")
-            else:
-                print(f"[val] Locked {k}/{n_total} songs -- {songs_str}")
+            pass  # no console noise; val results print after each run
 
 
     # ------------------------------------------------------------------
@@ -662,7 +656,6 @@ class AudioLightningModule(pl.LightningModule):
                     seen_keys.add(key)
                     all_songs.append(key)
             self._lock_val_songs(by_song)
-            print(f"[val] {len(self._val_song_refs)} clips locked for 10s metric evaluation (2 per song).")
 
         # --- Check if it's time to rotate the song window ---
         rotate_steps = getattr(self, "_val_rotate_steps", None)
