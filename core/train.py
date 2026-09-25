@@ -1454,6 +1454,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         def on_train_epoch_start(self, trainer, pl_module):
             self._epoch_batches    = trainer.num_training_batches
             self._last_global_step = trainer.global_step
+            self._last_batch_idx   = 0
             self._val_t0           = None
             self._session_t0       = None   # set on first optimizer step
             self._session_done     = 0      # optimizer steps this session
@@ -1479,6 +1480,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             done  = batch_idx + 1
             total = self._epoch_batches
             pct   = 100 * done / total
+            self._last_batch_idx = batch_idx
             # Show last val metrics inline if available
             visqol = getattr(pl_module, "_last_val_visqol", None)
             sdr    = getattr(pl_module, "_last_val_sdr",    None)
@@ -1526,34 +1528,39 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         def on_validation_epoch_start(self, trainer, pl_module):
             self._val_t0     = _time.monotonic()
             self._val_sanity = trainer.sanity_checking
+            if not self._val_sanity:
+                print("\r  Validating...                                                  ", end="", flush=True)
 
         def on_validation_epoch_end(self, trainer, pl_module):
-            # Do NOT stop the timer here -- AudioLightningModule.on_validation_epoch_end
-            # fires AFTER this callback hook and runs _save_val_audio() + metrics.
-            # Timer stops in on_validation_end which fires after all module hooks.
             pass
 
         def on_validation_end(self, trainer, pl_module):
-            # Timer stops here -- after all val hooks including audio saves/metrics.
             val_dur = _time.monotonic() - self._val_t0 if self._val_t0 else 0.0
             if hasattr(self, '_val_elapsed'):
                 self._val_elapsed += val_dur
             if not getattr(self, '_val_sanity', True):
+                # Reprint the progress bar line in place with updated val metrics
                 visqol = getattr(pl_module, "_last_val_visqol", None)
                 sdr    = getattr(pl_module, "_last_val_sdr",    None)
                 sfr    = getattr(pl_module, "_last_val_sfr",    None)
                 sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
                 tbl    = getattr(pl_module, "_last_val_tbl",    None)
-                parts = []
-                if visqol is not None: parts.append(f"visqol={float(visqol):.3f}")
-                if sisdr  is not None: parts.append(f"sisdr={-float(sisdr):.3f}")
-                if sdr    is not None: parts.append(f"sdr={float(sdr):.3f}")
-                if sfr    is not None:
-                    flag = " noise^" if float(sfr) > 1.05 else ""
-                    parts.append(f"sfr={float(sfr):.3f}{flag}")
-                if tbl    is not None: parts.append(f"tbl={float(tbl):.4f}")
-                if parts:
-                    print(f"\n  [val] {' '.join(parts)}  ({val_dur:.1f}s)", flush=True)
+                val_parts = []
+                if visqol is not None: val_parts.append(f"visqol={float(visqol):.3f}")
+                if sisdr  is not None: val_parts.append(f"sisdr={-float(sisdr):.3f}")
+                if sdr    is not None: val_parts.append(f"sdr={float(sdr):.3f}")
+                if sfr    is not None: val_parts.append(f"sfr={float(sfr):.3f}")
+                if tbl    is not None: val_parts.append(f"tbl={float(tbl):.4f}")
+                val_str = "  " + "  ".join(val_parts) if val_parts else ""
+                step  = trainer.global_step
+                epoch = trainer.current_epoch
+                total = getattr(self, "_epoch_batches", 0)
+                done  = getattr(self, "_last_batch_idx", 0) + 1 if total else 0
+                pct   = 100 * done / total if total else 0.0
+                print(
+                    f"\r  {pct:5.1f}%  step={step}  {done}/{total}  --{val_str}",
+                    end="", flush=True
+                )
 
     callbacks: List[Callback] = [StepPrinter()]
 
