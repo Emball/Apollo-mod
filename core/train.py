@@ -720,14 +720,18 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         _json.dump(_manifest_params(), _f, indent=2)
     return total
 
-def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 30.0, fixed_delay: int = None) -> None:
+def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 10.0, fixed_delay: int = None) -> None:
     """
-    Extract exactly one random clip of clip_sec from each LQ/HQ pair in src_root.
-    Reuses the per-file WAV cache from _chunk_split. Writes one LQ and one HQ WAV
-    per song into dst_root/LQ/ and dst_root/HQ/.
+    Extract two content-rich 10s clips per LQ/HQ pair in src_root, following ViSQOL
+    input guidelines:
+      - ~8-10s per clip (clip_sec, default 10)
+      - Selected by highest-RMS energy windows (not silence, not intro/outro)
+      - Mono-mixed for RMS selection only; saved as stereo at model SR
+      - Two non-overlapping clips per song, with at least clip_sec gap between them
+    Files written: {stem}_clip0.wav, {stem}_clip1.wav in dst_root/LQ/ and dst_root/HQ/.
     """
-    import random as _random
-    import hashlib, tempfile
+    import hashlib
+    import torch
     import torchaudio
 
     lq_src = os.path.join(src_root, "LQ")
@@ -738,7 +742,6 @@ def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 30.0, fix
     os.makedirs(os.path.join(dst_root, "LQ"), exist_ok=True)
     os.makedirs(os.path.join(dst_root, "HQ"), exist_ok=True)
 
-    # Reuse the same per-file WAV cache key as _chunk_split
     def _file_md5(path):
         h = hashlib.md5()
         with open(path, "rb") as f:
@@ -769,9 +772,53 @@ def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 30.0, fix
             torchaudio.save(dst, wav, _SR, encoding="PCM_F", bits_per_sample=32)
         return dst
 
+    def _pick_two_rms_clips(wav: "torch.Tensor", clip_samples: int, sr: int,
+                             margin_sec: float = 5.0) -> "list[int]":
+        """
+        Return start-sample offsets for two non-overlapping highest-RMS windows.
+        Skips the first and last margin_sec of the file. Clips must be separated
+        by at least clip_samples samples.
+        mono wav: shape (T,)
+        """
+        margin = int(margin_sec * sr)
+        n = wav.shape[-1]
+        search_start = margin
+        search_end   = n - margin - clip_samples
+        if search_end <= search_start:
+            # File too short for margin -- fall back to start/middle
+            mid = max(0, n // 2 - clip_samples // 2)
+            return [0, min(mid, max(0, n - clip_samples))]
+
+        # Scan with hop = clip_samples // 4 for reasonable resolution
+        hop = max(1, clip_samples // 4)
+        offsets = list(range(search_start, search_end + 1, hop))
+        if not offsets:
+            offsets = [search_start]
+
+        rms_scores = []
+        for s in offsets:
+            window = wav[s: s + clip_samples]
+            rms = float(window.pow(2).mean().sqrt())
+            rms_scores.append((rms, s))
+        rms_scores.sort(key=lambda x: -x[0])
+
+        # Best clip
+        best_rms, best_start = rms_scores[0]
+        # Second-best non-overlapping clip (gap >= clip_samples)
+        second_start = None
+        for rms, s in rms_scores[1:]:
+            if abs(s - best_start) >= clip_samples:
+                second_start = s
+                break
+        if second_start is None:
+            # Fallback: place second clip as far from first as possible
+            candidate = search_end if best_start < (search_start + search_end) // 2 else search_start
+            second_start = max(search_start, min(search_end, candidate))
+
+        return sorted([best_start, second_start])
+
     clip_samples = int(clip_sec * _SR)
 
-    # Match LQ/HQ pairs by stem, supporting any audio format (wav, flac, mp3)
     def _find_audio_pairs(lq_dir, hq_dir):
         lq_map = {os.path.splitext(f)[0]: os.path.join(lq_dir, f)
                   for f in os.listdir(lq_dir)
@@ -785,38 +832,45 @@ def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 30.0, fix
     pairs = _find_audio_pairs(lq_src, hq_src)
 
     print_only(f"\n[data/val] ==========================================================")
-    print_only(f"[data/val] Extracting {clip_sec:.0f}s clips from {len(pairs)} val pair(s)")
+    print_only(f"[data/val] Extracting 2x{clip_sec:.0f}s clips (highest-RMS, ViSQOL-compliant)")
+    print_only(f"[data/val] from {len(pairs)} val pair(s)")
     print_only(f"[data/val] ==========================================================\n")
     n = 0
     for song_idx, (lq_path, hq_path) in enumerate(pairs):
-        lq_wav = _cached_wav(lq_path)
-        hq_wav = _cached_wav(hq_path)
+        lq_wav_path = _cached_wav(lq_path)
+        hq_wav_path = _cached_wav(hq_path)
 
-        lq_info = torchaudio.info(lq_wav)
-        hq_info = torchaudio.info(hq_wav)
-        min_frames = min(lq_info.num_frames, hq_info.num_frames)
+        lq_wav, _ = torchaudio.load(lq_wav_path)  # already at _SR, stereo
+        hq_wav, _ = torchaudio.load(hq_wav_path)
 
-        if min_frames <= clip_samples:
-            start = 0
-        else:
-            start = _random.randint(0, min_frames - clip_samples)
+        min_frames = min(lq_wav.shape[-1], hq_wav.shape[-1])
 
-        lq_start = max(0, start - fixed_delay) if fixed_delay and fixed_delay > 0 else start
-        hq_start = max(0, start + fixed_delay) if fixed_delay and fixed_delay < 0 else start
-
-        lq_clip, _ = torchaudio.load(lq_wav, frame_offset=lq_start, num_frames=clip_samples)
-        hq_clip, _ = torchaudio.load(hq_wav, frame_offset=hq_start, num_frames=clip_samples)
-        if lq_clip.shape[0] == 1: lq_clip = lq_clip.repeat(2, 1)
-        if hq_clip.shape[0] == 1: hq_clip = hq_clip.repeat(2, 1)
+        # Mono mix HQ for RMS selection (reference should be clean per ViSQOL spec)
+        hq_mono = hq_wav[:, :min_frames].mean(dim=0)  # (T,)
+        starts = _pick_two_rms_clips(hq_mono, clip_samples, _SR)
 
         stem = os.path.splitext(os.path.basename(lq_path))[0]
-        torchaudio.save(os.path.join(dst_root, "LQ", f"{stem}.wav"), lq_clip, _SR, encoding="PCM_F", bits_per_sample=32)
-        torchaudio.save(os.path.join(dst_root, "HQ", f"{stem}.wav"), hq_clip, _SR, encoding="PCM_F", bits_per_sample=32)
+        for clip_idx, start in enumerate(starts):
+            lq_start = max(0, start - fixed_delay) if fixed_delay and fixed_delay > 0 else start
+            hq_start = max(0, start + fixed_delay) if fixed_delay and fixed_delay < 0 else start
 
-        print_only(f"[data/val]   {stem}: {clip_sec:.0f}s clip @ {start//_SR}s  [{song_idx+1}/{len(pairs)}]")
-        n += 1
+            lq_clip = lq_wav[:, lq_start: lq_start + clip_samples]
+            hq_clip = hq_wav[:, hq_start: hq_start + clip_samples]
 
-    print_only(f"[data/val] Done -- {n} clip pairs -> {dst_root}")
+            # Pad to exact clip_samples if the file was shorter
+            if lq_clip.shape[-1] < clip_samples:
+                lq_clip = torch.nn.functional.pad(lq_clip, (0, clip_samples - lq_clip.shape[-1]))
+            if hq_clip.shape[-1] < clip_samples:
+                hq_clip = torch.nn.functional.pad(hq_clip, (0, clip_samples - hq_clip.shape[-1]))
+
+            out_name = f"{stem}_clip{clip_idx}.wav"
+            torchaudio.save(os.path.join(dst_root, "LQ", out_name), lq_clip, _SR, encoding="PCM_F", bits_per_sample=32)
+            torchaudio.save(os.path.join(dst_root, "HQ", out_name), hq_clip, _SR, encoding="PCM_F", bits_per_sample=32)
+
+            print_only(f"[data/val]   {stem} clip{clip_idx}: {clip_sec:.0f}s @ {start//_SR}s  [{song_idx+1}/{len(pairs)}]")
+            n += 1
+
+    print_only(f"[data/val] Done -- {n} clip files -> {dst_root}")
 
 
 def prepare_data(cfg: DictConfig) -> None:
@@ -870,10 +924,10 @@ def prepare_data(cfg: DictConfig) -> None:
         train_chunks = os.path.join(_CHUNK_CACHE_DIR, train_key, "train")
         _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, fixed_delay=fixed_delay)
 
-    # Val clips: one random 30s clip per song, cached to disk.
+    # Val clips: two 10s highest-RMS clips per song (ViSQOL-compliant), cached to disk.
     # Reuses the WAV conversion cache from _chunk_split so no re-encoding.
-    val_clip_sec = float(getattr(cfg.datas, "segment_sec", 3)) * 10
-    val_clip_key = _chunk_cache_key(data_val, fixed_delay, None, extra=f"valclip_{val_clip_sec:.0f}")
+    val_clip_sec = 10.0
+    val_clip_key = _chunk_cache_key(data_val, fixed_delay, None, extra=f"valclip_2x{val_clip_sec:.0f}s_rms")
     val_wav_dir  = os.path.join(_CHUNK_CACHE_DIR, val_clip_key, "val")
     val_lq_check = os.path.join(val_wav_dir, "LQ")
     if os.path.isdir(val_lq_check) and any(f.endswith(".wav") for f in os.listdir(val_lq_check)):
@@ -1039,8 +1093,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # Recompute val_clip_key here (same formula as prepare_data) for use in the baseline cache.
     _vck_data_val    = os.path.join(_REPO_ROOT, "data", cfg.exp.name, "val")
     _vck_fixed_delay = int(cfg.datas.fixed_align_samples) if getattr(cfg.datas, "fixed_align_samples", None) else None
-    _vck_clip_sec    = float(getattr(cfg.datas, "segment_sec", 3)) * 10
-    val_clip_key     = _chunk_cache_key(_vck_data_val, _vck_fixed_delay, None, extra=f"valclip_{_vck_clip_sec:.0f}")
+    _vck_clip_sec    = 10.0
+    val_clip_key     = _chunk_cache_key(_vck_data_val, _vck_fixed_delay, None, extra=f"valclip_2x{_vck_clip_sec:.0f}s_rms")
 
     # Verify chunks exist -- if data/ was empty, provide a clear error
     train_lq   = os.path.join(cfg.datas.train_dir, "LQ")

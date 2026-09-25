@@ -473,7 +473,7 @@ class ChunkedPairDataset(Dataset):
 
         aug = self.aug_cfg
         if label == "Validation":
-            print(f"Validation dataset: {len(self.pairs)} 30s chunk pairs")
+            print(f"Validation dataset: {len(self.pairs)} 10s clip pairs")
             return
         print(f"Training dataset : {len(self.pairs)} chunk pairs")
         print(

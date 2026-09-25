@@ -670,7 +670,7 @@ class AudioLightningModule(pl.LightningModule):
                     seen_keys.add(key)
                     all_songs.append(key)
             self._lock_val_songs(by_song)
-            print(f"[val] {len(self._val_song_refs)} songs locked for 30s clip metric evaluation.")
+            print(f"[val] {len(self._val_song_refs)} clips locked for 10s metric evaluation (2 per song).")
 
         # --- Check if it's time to rotate the song window ---
         rotate_steps = getattr(self, "_val_rotate_steps", None)
