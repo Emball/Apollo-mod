@@ -189,7 +189,7 @@ def _slice_and_save(
     hq_wav  = hq_wav[:, :min_len]
 
     song_peak = max(lq_wav.abs().max().item(), hq_wav.abs().max().item())
-    if song_peak > 0:
+    if song_peak > 1.0:
         lq_wav = lq_wav / song_peak
         hq_wav = hq_wav / song_peak
 

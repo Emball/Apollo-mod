@@ -412,7 +412,7 @@ def load_wav(path: str, target_sr: int = SR) -> torch.Tensor:
 
 def normalize_pair(lq: torch.Tensor, hq: torch.Tensor):
     scale = max(lq.abs().max(), hq.abs().max())
-    if scale > 0:
+    if scale > 1.0:
         lq = lq / scale
         hq = hq / scale
     return lq, hq

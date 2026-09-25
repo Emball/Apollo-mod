@@ -339,10 +339,10 @@ def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path,
     # Keep a copy of the un-normalized original for spectral merge.
     original = audio.squeeze(0).clone()  # [2, T]
 
-    # Normalize to match training: divide by peak so the model sees [-1, 1] input.
+    # Normalize only if the file is already clipping; otherwise pass through at original level.
     # Store the scale so we can restore the original level after inference.
     peak = audio.abs().max().item()
-    if peak > 0:
+    if peak > 1.0:
         audio = audio / peak
         original_norm = original / peak
     else:
@@ -580,8 +580,10 @@ def main(
     else:
         original = audio.squeeze(0).clone()
         peak = audio.abs().max().item()
-        if peak > 0:
+        if peak > 1.0:
             audio = audio / peak
+        else:
+            peak = 1.0
         with torch.no_grad():
             enhanced = model(audio.to(device))
         enhanced = enhanced.squeeze(0).cpu() * peak
