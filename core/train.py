@@ -1298,7 +1298,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             print_only("[weights] Pretrained weights loaded.")
 
     n_extra = cfg.training.get("extra_layers", 0)
-    if n_extra > 0 and not is_resume:
+    if n_extra > 0 and ckpt_path is None:
         # Freeze all pretrained weights and append new zero-init BSNet layers.
         # append_extra_layers handles all freezing, so skip freeze_early_layers.
         append_extra_layers(model, n_extra)
