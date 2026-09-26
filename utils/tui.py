@@ -312,7 +312,7 @@ def _ckpt_score(stem: str) -> tuple:
             return default
 
     visqol = _get(r"visqol=(-?[\d.]+)", -999.0)
-    sisdr  = _get(r"sisdr=(-?[\d.]+)",   -999.0)   # val_loss is SI-SDR
+    sisdr  = _get(r"sisdr=(-?[\d.]+)",   -999.0)
     hfnr    = _get(r"hfnr=(-?[\d.]+)",     999.0)   # lower hfnr is better → negate
 
     if visqol < 0:

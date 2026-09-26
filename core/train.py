@@ -1522,7 +1522,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             tbl    = getattr(pl_module, "_last_val_tbl",    None)
             val_parts = []
             if visqol is not None: val_parts.append(f"visqol={float(visqol):.3f}")
-            if sisdr  is not None: val_parts.append(f"sisdr={-float(sisdr):.3f}")
+            if sisdr  is not None: val_parts.append(f"sisdr={float(sisdr):.3f}")
             if hfnr    is not None: val_parts.append(f"hfnr={float(hfnr):.3f}")
             if tbl    is not None: val_parts.append(f"tbl={float(tbl):.4f}")
             val_str = "  " + "  ".join(val_parts) if val_parts else ""
@@ -1578,7 +1578,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 tbl    = getattr(pl_module, "_last_val_tbl",    None)
                 val_parts = []
                 if visqol is not None: val_parts.append(f"visqol={float(visqol):.3f}")
-                if sisdr  is not None: val_parts.append(f"sisdr={-float(sisdr):.3f}")
+                if sisdr  is not None: val_parts.append(f"sisdr={float(sisdr):.3f}")
                 if hfnr    is not None: val_parts.append(f"hfnr={float(hfnr):.3f}")
                 if tbl    is not None: val_parts.append(f"tbl={float(tbl):.4f}")
                 val_str = "  " + "  ".join(val_parts) if val_parts else ""
@@ -1700,7 +1700,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         def _apply_baseline_to_system(bl_dict: dict) -> None:
             """Populate system._last_val_* from a baseline results dict so the
             progress bar shows baseline values before the first training step."""
-            system._last_val_sisdr  = bl_dict.get("sisdr")          # negative SI-SDR
+            system._last_val_sisdr  = bl_dict.get("sisdr")
             system._last_val_hfnr    = bl_dict.get("hfnr")
             system._last_val_visqol = bl_dict.get("visqol")
 

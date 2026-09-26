@@ -23,7 +23,7 @@ configs/                    -- One YAML per experiment (ground truth, user-owned
 | Metric | Key | Better | Notes |
 |--------|-----|--------|-------|
 | ViSQOL | `visqol` | higher | Primary; perceptual score |
-| SI-SDR | `sisdr` (neg) | higher | Waveform quality |
+| SI-SDR | `sisdr` | higher | Waveform quality |
 | HFNR | `hfnr` | lower | High-Frequency Noise Ratio; canary for HF artifact injection |
 
 SDR removed as redundant with SI-SDR. MS-STFT removed (superseded by ViSQOL). `sfr` renamed to `hfnr` throughout.

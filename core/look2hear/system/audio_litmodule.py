@@ -620,8 +620,9 @@ class AudioLightningModule(pl.LightningModule):
 
         if self._val_loss_count > 0:
             avg_val_loss = self._val_loss_sum / self._val_loss_count
-            self.log("sisdr", avg_val_loss, prog_bar=True, logger=True)
-            self._last_val_sisdr = avg_val_loss
+            sisdr_val = -float(avg_val_loss)   # loss is negated SI-SDR; flip to real value
+            self.log("sisdr", sisdr_val, prog_bar=True, logger=True)
+            self._last_val_sisdr = sisdr_val
         self._val_loss_sum   = 0.0
         self._val_loss_count = 0
         self.log("lr", self.optimizer[0].param_groups[0]["lr"], prog_bar=True)
