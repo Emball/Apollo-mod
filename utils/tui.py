@@ -1179,21 +1179,26 @@ def _util_merge_checkpoints() -> None:
     sd_a = _get_state(ckpt_a)
     sd_b = _get_state(ckpt_b)
 
-    if set(sd_a.keys()) != set(sd_b.keys()):
-        missing_in_b = set(sd_a.keys()) - set(sd_b.keys())
-        missing_in_a = set(sd_b.keys()) - set(sd_a.keys())
-        console.print("[red]Architecture mismatch — checkpoints have different keys.[/]")
-        if missing_in_b:
-            console.print(f"[dim]Keys in A not in B: {len(missing_in_b)} (e.g. {next(iter(missing_in_b))})[/]")
-        if missing_in_a:
-            console.print(f"[dim]Keys in B not in A: {len(missing_in_a)} (e.g. {next(iter(missing_in_a))})[/]")
-        console.input("Press Enter.")
-        return
+    keys_a = set(sd_a.keys())
+    keys_b = set(sd_b.keys())
+    shared = keys_a & keys_b
+    only_a = keys_a - keys_b
+    only_b = keys_b - keys_a
 
-    console.print(f"[dim]Blending {len(sd_a)} tensors at ratio {ratio:.2f} A / {1-ratio:.2f} B ...[/]")
+    if only_a or only_b:
+        console.print(f"[yellow]Partial merge: {len(shared)} shared keys blended, "
+                      f"{len(only_a)} kept from A only, {len(only_b)} kept from B only.[/]")
+
+    console.print(f"[dim]Blending {len(shared)} tensors at ratio {ratio:.2f} A / {1-ratio:.2f} B ...[/]")
     merged_sd = {}
     skipped = 0
-    for key in sd_a:
+
+    for key in only_a:
+        merged_sd[key] = sd_a[key]
+    for key in only_b:
+        merged_sd[key] = sd_b[key]
+
+    for key in shared:
         t_a = sd_a[key]
         t_b = sd_b[key]
         if t_a.shape != t_b.shape:
