@@ -13,6 +13,7 @@ from omegaconf import OmegaConf, open_dict
 import argparse
 import pytorch_lightning as pl
 import torch
+import torch.nn as nn
 import hydra
 from pytorch_lightning import Callback, LightningDataModule, LightningModule, Trainer
 from omegaconf import DictConfig
