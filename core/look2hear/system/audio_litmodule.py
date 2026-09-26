@@ -102,10 +102,10 @@ def _hf_noise_ratio(est: "torch.Tensor", ref: "torch.Tensor", sr: int = 44100) -
     return (_flatness(est) + eps) / (_flatness(ref) + eps)
 
 
-def _target_band_mae_tensor(est: "torch.Tensor", ref: "torch.Tensor",
-                             sr: int = 44100,
-                             lo_hz: float = 13000.0,
-                             hi_hz: float = 19000.0) -> "torch.Tensor":
+def _target_band_mae(est: "torch.Tensor", ref: "torch.Tensor",
+                     sr: int = 44100,
+                     lo_hz: float = 13000.0,
+                     hi_hz: float = 19000.0) -> "torch.Tensor":
     """Differentiable version for use in training_step loss."""
     n_fft = 2048
     hop   = n_fft // 4
@@ -124,15 +124,6 @@ def _target_band_mae_tensor(est: "torch.Tensor", ref: "torch.Tensor",
     return torch.mean(torch.abs(torch.log(e_mag + eps) - torch.log(r_mag + eps)))
 
 
-def _target_band_mae(est: "torch.Tensor", ref: "torch.Tensor",
-                     sr: int = 44100,
-                     lo_hz: float = 13000.0,
-                     hi_hz: float = 19000.0) -> float:
-    """
-    Mean absolute log-magnitude error in a configurable frequency band.
-    Lower = better. Disabled by default; enabled via cfg.metrics.target_band_loss.
-    """
-    return _target_band_mae_tensor(est, ref, sr=sr, lo_hz=lo_hz, hi_hz=hi_hz).item()
 
 
 # VISQOL loader -- lazy, cached, gracefully absent
@@ -260,7 +251,7 @@ class AudioLightningModule(pl.LightningModule):
         self._last_val_sisdr  = None
         self._last_val_hfnr    = None
         self._last_val_visqol = None
-        self._last_val_tbl    = None   # target_band_loss (None when disabled)
+
 
         # VISQOL alternation: compute every other val run, carry forward on skipped runs
 
@@ -349,9 +340,9 @@ class AudioLightningModule(pl.LightningModule):
         ) / self.grad_accum_steps
 
         if self.target_band_loss_enabled:
-            tbl = _target_band_mae_tensor(output, ori_data,
-                                          lo_hz=self.target_band_loss_lo_hz,
-                                          hi_hz=self.target_band_loss_hi_hz)
+            tbl = _target_band_mae(output, ori_data,
+                                   lo_hz=self.target_band_loss_lo_hz,
+                                   hi_hz=self.target_band_loss_hi_hz)
             loss_g = loss_g + self.target_band_loss_weight * tbl / self.grad_accum_steps
 
         self._accum_loss_g = (self._accum_loss_g or 0.0) + loss_g.detach()
@@ -551,8 +542,8 @@ class AudioLightningModule(pl.LightningModule):
 
         import look2hear.losses as _ll
 
-        hfnr_sum = visqol_sum = tbl_sum = 0.0
-        count = visqol_count = tbl_count = 0
+        hfnr_sum = visqol_sum = 0.0
+        count = visqol_count = 0
 
 
         song_items = list(self._val_song_refs.items())
@@ -595,12 +586,6 @@ class AudioLightningModule(pl.LightningModule):
                             visqol_sum   += v
                             visqol_count += 1
 
-                    if self.target_band_loss_enabled:
-                        tbl_sum   += _target_band_mae(e, r,
-                                                      lo_hz=self.target_band_loss_lo_hz,
-                                                      hi_hz=self.target_band_loss_hi_hz)
-                        tbl_count += 1
-
                     # write audio immediately and release tensors
                     if epoch_dir is not None:
                         try:
@@ -621,8 +606,6 @@ class AudioLightningModule(pl.LightningModule):
             self._last_val_hfnr = hfnr_sum / count
         if visqol_count > 0:
             self._last_val_visqol = visqol_sum / visqol_count
-        if tbl_count > 0:
-            self._last_val_tbl = tbl_sum / tbl_count
 
     # ------------------------------------------------------------------
     # Validation epoch end
@@ -632,7 +615,7 @@ class AudioLightningModule(pl.LightningModule):
         self._last_val_sisdr  = None
         self._last_val_hfnr    = None
         self._last_val_visqol = None
-        self._last_val_tbl    = None
+
 
         if self._val_loss_count > 0:
             avg_val_loss = self._val_loss_sum / self._val_loss_count
@@ -694,7 +677,7 @@ class AudioLightningModule(pl.LightningModule):
 
         _hfnr   = self._last_val_hfnr
         _visqol = self._last_val_visqol
-        _tbl    = self._last_val_tbl
+
 
         # Update window-best tracking
         if _visqol is not None and _visqol > self._val_window_best.get("visqol", float("-inf")):
@@ -704,8 +687,6 @@ class AudioLightningModule(pl.LightningModule):
 
         self.log("hfnr",   float(_hfnr)   if _hfnr   is not None else 0.0, prog_bar=False, logger=True)
         self.log("visqol", float(_visqol) if _visqol is not None else -1.0, prog_bar=False, logger=True)
-        if self.target_band_loss_enabled:
-            self.log("val_tbl", float(_tbl) if _tbl is not None else 0.0, prog_bar=False, logger=True)
 
     # ------------------------------------------------------------------
     # Checkpoint persistence
