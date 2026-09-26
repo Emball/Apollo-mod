@@ -99,6 +99,33 @@ from look2hear.utils import print_only
 import warnings
 warnings.filterwarnings("ignore")
 
+def _migrate_legacy_ckpt_names(base_dir: str) -> None:
+    """Rename legacy-formatted checkpoint files to the current naming scheme."""
+    import re as _re
+    _SKIP = {"last.ckpt", "interrupted.ckpt"}
+    for root, _, files in os.walk(base_dir):
+        for fname in files:
+            if not fname.endswith(".ckpt") or fname in _SKIP:
+                continue
+            stem = fname[:-5]
+            new  = stem
+            new  = new.replace("val_loss=",   "sisdr=")
+            new  = new.replace("val_visqol=", "visqol=")
+            new  = new.replace("val_sfr=",    "hfnr=")
+            new  = new.replace("val_hfnr=",   "hfnr=")
+            new  = _re.sub(r"-(?<!si)sdr=[\d.]+", "", new)
+            if new == stem:
+                continue
+            src = os.path.join(root, fname)
+            dst = os.path.join(root, new + ".ckpt")
+            if os.path.exists(dst):
+                continue
+            try:
+                os.rename(src, dst)
+            except Exception as exc:
+                print_only(f"[migrate] could not rename {fname}: {exc}")
+
+
 # Constants -- chunk size is read from cfg.datas.segment_sec at runtime in prepare_data()
 _SR      = 44100
 _OVERLAP = 0.5
@@ -1127,6 +1154,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         # Find the most recently modified run folder that has checkpoints
         _run_dir = None
         if os.path.isdir(_base_dir):
+            _migrate_legacy_ckpt_names(_base_dir)
             _subdirs = [
                 os.path.join(_base_dir, d)
                 for d in os.listdir(_base_dir)

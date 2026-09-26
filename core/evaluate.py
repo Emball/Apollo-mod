@@ -70,6 +70,35 @@ _FILENAME_PATS = {
 
 
 # ---------------------------------------------------------------------------
+# Legacy checkpoint filename migration
+# ---------------------------------------------------------------------------
+
+def _migrate_legacy_ckpt_names_eval(ckpt_dir: str) -> None:
+    """Rename legacy-formatted .ckpt files in ckpt_dir to the current scheme."""
+    _SKIP = {"last.ckpt", "interrupted.ckpt"}
+    for fname in os.listdir(ckpt_dir):
+        if not fname.endswith(".ckpt") or fname in _SKIP:
+            continue
+        stem = fname[:-5]
+        new  = stem
+        new  = new.replace("val_loss=",   "sisdr=")
+        new  = new.replace("val_visqol=", "visqol=")
+        new  = new.replace("val_sfr=",    "hfnr=")
+        new  = new.replace("val_hfnr=",   "hfnr=")
+        new  = re.sub(r"-(?<!si)sdr=[\d.]+", "", new)
+        if new == stem:
+            continue
+        src = os.path.join(ckpt_dir, fname)
+        dst = os.path.join(ckpt_dir, new + ".ckpt")
+        if os.path.exists(dst):
+            continue
+        try:
+            os.rename(src, dst)
+        except Exception as exc:
+            print(f"[migrate] could not rename {fname}: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # VISQOL
 # ---------------------------------------------------------------------------
 
@@ -400,6 +429,7 @@ def run_evaluation(
     print_fn(f"[eval] {len(chunks)} chunks across {len(_by_s)} songs "
              f"({min(_by_s.values())}-{max(_by_s.values())} per song)")
 
+    _migrate_legacy_ckpt_names_eval(ckpt_dir)
     ckpt_files = sorted(
         f for f in os.listdir(ckpt_dir)
         if f.endswith(".ckpt") and (pattern is None or pattern in f)

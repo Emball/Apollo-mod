@@ -49,6 +49,64 @@ AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".aac", ".m4a", ".aiff", ".aif"}
 console = Console()
 
 # ---------------------------------------------------------------------------
+# Legacy checkpoint filename migration
+# ---------------------------------------------------------------------------
+
+def _migrate_checkpoint_name(path: Path) -> Path:
+    """
+    Rename a single checkpoint file from any legacy naming scheme to the current one.
+    Returns the (possibly new) path. No-ops if the name is already current.
+
+    Legacy → current:
+      val_loss=    → sisdr=
+      val_visqol=  → visqol=
+      val_sfr=     → hfnr=
+      val_hfnr=    → hfnr=
+      -sdr=<val>   → stripped  (bare sdr, not sisdr)
+    """
+    import re as _re
+    stem = path.stem          # excludes .ckpt
+    new  = stem
+
+    new = new.replace("val_loss=",   "sisdr=")
+    new = new.replace("val_visqol=", "visqol=")
+    new = new.replace("val_sfr=",    "hfnr=")
+    new = new.replace("val_hfnr=",   "hfnr=")
+    # Strip bare -sdr=<value> segments (not sisdr=)
+    new = _re.sub(r"-(?<!si)sdr=[\d.]+", "", new)
+
+    if new == stem:
+        return path  # nothing changed
+
+    new_path = path.with_name(new + ".ckpt")
+    if new_path.exists():
+        return new_path  # already migrated (e.g. duplicate run)
+    try:
+        path.rename(new_path)
+    except Exception as exc:
+        print(f"[migrate] could not rename {path.name}: {exc}")
+        return path
+    return new_path
+
+
+def migrate_checkpoints(runs_dir: Path) -> int:
+    """
+    Walk all checkpoint dirs under runs_dir and migrate any legacy-named .ckpt files.
+    Returns count of files renamed.
+    """
+    count = 0
+    if not runs_dir.exists():
+        return count
+    for ckpt in runs_dir.rglob("*.ckpt"):
+        if ckpt.name in ("last.ckpt", "interrupted.ckpt"):
+            continue
+        result = _migrate_checkpoint_name(ckpt)
+        if result != ckpt:
+            count += 1
+    return count
+
+
+# ---------------------------------------------------------------------------
 # Persistent state
 # ---------------------------------------------------------------------------
 
@@ -1204,6 +1262,7 @@ def screen_evaluate(state: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    migrate_checkpoints(RUNS_DIR)
     state = _load_state()
 
     MAIN_ITEMS = [
