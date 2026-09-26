@@ -1570,15 +1570,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         print_only("[train] limit_val_batches=0 -- skipping early_stopping and checkpoint callbacks")
 
     checkpoint = None
-    if cfg.get("early_stopping") and not val_disabled:
-        print_only(f"Instantiating early_stopping")
-        es = hydra.utils.instantiate(cfg.early_stopping)
-        # Monitor sfr directly -- it's the metric that actually flags GAN
-        # collapse (discriminator-satisfying noise instead of real signal).
-        # Lower = better; the "noise^" flag in the printout fires above 1.05.
-        es.monitor = "val_sfr"
-        es.mode    = "min"
-        callbacks.append(es)
     if cfg.get("checkpoint") and not val_disabled:
         print_only(f"Instantiating checkpoint")
         checkpoint = hydra.utils.instantiate(cfg.checkpoint)

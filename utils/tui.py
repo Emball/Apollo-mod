@@ -231,39 +231,64 @@ def _list_configs() -> list[Path]:
     return sorted(configs, key=lambda p: p.stem)
 
 
+def _ckpt_score(stem: str) -> tuple:
+    """
+    Composite score tuple for checkpoint ranking.
+    Primary: val_visqol (higher better).
+    Tiebreakers in order: val_sisdr (val_loss), val_sdr, val_sfr (lower sfr = less noise).
+    Returns a tuple suitable for max() comparison; missing metrics use worst-case values.
+    """
+    import re as _re
+    stem = _re.sub(r"^\[\d+\]-", "", stem)
+    def _get(pattern, default):
+        m = _re.search(pattern, stem)
+        try:
+            return float(m.group(1)) if m else default
+        except Exception:
+            return default
+
+    visqol = _get(r"val_visqol=(-?[\d.]+)", -999.0)
+    sisdr  = _get(r"val_loss=(-?[\d.]+)",   -999.0)   # val_loss is SI-SDR
+    sdr    = _get(r"val_sdr=(-?[\d.]+)",    -999.0)
+    sfr    = _get(r"val_sfr=(-?[\d.]+)",     999.0)   # lower sfr is better → negate
+
+    if visqol < 0:
+        return None  # no visqol = unscored
+    return (visqol, sisdr, sdr, -sfr)
+
+
 def _config_summary(cfg_path: Path) -> str:
     """Return a one-line summary of training state for this config."""
     try:
         import yaml  # type: ignore
+        import re as _re
         cfg = yaml.safe_load(cfg_path.read_text())
         name = cfg.get("exp", {}).get("name") or cfg_path.stem
         runs_path = RUNS_DIR / name
         if not runs_path.exists():
             return "no runs yet"
-        # find best checkpoint across all timestamped runs
-        import re as _re
-        best_visqol = None
-        best_step   = None
+        best_score = None
+        best_stem  = None
+        best_step  = None
         for run_dir in sorted(runs_path.iterdir()):
             ckpt_dir = run_dir / "checkpoints"
             if not ckpt_dir.exists():
                 continue
             for ckpt in ckpt_dir.glob("*.ckpt"):
-                stem = _re.sub(r"^\[\d+\]-", "", ckpt.stem)
-                m = _re.search(r"val_visqol=(-?[\d.]+)", stem)
-                s = _re.search(r"step=(\d+)", stem)
-                if m and s:
-                    try:
-                        visqol = float(m.group(1))
-                        step   = int(s.group(1))
-                        if visqol >= 0 and (best_visqol is None or visqol > best_visqol):
-                            best_visqol = visqol
-                            best_step   = step
-                    except Exception:
-                        pass
-        if best_visqol is not None:
-            return f"best visqol={best_visqol:.3f}  step={best_step}"
-        return "checkpoint found (no loss in name)"
+                score = _ckpt_score(ckpt.stem)
+                if score is None:
+                    continue
+                s = _re.search(r"step=(\d+)", ckpt.stem)
+                step = int(s.group(1)) if s else 0
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_stem  = ckpt.stem
+                    best_step  = step
+        if best_score is not None:
+            visqol, sisdr, sdr, neg_sfr = best_score
+            return (f"best visqol={visqol:.3f}  sisdr={sisdr:.2f}"
+                    f"  sdr={sdr:.2f}  sfr={-neg_sfr:.3f}  step={best_step}")
+        return "checkpoint found (no metrics in name)"
     except Exception:
         return ""
 
@@ -273,8 +298,7 @@ def _config_summary(cfg_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 def _find_best_checkpoint(cfg_path: Path) -> Path | None:
-    """Find best checkpoint (highest sisdr) for a config."""
-    import re as _re
+    """Find best checkpoint using composite score: visqol > sisdr > sdr > sfr."""
     try:
         import yaml
         cfg = yaml.safe_load(cfg_path.read_text())
@@ -282,23 +306,19 @@ def _find_best_checkpoint(cfg_path: Path) -> Path | None:
         runs_path = RUNS_DIR / name
         if not runs_path.exists():
             return None
-        best_visqol = None
-        best_ckpt   = None
+        best_score = None
+        best_ckpt  = None
         for run_dir in sorted(runs_path.iterdir()):
             ckpt_dir = run_dir / "checkpoints"
             if not ckpt_dir.exists():
                 continue
             for ckpt in ckpt_dir.glob("*.ckpt"):
-                stem = _re.sub(r"^\[\d+\]-", "", ckpt.stem)
-                m = _re.search(r"val_visqol=(-?[\d.]+)", stem)
-                if m:
-                    try:
-                        visqol = float(m.group(1))
-                        if visqol >= 0 and (best_visqol is None or visqol > best_visqol):
-                            best_visqol = visqol
-                            best_ckpt   = ckpt
-                    except Exception:
-                        pass
+                score = _ckpt_score(ckpt.stem)
+                if score is None:
+                    continue
+                if best_score is None or score > best_score:
+                    best_score = score
+                    best_ckpt  = ckpt
         return best_ckpt
     except Exception:
         return None
@@ -1100,12 +1120,15 @@ def _util_clean_checkpoints() -> None:
             ckpt_dir = run_dir / "checkpoints"
             if not ckpt_dir.exists():
                 continue
-            ckpts = sorted(
-                [c for c in ckpt_dir.glob("*.ckpt") if "val_loss=" in c.stem],
-                key=lambda c: float(c.stem.split("val_loss=")[1])
-            )
-            # keep best 5
-            to_delete = ckpts[5:]
+            all_ckpts = list(ckpt_dir.glob("*.ckpt"))
+            # Score each checkpoint; unscored ones go to the bottom
+            scored = []
+            for c in all_ckpts:
+                score = _ckpt_score(c.stem)
+                scored.append((score or (-999.0, -999.0, -999.0, -999.0), c))
+            # Sort best-first, keep top 5
+            scored.sort(key=lambda x: x[0], reverse=True)
+            to_delete = [c for _, c in scored[5:]]
             for c in to_delete:
                 c.unlink()
                 removed += 1
