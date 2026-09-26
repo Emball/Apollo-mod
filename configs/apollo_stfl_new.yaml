@@ -14,6 +14,7 @@ optimizations:
 training:
   n_layers_to_freeze: 6
   extra_layers: 4
+  extra_layers_init_scale: 0.5  # 0.5 = half-weight copy of last pretrained layer; 0.0 = zero-init
   val_songs: 6
   val_rotate_every: 20000
   grad_accum_steps: 1
