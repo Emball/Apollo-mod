@@ -72,7 +72,8 @@ def _migrate_checkpoint_name(path: Path) -> Path:
     new = new.replace("val_visqol=", "visqol=")
     new = new.replace("val_sfr=",    "hfnr=")
     new = new.replace("val_hfnr=",   "hfnr=")
-    # Strip bare -sdr=<value> segments (not sisdr=)
+    # Strip -val_sdr=<value> and bare -sdr=<value> segments (not sisdr=)
+    new = _re.sub(r"-val_sdr=[\d.]+", "", new)
     new = _re.sub(r"-(?<!si)sdr=[\d.]+", "", new)
 
     if new == stem:
@@ -80,7 +81,12 @@ def _migrate_checkpoint_name(path: Path) -> Path:
 
     new_path = path.with_name(new + ".ckpt")
     if new_path.exists():
-        return new_path  # already migrated (e.g. duplicate run)
+        # Target already exists — stale duplicate from partial migration; delete the old file
+        try:
+            path.unlink()
+        except Exception:
+            pass
+        return new_path
     try:
         path.rename(new_path)
     except Exception as exc:
@@ -314,6 +320,24 @@ def _ckpt_score(stem: str) -> tuple:
     return (visqol, sisdr, -hfnr)
 
 
+def _dedup_ckpts(ckpts):
+    """
+    Given an iterable of Path objects, return a deduplicated list where only
+    the best-scoring checkpoint per step number is kept.  Duplicate step files
+    arise from partial migrations that left old and new names both present.
+    """
+    import re as _re
+    by_step = {}
+    for ckpt in ckpts:
+        m = _re.search(r"step=(\d+)", ckpt.stem)
+        step = int(m.group(1)) if m else None
+        score = _ckpt_score(ckpt.stem)
+        key = (ckpt.parent, step)
+        if key not in by_step or (score is not None and (by_step[key][1] is None or score > by_step[key][1])):
+            by_step[key] = (ckpt, score)
+    return [v[0] for v in by_step.values()]
+
+
 def _config_summary(cfg_path: Path) -> str:
     """Return a one-line summary of training state for this config."""
     try:
@@ -331,7 +355,7 @@ def _config_summary(cfg_path: Path) -> str:
             ckpt_dir = run_dir / "checkpoints"
             if not ckpt_dir.exists():
                 continue
-            for ckpt in ckpt_dir.glob("*.ckpt"):
+            for ckpt in _dedup_ckpts(ckpt_dir.glob("*.ckpt")):
                 score = _ckpt_score(ckpt.stem)
                 if score is None:
                     continue
@@ -369,7 +393,7 @@ def _find_best_checkpoint(cfg_path: Path) -> Path | None:
             ckpt_dir = run_dir / "checkpoints"
             if not ckpt_dir.exists():
                 continue
-            for ckpt in ckpt_dir.glob("*.ckpt"):
+            for ckpt in _dedup_ckpts(ckpt_dir.glob("*.ckpt")):
                 score = _ckpt_score(ckpt.stem)
                 if score is None:
                     continue

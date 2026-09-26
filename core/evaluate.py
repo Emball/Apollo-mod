@@ -85,12 +85,17 @@ def _migrate_legacy_ckpt_names_eval(ckpt_dir: str) -> None:
         new  = new.replace("val_visqol=", "visqol=")
         new  = new.replace("val_sfr=",    "hfnr=")
         new  = new.replace("val_hfnr=",   "hfnr=")
+        new  = re.sub(r"-val_sdr=[\d.]+", "", new)
         new  = re.sub(r"-(?<!si)sdr=[\d.]+", "", new)
         if new == stem:
             continue
         src = os.path.join(ckpt_dir, fname)
         dst = os.path.join(ckpt_dir, new + ".ckpt")
         if os.path.exists(dst):
+            try:
+                os.unlink(src)
+            except Exception:
+                pass
             continue
         try:
             os.rename(src, dst)
