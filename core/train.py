@@ -1100,11 +1100,12 @@ def append_extra_layers(model, n_extra: int, init_scale: float = 0.5):
                 # band_net: attention output proj + MLP output proj
                 block.band_net.output.weight.mul_(init_scale)
                 block.band_net.MLP_output.weight.mul_(init_scale)
-                # seq_net (ICB): last Conv1d in the conv Sequential is the output proj
-                last_conv = [m for m in block.seq_net.conv if isinstance(m, nn.Conv1d)][-1]
-                last_conv.weight.mul_(init_scale)
-                if last_conv.bias is not None:
-                    last_conv.bias.mul_(init_scale)
+                # seq_net (ICB): last Conv1d in each ConvActNorm1d block is the output proj
+                for can in block.seq_net.blocks:
+                    last_conv = can.conv[-1]
+                    last_conv.weight.mul_(init_scale)
+                    if last_conv.bias is not None:
+                        last_conv.bias.mul_(init_scale)
         else:
             # Zero-init: Roformer output projections + last ICB conv zeroed
             block = BSNet(feature_dim)
