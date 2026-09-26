@@ -134,12 +134,16 @@ loss_g:
   _target_: look2hear.losses.gan_losses.MultiFrequencyGenLoss
   eps: 1e-8
   band_weight_shape: gaussian
-  band_weight_center_hz: 15000.0
-  band_weight_sigma_hz: 3000.0
-  band_weight_gain: 0.0            
-  band_weight_lo_hz: 4500.0
-  band_weight_hi_hz: 18500.0
-  band_weight_ramp_hz: 1500.0
+  # Phase 1 (step 19599): HF focus -- commented out at step 23399
+  # band_weight_center_hz: 15000.0
+  # band_weight_sigma_hz: 3000.0
+  # Phase 2 (step 23399): mid-range focus (3-10.5kHz damage zone)
+  band_weight_center_hz: 6750.0
+  band_weight_sigma_hz: 3750.0
+  band_weight_gain: 1.5
+  band_weight_lo_hz: 4500.0   # trapezoid only, unused with gaussian
+  band_weight_hi_hz: 18500.0  # trapezoid only, unused with gaussian
+  band_weight_ramp_hz: 1500.0 # trapezoid only, unused with gaussian
 
 loss_d:
   _target_: look2hear.losses.gan_losses.MultiFrequencyDisLoss
@@ -156,9 +160,14 @@ system:
   val_songs: ${training.val_songs}
   val_rotate_every: ${training.val_rotate_every}
   visqol_fraction: 1.0
+  # Phase 1 (step 19599): HF transition zone -- commented out at step 23399
+  # target_band_loss_enabled: true
+  # target_band_loss_lo_hz: 12000.0
+  # target_band_loss_hi_hz: 16000.0
+  # Phase 2 (step 23399): mid-range damage zone (3-10.5kHz)
   target_band_loss_enabled: true
-  target_band_loss_lo_hz: 12000.0
-  target_band_loss_hi_hz: 16000.0
+  target_band_loss_lo_hz: 3000.0
+  target_band_loss_hi_hz: 10500.0
   target_band_loss_weight: 1.0
 
 checkpoint:
