@@ -1062,10 +1062,14 @@ def append_extra_layers(model, n_extra: int, init_scale: float = 0.5):
     Freeze all pretrained layers and append n_extra new BSNet blocks to model.net.
 
     init_scale controls how new layer weights are initialized:
-      > 0.0 (default 0.5): copy the last pretrained layer's weights scaled by
-                           init_scale. At 0.5 the new layers start as half-strength
-                           copies -- sensible behavior from step 0 with room to
-                           diverge. At 1.0 they are exact duplicates.
+      > 0.0 (default 0.5): copy the last pretrained layer, then scale only the
+                           three output projection weights (band_net.output,
+                           band_net.MLP_output, seq_net.conv[-1]) by init_scale.
+                           Internal weights are kept at full strength so the layer
+                           computes sensibly; only its *contribution* to the residual
+                           stream is dialed back. This does NOT compound across
+                           multiple new layers the way scaling all weights would.
+                           At 1.0 they are exact duplicates with full contribution.
       0.0:                 zero-init (legacy behavior -- new layers start
                            destructive and must first learn to be neutral).
     """
@@ -1086,11 +1090,21 @@ def append_extra_layers(model, n_extra: int, init_scale: float = 0.5):
     new_layers = nn.ModuleList()
     for _ in range(n_extra):
         if init_scale > 0.0:
-            # Duplicate last pretrained layer and scale all weights by init_scale
+            # Duplicate last pretrained layer, then scale only the output projection
+            # weights that add back to the residual stream. Scaling all weights
+            # compounds across multiple new layers and causes amplitude loss;
+            # scaling only the output projections keeps internal representations
+            # intact and does not stack multiplicatively.
             block = copy.deepcopy(source_layer)
             with torch.no_grad():
-                for param in block.parameters():
-                    param.mul_(init_scale)
+                # band_net: attention output proj + MLP output proj
+                block.band_net.output.weight.mul_(init_scale)
+                block.band_net.MLP_output.weight.mul_(init_scale)
+                # seq_net (ICB): last Conv1d in the conv Sequential is the output proj
+                last_conv = [m for m in block.seq_net.conv if isinstance(m, nn.Conv1d)][-1]
+                last_conv.weight.mul_(init_scale)
+                if last_conv.bias is not None:
+                    last_conv.bias.mul_(init_scale)
         else:
             # Zero-init: Roformer output projections + last ICB conv zeroed
             block = BSNet(feature_dim)
