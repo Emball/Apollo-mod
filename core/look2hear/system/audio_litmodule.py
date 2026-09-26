@@ -102,14 +102,11 @@ def _hf_noise_ratio(est: "torch.Tensor", ref: "torch.Tensor", sr: int = 44100) -
     return (_flatness(est) + eps) / (_flatness(ref) + eps)
 
 
-def _target_band_mae(est: "torch.Tensor", ref: "torch.Tensor",
-                     sr: int = 44100,
-                     lo_hz: float = 13000.0,
-                     hi_hz: float = 19000.0) -> float:
-    """
-    Mean absolute log-magnitude error in a configurable frequency band.
-    Lower = better. Disabled by default; enabled via cfg.metrics.target_band_loss.
-    """
+def _target_band_mae_tensor(est: "torch.Tensor", ref: "torch.Tensor",
+                             sr: int = 44100,
+                             lo_hz: float = 13000.0,
+                             hi_hz: float = 19000.0) -> "torch.Tensor":
+    """Differentiable version for use in training_step loss."""
     n_fft = 2048
     hop   = n_fft // 4
     win   = torch.hann_window(n_fft, device=est.device)
@@ -124,7 +121,18 @@ def _target_band_mae(est: "torch.Tensor", ref: "torch.Tensor",
     eps = 1e-7
     e_mag = _mag(est)[:, bin_lo:bin_hi, :]
     r_mag = _mag(ref)[:, bin_lo:bin_hi, :]
-    return torch.mean(torch.abs(torch.log(e_mag + eps) - torch.log(r_mag + eps))).item()
+    return torch.mean(torch.abs(torch.log(e_mag + eps) - torch.log(r_mag + eps)))
+
+
+def _target_band_mae(est: "torch.Tensor", ref: "torch.Tensor",
+                     sr: int = 44100,
+                     lo_hz: float = 13000.0,
+                     hi_hz: float = 19000.0) -> float:
+    """
+    Mean absolute log-magnitude error in a configurable frequency band.
+    Lower = better. Disabled by default; enabled via cfg.metrics.target_band_loss.
+    """
+    return _target_band_mae_tensor(est, ref, sr=sr, lo_hz=lo_hz, hi_hz=hi_hz).item()
 
 
 # VISQOL loader -- lazy, cached, gracefully absent
@@ -202,6 +210,7 @@ class AudioLightningModule(pl.LightningModule):
         target_band_loss_enabled=False,
         target_band_loss_lo_hz=13000.0,
         target_band_loss_hi_hz=19000.0,
+        target_band_loss_weight=1.0,
         # VISQOL: fraction of val audio pairs to score (0.0 = off, 1.0 = all)
         visqol_fraction=1.0,
     ):
@@ -219,6 +228,7 @@ class AudioLightningModule(pl.LightningModule):
         self.target_band_loss_enabled = target_band_loss_enabled
         self.target_band_loss_lo_hz   = target_band_loss_lo_hz
         self.target_band_loss_hi_hz   = target_band_loss_hi_hz
+        self.target_band_loss_weight  = target_band_loss_weight
         self.visqol_fraction          = max(0.0, min(1.0, float(visqol_fraction)))
 
         # Val fixed-index lock (for val_loss / SI-SDR computation in validation_step)
@@ -337,6 +347,12 @@ class AudioLightningModule(pl.LightningModule):
         loss_g = self.loss_func["g"](
             est_outputs, est_feature_maps, targets_feature_maps, output, ori_data
         ) / self.grad_accum_steps
+
+        if self.target_band_loss_enabled:
+            tbl = _target_band_mae_tensor(output, ori_data,
+                                          lo_hz=self.target_band_loss_lo_hz,
+                                          hi_hz=self.target_band_loss_hi_hz)
+            loss_g = loss_g + self.target_band_loss_weight * tbl / self.grad_accum_steps
 
         self._accum_loss_g = (self._accum_loss_g or 0.0) + loss_g.detach()
         self.manual_backward(loss_g)

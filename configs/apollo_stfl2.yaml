@@ -156,9 +156,10 @@ system:
   val_songs: ${training.val_songs}
   val_rotate_every: ${training.val_rotate_every}
   visqol_fraction: 1.0
-  target_band_loss_enabled: false
-  target_band_loss_lo_hz: 13000.0
-  target_band_loss_hi_hz: 19000.0
+  target_band_loss_enabled: true
+  target_band_loss_lo_hz: 12000.0
+  target_band_loss_hi_hz: 16000.0
+  target_band_loss_weight: 1.0
 
 checkpoint:
   _target_: pytorch_lightning.callbacks.ModelCheckpoint

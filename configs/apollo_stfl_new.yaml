@@ -159,6 +159,7 @@ system:
   target_band_loss_enabled: false
   target_band_loss_lo_hz: 13000.0
   target_band_loss_hi_hz: 19000.0
+  target_band_loss_weight: 1.0
 
 checkpoint:
   _target_: pytorch_lightning.callbacks.ModelCheckpoint

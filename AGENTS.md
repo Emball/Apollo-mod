@@ -45,6 +45,7 @@ Composite score tuple: `(visqol, sisdr, -hfnr)` — visqol primary, sisdr tiebre
 - `trainer.limit_val_batches`: always present (default `1.0`)
 - `system.val_songs` / `system.val_rotate_every`: always `${training.val_songs}` / `${training.val_rotate_every}`
 - All augmentation keys must be present even if disabled (`mid_side_isolation`, `deep_gain`, `silence_dip`)
+- `system.target_band_loss_weight`: always present (default `1.0`); controls scale of band MAE term in generator loss when enabled
 
 ## Running
 
