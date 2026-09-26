@@ -179,7 +179,7 @@ def _parse_filename_metrics(fname: str) -> dict:
         m = pat.search(clean)
         if m:
             v = float(m.group(1))
-            # sisdr is stored as negative val_loss in filename; convert back to positive
+            # sisdr stored as negative in filename; convert back to positive
             if key == "sisdr":
                 v = -v
             vals[key] = v

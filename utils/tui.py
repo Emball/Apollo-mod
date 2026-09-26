@@ -234,8 +234,8 @@ def _list_configs() -> list[Path]:
 def _ckpt_score(stem: str) -> tuple:
     """
     Composite score tuple for checkpoint ranking.
-    Primary: val_visqol (higher better).
-    Tiebreakers in order: val_sisdr (val_loss), val_hfnr (lower hfnr = less noise).
+    Primary: visqol (higher better).
+    Tiebreakers in order: sisdr, hfnr (lower = less noise).
     Returns a tuple suitable for max() comparison; missing metrics use worst-case values.
     """
     import re as _re
@@ -247,9 +247,9 @@ def _ckpt_score(stem: str) -> tuple:
         except Exception:
             return default
 
-    visqol = _get(r"val_visqol=(-?[\d.]+)", -999.0)
-    sisdr  = _get(r"val_loss=(-?[\d.]+)",   -999.0)   # val_loss is SI-SDR
-    hfnr    = _get(r"val_hfnr=(-?[\d.]+)",     999.0)   # lower hfnr is better → negate
+    visqol = _get(r"visqol=(-?[\d.]+)", -999.0)
+    sisdr  = _get(r"sisdr=(-?[\d.]+)",   -999.0)   # val_loss is SI-SDR
+    hfnr    = _get(r"hfnr=(-?[\d.]+)",     999.0)   # lower hfnr is better → negate
 
     if visqol < 0:
         return None  # no visqol = unscored
@@ -398,7 +398,7 @@ def _run_mid_training_inference(state: dict, cfg_path: Path, pause_file: Path) -
     # Build and run inference cmd
     import re as _re2
     stem = _re2.sub(r"^\[\d+\]-", "", latest_ckpt.stem)
-    m = _re2.search(r"val_visqol=(-?[\d.]+)", stem)
+    m = _re2.search(r"visqol=(-?[\d.]+)", stem)
     visqol_str = f"visqol={float(m.group(1)):.3f}" if (m and float(m.group(1)) >= 0) else ""
 
     try:
@@ -773,13 +773,13 @@ def screen_inference(state: dict) -> None:
     latest_ckpt = _find_latest_checkpoint(cfg_path)
     if latest_ckpt:
         stem = _re2.sub(r"^\[\d+\]-", "", latest_ckpt.stem)
-        m = _re2.search(r"val_visqol=(-?[\d.]+)", stem)
+        m = _re2.search(r"visqol=(-?[\d.]+)", stem)
         visqol_str = f"visqol={float(m.group(1)):.3f}" if (m and float(m.group(1)) >= 0) else ""
         model_options.append(f"Latest checkpoint  {visqol_str}  ({latest_ckpt.name})")
         model_paths.append(str(latest_ckpt))
     if best_ckpt and (not latest_ckpt or best_ckpt != latest_ckpt):
         stem = _re2.sub(r"^\[\d+\]-", "", best_ckpt.stem)
-        m = _re2.search(r"val_visqol=(-?[\d.]+)", stem)
+        m = _re2.search(r"visqol=(-?[\d.]+)", stem)
         visqol_str = f"visqol={float(m.group(1)):.3f}" if (m and float(m.group(1)) >= 0) else ""
         model_options.append(f"Best checkpoint  {visqol_str}  ({best_ckpt.name})")
         model_paths.append(str(best_ckpt))
@@ -1142,7 +1142,7 @@ def _util_view_runs() -> None:
     table = Table(title="Training Runs", border_style="dim cyan", show_lines=True)
     table.add_column("Config", style="cyan")
     table.add_column("Run", style="dim")
-    table.add_column("Best val_loss", style="green")
+    table.add_column("Best sisdr", style="green")
     table.add_column("Step")
     table.add_column("Checkpoints")
 
@@ -1160,9 +1160,9 @@ def _util_view_runs() -> None:
                 best_loss = None
                 best_step = None
                 for c in ckpts:
-                    if "val_loss=" in c.stem:
+                    if "sisdr=" in c.stem:
                         try:
-                            loss = float(c.stem.split("val_loss=")[1])
+                            loss = float(c.stem.split("sisdr=")[1])
                             step = int(c.stem.split("step=")[1].split("-")[0])
                             if best_loss is None or loss < best_loss:
                                 best_loss = loss

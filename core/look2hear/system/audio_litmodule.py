@@ -260,7 +260,7 @@ class AudioLightningModule(pl.LightningModule):
         if gradient_checkpointing:
             self._enable_gradient_checkpointing()
 
-        self.default_monitor     = "val_loss"
+        self.default_monitor     = "sisdr"
         self.validation_step_outputs = []
         self.test_step_outputs   = []
         self.automatic_optimization = False
@@ -385,7 +385,7 @@ class AudioLightningModule(pl.LightningModule):
         if self.trainer.sanity_checking:
             est_sources = self(codec_data)
             loss = self.metrics(est_sources, ori_data)
-            return {"val_loss": loss}
+            return {"sisdr": loss}
 
         # First run: collect all seen indices for locking later
         if self._val_fixed_indices is None:
@@ -393,7 +393,7 @@ class AudioLightningModule(pl.LightningModule):
 
         # Once locked, skip chunks not in the fixed set
         if self._val_fixed_indices is not None and ds_idx not in self._val_fixed_indices:
-            return {"val_loss": None}
+            return {"sisdr": None}
 
         est_sources = self(codec_data)
         loss = self.metrics(est_sources, ori_data)
@@ -402,7 +402,7 @@ class AudioLightningModule(pl.LightningModule):
         self._val_loss_count += 1
         self.validation_step_outputs.append(float(loss))
 
-        return {"val_loss": loss}
+        return {"sisdr": loss}
 
     # ------------------------------------------------------------------
     # Val index locking
@@ -528,7 +528,7 @@ class AudioLightningModule(pl.LightningModule):
     def _compute_val_metrics(self):
         """
         Run model inference on each locked 30-second val chunk.
-        Computes val_hfnr / val_visqol. Saves LQ/HQ/Restored audio to disk.
+        Computes hfnr / visqol. Saves LQ/HQ/Restored audio to disk.
         """
         if not self._val_song_refs:
             return
@@ -620,7 +620,7 @@ class AudioLightningModule(pl.LightningModule):
 
         if self._val_loss_count > 0:
             avg_val_loss = self._val_loss_sum / self._val_loss_count
-            self.log("val_loss", avg_val_loss, prog_bar=True, logger=True)
+            self.log("sisdr", avg_val_loss, prog_bar=True, logger=True)
             self._last_val_sisdr = avg_val_loss
         self._val_loss_sum   = 0.0
         self._val_loss_count = 0
@@ -685,8 +685,8 @@ class AudioLightningModule(pl.LightningModule):
         if _hfnr   is not None and _hfnr   > self._val_window_best.get("hfnr",   float("-inf")):
             self._val_window_best["hfnr"]   = float(_hfnr)
 
-        self.log("val_hfnr",   float(_hfnr)   if _hfnr   is not None else 0.0, prog_bar=False, logger=True)
-        self.log("val_visqol", float(_visqol) if _visqol is not None else -1.0, prog_bar=False, logger=True)
+        self.log("hfnr",   float(_hfnr)   if _hfnr   is not None else 0.0, prog_bar=False, logger=True)
+        self.log("visqol", float(_visqol) if _visqol is not None else -1.0, prog_bar=False, logger=True)
         if self.target_band_loss_enabled:
             self.log("val_tbl", float(_tbl) if _tbl is not None else 0.0, prog_bar=False, logger=True)
 

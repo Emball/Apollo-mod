@@ -22,16 +22,16 @@ configs/                    -- One YAML per experiment (ground truth, user-owned
 
 | Metric | Key | Better | Notes |
 |--------|-----|--------|-------|
-| ViSQOL | `val_visqol` | higher | Primary; perceptual score |
-| SI-SDR | `val_loss` (neg) | higher | Waveform quality |
-| HFNR | `val_hfnr` | lower | High-Frequency Noise Ratio; canary for HF artifact injection |
+| ViSQOL | `visqol` | higher | Primary; perceptual score |
+| SI-SDR | `sisdr` (neg) | higher | Waveform quality |
+| HFNR | `hfnr` | lower | High-Frequency Noise Ratio; canary for HF artifact injection |
 
 SDR removed as redundant with SI-SDR. MS-STFT removed (superseded by ViSQOL). `sfr` renamed to `hfnr` throughout.
 
 ## Checkpoint Filename Format
 
 ```
-step={step:06d}-sisdr={val_loss:.3f}-visqol={val_visqol:.3f}-hfnr={val_hfnr:.3f}
+step={step:06d}-sisdr={sisdr:.3f}-visqol={visqol:.3f}-hfnr={hfnr:.3f}
 ```
 
 ## Best Checkpoint Selection (TUI)
@@ -41,7 +41,7 @@ Composite score tuple: `(visqol, sisdr, -hfnr)` — visqol primary, sisdr tiebre
 ## Config Keys (required in all configs)
 
 - `early_stopping`: removed; do not add back
-- `checkpoint.monitor`: always `val_visqol`
+- `checkpoint.monitor`: always `visqol`
 - `trainer.limit_val_batches`: always present (default `1.0`)
 - `system.val_songs` / `system.val_rotate_every`: always `${training.val_songs}` / `${training.val_rotate_every}`
 - All augmentation keys must be present even if disabled (`mid_side_isolation`, `deep_gain`, `silence_dip`)
