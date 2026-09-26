@@ -6,20 +6,19 @@ Launched from tui.py as a TUI screen, or standalone:
 
 Metrics computed per checkpoint:
     visqol  -- ViSQOL perceptual score (primary; requires: uv pip install "visqol-python[all]")
-    sfr     -- Spectral flatness ratio (HF noise canary)
+    hfnr     -- Spectral flatness ratio (HF noise canary)
     sisdr   -- SI-SDR (scale-invariant waveform quality)
-    msstft  -- Multi-scale log-STFT loss (computed here; not in live training)
     hfmae   -- HF band MAE (configurable; computed here for legacy checkpoints)
 
 Ranking weights (evaluate.py only -- offline, VISQOL-anchored):
-    visqol=0.60, sfr=0.25, sisdr=0.15
+    visqol=0.60, hfnr=0.25, sisdr=0.15
 
 Metrics already encoded in the checkpoint filename are read directly --
 only missing metrics trigger inference. This means subsequent evaluate runs
 on the same checkpoint set are fast (VISQOL only).
 
 VISQOL scores are cached in <ckpt_dir>/.eval_cache.json so they survive
-across sessions. hfmae, msstft, sfr are always re-read from the filename
+across sessions. hfmae, hfnr are always re-read from the filename
 or recomputed fresh.
 """
 
@@ -41,7 +40,7 @@ _CORE_DIR  = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(_CORE_DIR)
 sys.path.insert(0, _CORE_DIR)
 from look2hear.system.audio_litmodule import (
-    _ms_log_stft_loss, _spectral_flatness_ratio, _hf_band_mae_cpu,
+    _hf_noise_ratio, _hf_band_mae_cpu,
     _get_visqol_api, _visqol_score,
 )
 import look2hear.models.apollo
@@ -54,9 +53,8 @@ _SR = 44100
 # ---------------------------------------------------------------------------
 _EVAL_WEIGHTS = {
     "visqol": 0.60,
-    "sfr":    0.25,
+    "hfnr":    0.25,
     "sisdr":  0.15,
-    "msstft": 0.00,  # kept for display; excluded from composite (superseded by visqol)
     "hfmae":  0.00,  # kept for display; excluded from composite (use target_band_loss in config)
 }
 
@@ -66,8 +64,7 @@ _HIGHER_IS_BETTER = {"visqol", "sisdr"}
 # Patterns to parse metric values out of checkpoint filenames
 _FILENAME_PATS = {
     "sisdr":  re.compile(r"sisdr=(-?[\d.]+)"),
-    "msstft": re.compile(r"msstft=(-?[\d.]+)"),
-    "sfr":    re.compile(r"sfr=(-?[\d.]+)"),
+    "hfnr":    re.compile(r"hfnr=(-?[\d.]+)"),
     "hfmae":  re.compile(r"hfmae=(-?[\d.]+)"),
 }
 
@@ -204,15 +201,14 @@ def _eval_checkpoint(
     Compute metrics for one checkpoint. Skips metrics already in known_metrics.
     Returns a dict of all metrics (known + newly computed).
     """
-    need_inference = not all(k in known_metrics for k in ("msstft", "sfr", "hfmae"))
+    need_inference = not all(k in known_metrics for k in ("hfnr", "hfmae"))
 
     metrics = dict(known_metrics)
 
     if not need_inference and not run_visqol:
         return metrics
 
-    msstft_sum = 0.0
-    sfr_sum    = 0.0
+    hfnr_sum    = 0.0
     hfmae_sum  = 0.0
     sisdr_sum  = 0.0
     visqol_sum = 0.0
@@ -239,10 +235,8 @@ def _eval_checkpoint(
                     r_cpu  = r_gpu.float().cpu()
 
                 if need_inference:
-                    if "msstft" not in known_metrics:
-                        msstft_sum += _ms_log_stft_loss(e_cpu, r_cpu)
-                    if "sfr" not in known_metrics:
-                        sfr_sum    += _spectral_flatness_ratio(e_cpu, r_cpu)
+                    if "hfnr" not in known_metrics:
+                        hfnr_sum    += _hf_noise_ratio(e_cpu, r_cpu)
                     if "hfmae" not in known_metrics:
                         hfmae_sum  += _hf_band_mae_cpu(e_cpu, r_cpu)
                     if "sisdr" not in known_metrics:
@@ -263,8 +257,7 @@ def _eval_checkpoint(
         return metrics
 
     if need_inference:
-        if "msstft" not in known_metrics: metrics["msstft"] = msstft_sum / n
-        if "sfr"    not in known_metrics: metrics["sfr"]    = sfr_sum    / n
+        if "hfnr"    not in known_metrics: metrics["hfnr"]    = hfnr_sum    / n
         if "hfmae"  not in known_metrics: metrics["hfmae"]  = hfmae_sum  / n
         if "sisdr"  not in known_metrics: metrics["sisdr"]  = sisdr_sum  / n
 
@@ -283,7 +276,7 @@ def _rank_results(results: list[tuple]) -> list[tuple]:
     """
     results: list of (fname, ckpt_path, metrics_dict)
     Returns same list sorted best-first with 'rank' and 'composite' added to metrics.
-    Weights: visqol=0.60, sfr=0.25, sisdr=0.15
+    Weights: visqol=0.60, hfnr=0.25, sisdr=0.15
     Falls back gracefully when VISQOL is absent (renormalizes weights).
     """
     keys = list(_EVAL_WEIGHTS.keys())
@@ -437,12 +430,12 @@ def run_evaluation(
             known["visqol"] = cache[cache_key]["visqol"]
 
         needs_model = (
-            not all(k in known for k in ("msstft", "sfr", "hfmae"))
+            not all(k in known for k in ("hfnr", "hfmae"))
             or (run_visqol and "visqol" not in known)
         )
 
         parts = []
-        for k in ("msstft", "sfr", "hfmae", "sisdr"):
+        for k in ("hfnr", "hfmae", "sisdr"):
             if k in known:
                 parts.append(f"{k}={known[k]:.4f}")
         cached_str = "  ".join(parts) if parts else ""
@@ -462,7 +455,7 @@ def run_evaluation(
                     _save_cache(ckpt_dir, cache)
 
                 new_parts = []
-                for k in ("msstft", "sfr", "hfmae", "sisdr", "visqol"):
+                for k in ("hfnr", "hfmae", "sisdr", "visqol"):
                     if k in metrics and k not in known:
                         new_parts.append(f"{k}={metrics[k]:.4f}")
                 print_fn("  ".join(new_parts) if new_parts else "ok")
@@ -486,7 +479,7 @@ def run_evaluation(
 def print_results_table(results: list[tuple], print_fn=print) -> None:
     has_visqol = any("visqol" in m for _, _, m in results)
     cols = ["visqol"] if has_visqol else []
-    cols += ["hfmae", "msstft", "sfr", "sisdr"]
+    cols += ["hfmae", "hfnr", "sisdr"]
 
     header = f"{'Rank':<5}"
     for c in cols:
@@ -502,8 +495,8 @@ def print_results_table(results: list[tuple], print_fn=print) -> None:
         for c in cols:
             if c in m:
                 val = m[c]
-                sfr_flag = " ^" if c == "sfr" and val > 1.05 else "  "
-                row += f" {val:>8.4f}{sfr_flag}" if c == "sfr" else f" {val:>8.4f}  "
+                hfnr_flag = " ^" if c == "hfnr" and val > 1.05 else "  "
+                row += f" {val:>8.4f}{hfnr_flag}" if c == "hfnr" else f" {val:>8.4f}  "
             else:
                 row += f" {'--':>8}  "
         row += f" {fname}"
@@ -514,7 +507,7 @@ def print_results_table(results: list[tuple], print_fn=print) -> None:
         best_fname, _, best_m = results[0]
         print_fn(f"\nBest: {best_fname}")
         summary = "  ".join(
-            f"{k}={best_m[k]:.4f}" for k in ("visqol", "hfmae", "msstft", "sfr", "sisdr")
+            f"{k}={best_m[k]:.4f}" for k in ("visqol", "hfmae", "hfnr", "sisdr")
             if k in best_m
         )
         print_fn(f"  {summary}")

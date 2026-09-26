@@ -77,7 +77,7 @@ def _hf_band_mae_cpu(est: "torch.Tensor", ref: "torch.Tensor",
     return _target_band_mae(est, ref, sr=sr, lo_hz=lo_hz, hi_hz=hi_hz)
 
 
-def _spectral_flatness_ratio(est: "torch.Tensor", ref: "torch.Tensor", sr: int = 44100) -> float:
+def _hf_noise_ratio(est: "torch.Tensor", ref: "torch.Tensor", sr: int = 44100) -> float:
     """
     Spectral flatness ratio in the 8-22 kHz band: est_flatness / ref_flatness.
     > 1.0 means the restored signal is noisier than HQ in the high band.
@@ -248,7 +248,7 @@ class AudioLightningModule(pl.LightningModule):
 
         # Last val metric values (read by StepPrinter in train.py)
         self._last_val_sisdr  = None
-        self._last_val_sfr    = None
+        self._last_val_hfnr    = None
         self._last_val_visqol = None
         self._last_val_tbl    = None   # target_band_loss (None when disabled)
 
@@ -528,14 +528,14 @@ class AudioLightningModule(pl.LightningModule):
     def _compute_val_metrics(self):
         """
         Run model inference on each locked 30-second val chunk.
-        Computes val_sfr / val_visqol. Saves LQ/HQ/Restored audio to disk.
+        Computes val_hfnr / val_visqol. Saves LQ/HQ/Restored audio to disk.
         """
         if not self._val_song_refs:
             return
 
         import look2hear.losses as _ll
 
-        sfr_sum = visqol_sum = tbl_sum = 0.0
+        hfnr_sum = visqol_sum = tbl_sum = 0.0
         count = visqol_count = tbl_count = 0
 
 
@@ -570,7 +570,7 @@ class AudioLightningModule(pl.LightningModule):
                     e = restored[0:1]
                     r = hq_norm[0:1]
 
-                    sfr_sum += _spectral_flatness_ratio(e, r)
+                    hfnr_sum += _hf_noise_ratio(e, r)
                     count   += 1
 
                     if i in do_visqol:
@@ -602,7 +602,7 @@ class AudioLightningModule(pl.LightningModule):
         self.audio_model.train()
 
         if count > 0:
-            self._last_val_sfr = sfr_sum / count
+            self._last_val_hfnr = hfnr_sum / count
         if visqol_count > 0:
             self._last_val_visqol = visqol_sum / visqol_count
         if tbl_count > 0:
@@ -614,7 +614,7 @@ class AudioLightningModule(pl.LightningModule):
 
     def on_validation_epoch_end(self):
         self._last_val_sisdr  = None
-        self._last_val_sfr    = None
+        self._last_val_hfnr    = None
         self._last_val_visqol = None
         self._last_val_tbl    = None
 
@@ -663,7 +663,7 @@ class AudioLightningModule(pl.LightningModule):
                 if best:
                     parts = []
                     if "visqol" in best: parts.append(f"visqol={best['visqol']:.3f}")
-                    if "sfr"    in best: parts.append(f"sfr={best['sfr']:.3f}")
+                    if "hfnr"    in best: parts.append(f"hfnr={best['hfnr']:.3f}")
                     print(f"[val] Window {self._val_window_idx + 1} best: {' '.join(parts)}  -- rotating songs")
                 self._val_window_idx  += 1
                 self._val_window_best  = {}
@@ -675,17 +675,17 @@ class AudioLightningModule(pl.LightningModule):
         self._compute_val_metrics()
         self._save_val_audio()
 
-        _sfr    = self._last_val_sfr
+        _hfnr   = self._last_val_hfnr
         _visqol = self._last_val_visqol
         _tbl    = self._last_val_tbl
 
         # Update window-best tracking
         if _visqol is not None and _visqol > self._val_window_best.get("visqol", float("-inf")):
             self._val_window_best["visqol"] = float(_visqol)
-        if _sfr    is not None and _sfr    > self._val_window_best.get("sfr",    float("-inf")):
-            self._val_window_best["sfr"]    = float(_sfr)
+        if _hfnr   is not None and _hfnr   > self._val_window_best.get("hfnr",   float("-inf")):
+            self._val_window_best["hfnr"]   = float(_hfnr)
 
-        self.log("val_sfr",    float(_sfr)    if _sfr    is not None else 0.0, prog_bar=False, logger=True)
+        self.log("val_hfnr",   float(_hfnr)   if _hfnr   is not None else 0.0, prog_bar=False, logger=True)
         self.log("val_visqol", float(_visqol) if _visqol is not None else -1.0, prog_bar=False, logger=True)
         if self.target_band_loss_enabled:
             self.log("val_tbl", float(_tbl) if _tbl is not None else 0.0, prog_bar=False, logger=True)

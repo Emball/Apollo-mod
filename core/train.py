@@ -1483,13 +1483,13 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             self._last_batch_idx = batch_idx
             # Show last val metrics inline if available
             visqol = getattr(pl_module, "_last_val_visqol", None)
-            sfr    = getattr(pl_module, "_last_val_sfr",    None)
+            hfnr    = getattr(pl_module, "_last_val_hfnr",    None)
             sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
             tbl    = getattr(pl_module, "_last_val_tbl",    None)
             val_parts = []
             if visqol is not None: val_parts.append(f"visqol={float(visqol):.3f}")
             if sisdr  is not None: val_parts.append(f"sisdr={-float(sisdr):.3f}")
-            if sfr    is not None: val_parts.append(f"sfr={float(sfr):.3f}")
+            if hfnr    is not None: val_parts.append(f"hfnr={float(hfnr):.3f}")
             if tbl    is not None: val_parts.append(f"tbl={float(tbl):.4f}")
             val_str = "  " + "  ".join(val_parts) if val_parts else ""
             print(
@@ -1539,13 +1539,13 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             if not getattr(self, '_val_sanity', True):
                 # Reprint the progress bar line in place with updated val metrics
                 visqol = getattr(pl_module, "_last_val_visqol", None)
-                sfr    = getattr(pl_module, "_last_val_sfr",    None)
+                hfnr    = getattr(pl_module, "_last_val_hfnr",    None)
                 sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
                 tbl    = getattr(pl_module, "_last_val_tbl",    None)
                 val_parts = []
                 if visqol is not None: val_parts.append(f"visqol={float(visqol):.3f}")
                 if sisdr  is not None: val_parts.append(f"sisdr={-float(sisdr):.3f}")
-                if sfr    is not None: val_parts.append(f"sfr={float(sfr):.3f}")
+                if hfnr    is not None: val_parts.append(f"hfnr={float(hfnr):.3f}")
                 if tbl    is not None: val_parts.append(f"tbl={float(tbl):.4f}")
                 val_str = "  " + "  ".join(val_parts) if val_parts else ""
                 step  = trainer.global_step
@@ -1569,20 +1569,20 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if cfg.get("checkpoint") and not val_disabled:
         print_only(f"Instantiating checkpoint")
         checkpoint = hydra.utils.instantiate(cfg.checkpoint)
-        # Monitor sfr, not a composite -- see note above.
-        checkpoint.monitor = "val_sfr"
+        # Monitor hfnr, not a composite -- see note above.
+        checkpoint.monitor = "val_hfnr"
         checkpoint.mode    = "min"
         checkpoint.save_top_k = -1
         # Full stats in filename; all metrics are logged via self.log() so
         # Lightning can interpolate them here.
         # Lightning interpolates {metric:fmt} as metric=VALUE automatically.
         # Don't add extra label= text before {metric} tokens or they double up.
-        # Result: step=000200-val_loss=-20.892-val_visqol=3.821-val_sfr=0.968
+        # Result: step=000200-val_loss=-20.892-val_visqol=3.821-val_hfnr=0.968
         checkpoint.filename = (
             "{step:06d}"
             "-{val_loss:.3f}"
             "-{val_visqol:.3f}"
-            "-{val_sfr:.3f}"
+            "-{val_hfnr:.3f}"
         )
         callbacks.append(checkpoint)
 
@@ -1620,11 +1620,11 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 m = trainer.callback_metrics
                 vl     = m.get("val_loss",   None)
                 visqol = m.get("val_visqol", None)
-                sfr    = m.get("val_sfr",    None)
+                hfnr    = m.get("val_hfnr",    None)
                 parts = [f"{step:06d}"]
                 if vl     is not None: parts.append(f"val_loss={float(vl):.3f}")
                 if visqol is not None: parts.append(f"val_visqol={float(visqol):.3f}")
-                if sfr    is not None: parts.append(f"val_sfr={float(sfr):.3f}")
+                if hfnr    is not None: parts.append(f"val_hfnr={float(hfnr):.3f}")
                 fname = "-".join(parts) + ".ckpt"
             except Exception:
                 fname = f"{step:06d}.ckpt"
@@ -1667,7 +1667,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             """Populate system._last_val_* from a baseline results dict so the
             progress bar shows baseline values before the first training step."""
             system._last_val_sisdr  = bl_dict.get("val_loss")          # negative SI-SDR
-            system._last_val_sfr    = bl_dict.get("val_sfr")
+            system._last_val_hfnr    = bl_dict.get("val_hfnr")
             system._last_val_visqol = bl_dict.get("val_visqol")
 
         if os.path.isfile(_baseline_cache_file):
