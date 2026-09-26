@@ -213,9 +213,9 @@ def _parse_filename_metrics(fname: str) -> dict:
         m = pat.search(clean)
         if m:
             v = float(m.group(1))
-            # sisdr stored as negative in filename; convert back to positive
+            # normalise sisdr sign: old checkpoints stored negated loss value
             if key == "sisdr":
-                v = -v
+                v = abs(v)
             vals[key] = v
     return vals
 

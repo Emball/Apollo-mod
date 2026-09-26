@@ -315,6 +315,11 @@ def _ckpt_score(stem: str) -> tuple:
     sisdr  = _get(r"sisdr=(-?[\d.]+)",   -999.0)
     hfnr    = _get(r"hfnr=(-?[\d.]+)",     999.0)   # lower hfnr is better → negate
 
+    # Existing checkpoints on disk have negated sisdr (legacy loss value); normalise
+    # so that higher magnitude always wins regardless of which convention was used.
+    if sisdr < 0:
+        sisdr = -sisdr
+
     if visqol < 0:
         return None  # no visqol = unscored
     return (visqol, sisdr, -hfnr)
