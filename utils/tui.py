@@ -235,7 +235,7 @@ def _ckpt_score(stem: str) -> tuple:
     """
     Composite score tuple for checkpoint ranking.
     Primary: val_visqol (higher better).
-    Tiebreakers in order: val_sisdr (val_loss), val_sdr, val_sfr (lower sfr = less noise).
+    Tiebreakers in order: val_sisdr (val_loss), val_sfr (lower sfr = less noise).
     Returns a tuple suitable for max() comparison; missing metrics use worst-case values.
     """
     import re as _re
@@ -249,12 +249,11 @@ def _ckpt_score(stem: str) -> tuple:
 
     visqol = _get(r"val_visqol=(-?[\d.]+)", -999.0)
     sisdr  = _get(r"val_loss=(-?[\d.]+)",   -999.0)   # val_loss is SI-SDR
-    sdr    = _get(r"val_sdr=(-?[\d.]+)",    -999.0)
     sfr    = _get(r"val_sfr=(-?[\d.]+)",     999.0)   # lower sfr is better → negate
 
     if visqol < 0:
         return None  # no visqol = unscored
-    return (visqol, sisdr, sdr, -sfr)
+    return (visqol, sisdr, -sfr)
 
 
 def _config_summary(cfg_path: Path) -> str:
@@ -285,9 +284,9 @@ def _config_summary(cfg_path: Path) -> str:
                     best_stem  = ckpt.stem
                     best_step  = step
         if best_score is not None:
-            visqol, sisdr, sdr, neg_sfr = best_score
+            visqol, sisdr, neg_sfr = best_score
             return (f"best visqol={visqol:.3f}  sisdr={sisdr:.2f}"
-                    f"  sdr={sdr:.2f}  sfr={-neg_sfr:.3f}  step={best_step}")
+                    f"  sfr={-neg_sfr:.3f}  step={best_step}")
         return "checkpoint found (no metrics in name)"
     except Exception:
         return ""
@@ -298,7 +297,7 @@ def _config_summary(cfg_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 def _find_best_checkpoint(cfg_path: Path) -> Path | None:
-    """Find best checkpoint using composite score: visqol > sisdr > sdr > sfr."""
+    """Find best checkpoint using composite score: visqol > sisdr > sfr."""
     try:
         import yaml
         cfg = yaml.safe_load(cfg_path.read_text())

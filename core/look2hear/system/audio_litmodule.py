@@ -248,7 +248,6 @@ class AudioLightningModule(pl.LightningModule):
 
         # Last val metric values (read by StepPrinter in train.py)
         self._last_val_sisdr  = None
-        self._last_val_sdr    = None
         self._last_val_sfr    = None
         self._last_val_visqol = None
         self._last_val_tbl    = None   # target_band_loss (None when disabled)
@@ -529,16 +528,14 @@ class AudioLightningModule(pl.LightningModule):
     def _compute_val_metrics(self):
         """
         Run model inference on each locked 30-second val chunk.
-        Computes val_sdr / val_sfr / val_visqol. Saves LQ/HQ/Restored audio to disk.
+        Computes val_sfr / val_visqol. Saves LQ/HQ/Restored audio to disk.
         """
         if not self._val_song_refs:
             return
 
         import look2hear.losses as _ll
 
-        _sdr_fn = _ll.MultiSrcNegSDR("snr", zero_mean=True)
-
-        sfr_sum = sdr_sum = visqol_sum = tbl_sum = 0.0
+        sfr_sum = visqol_sum = tbl_sum = 0.0
         count = visqol_count = tbl_count = 0
 
 
@@ -574,7 +571,6 @@ class AudioLightningModule(pl.LightningModule):
                     r = hq_norm[0:1]
 
                     sfr_sum += _spectral_flatness_ratio(e, r)
-                    sdr_sum += -float(_sdr_fn(e.unsqueeze(0), r.unsqueeze(0)).mean())
                     count   += 1
 
                     if i in do_visqol:
@@ -606,7 +602,6 @@ class AudioLightningModule(pl.LightningModule):
         self.audio_model.train()
 
         if count > 0:
-            self._last_val_sdr = sdr_sum / count
             self._last_val_sfr = sfr_sum / count
         if visqol_count > 0:
             self._last_val_visqol = visqol_sum / visqol_count
@@ -619,7 +614,6 @@ class AudioLightningModule(pl.LightningModule):
 
     def on_validation_epoch_end(self):
         self._last_val_sisdr  = None
-        self._last_val_sdr    = None
         self._last_val_sfr    = None
         self._last_val_visqol = None
         self._last_val_tbl    = None
@@ -668,7 +662,6 @@ class AudioLightningModule(pl.LightningModule):
                 best = self._val_window_best
                 if best:
                     parts = []
-                    if "sdr"    in best: parts.append(f"sdr={best['sdr']:.3f}")
                     if "visqol" in best: parts.append(f"visqol={best['visqol']:.3f}")
                     if "sfr"    in best: parts.append(f"sfr={best['sfr']:.3f}")
                     print(f"[val] Window {self._val_window_idx + 1} best: {' '.join(parts)}  -- rotating songs")
@@ -683,20 +676,16 @@ class AudioLightningModule(pl.LightningModule):
         self._save_val_audio()
 
         _sfr    = self._last_val_sfr
-        _sdr    = self._last_val_sdr
         _visqol = self._last_val_visqol
         _tbl    = self._last_val_tbl
 
         # Update window-best tracking
-        if _sdr    is not None and _sdr    > self._val_window_best.get("sdr",    float("-inf")):
-            self._val_window_best["sdr"]    = float(_sdr)
         if _visqol is not None and _visqol > self._val_window_best.get("visqol", float("-inf")):
             self._val_window_best["visqol"] = float(_visqol)
         if _sfr    is not None and _sfr    > self._val_window_best.get("sfr",    float("-inf")):
             self._val_window_best["sfr"]    = float(_sfr)
 
         self.log("val_sfr",    float(_sfr)    if _sfr    is not None else 0.0, prog_bar=False, logger=True)
-        self.log("val_sdr",    float(_sdr)    if _sdr    is not None else 0.0, prog_bar=False, logger=True)
         self.log("val_visqol", float(_visqol) if _visqol is not None else -1.0, prog_bar=False, logger=True)
         if self.target_band_loss_enabled:
             self.log("val_tbl", float(_tbl) if _tbl is not None else 0.0, prog_bar=False, logger=True)
