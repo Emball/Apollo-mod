@@ -1093,12 +1093,152 @@ def _get_run_dirs() -> list[tuple[str, Path]]:
     return result
 
 
+def _util_merge_checkpoints() -> None:
+    """Blend two checkpoints with compatible architectures at a user-specified ratio."""
+    import torch
+    import re as _re
+
+    # Collect all checkpoints across all runs
+    all_ckpts = []
+    if RUNS_DIR.exists():
+        for cfg_dir in sorted(RUNS_DIR.iterdir()):
+            if not cfg_dir.is_dir():
+                continue
+            for run_dir in sorted(cfg_dir.iterdir()):
+                ckpt_dir = run_dir / "checkpoints"
+                if not ckpt_dir.exists():
+                    continue
+                for c in sorted(ckpt_dir.glob("*.ckpt")):
+                    label = f"{cfg_dir.name} / {run_dir.name} / {c.name}"
+                    all_ckpts.append((label, c))
+
+    if len(all_ckpts) < 2:
+        console.clear()
+        console.print("[yellow]Need at least 2 checkpoints to merge.[/]")
+        console.input("Press Enter.")
+        return
+
+    labels = [label for label, _ in all_ckpts] + ["Cancel"]
+
+    console.clear()
+    console.print(_banner_panel())
+    console.print("[cyan]Checkpoint Merge — Select Model A[/]\n")
+    idx_a = _pick("Select checkpoint A", labels, hint="Enter=select  Esc=cancel")
+    if idx_a is None or idx_a == len(labels) - 1:
+        return
+
+    console.clear()
+    console.print(_banner_panel())
+    console.print(f"[cyan]A:[/] {labels[idx_a]}\n[cyan]Checkpoint Merge — Select Model B[/]\n")
+    idx_b = _pick("Select checkpoint B", labels, hint="Enter=select  Esc=cancel")
+    if idx_b is None or idx_b == len(labels) - 1:
+        return
+
+    if idx_a == idx_b:
+        console.clear()
+        console.print("[yellow]A and B must be different checkpoints.[/]")
+        console.input("Press Enter.")
+        return
+
+    path_a = all_ckpts[idx_a][1]
+    path_b = all_ckpts[idx_b][1]
+
+    # Ratio: weight of model A (1 - ratio goes to B)
+    console.clear()
+    console.print(_banner_panel())
+    console.print(f"[cyan]A:[/] {labels[idx_a]}")
+    console.print(f"[cyan]B:[/] {labels[idx_b]}")
+    console.print("\nEnter blend ratio for A (0.0–1.0). 0.5 = equal blend, 0.7 = 70% A / 30% B.")
+    ratio_str = console.input("[cyan]Ratio > [/]").strip()
+    try:
+        ratio = float(ratio_str)
+        if not 0.0 <= ratio <= 1.0:
+            raise ValueError
+    except ValueError:
+        console.print("[red]Invalid ratio — must be a number between 0.0 and 1.0.[/]")
+        console.input("Press Enter.")
+        return
+
+    console.clear()
+    console.print(_banner_panel())
+    console.print(f"[dim]Loading A: {path_a.name}[/]")
+    try:
+        ckpt_a = torch.load(path_a, map_location="cpu", weights_only=False)
+        ckpt_b = torch.load(path_b, map_location="cpu", weights_only=False)
+    except Exception as e:
+        console.print(f"[red]Failed to load checkpoints: {e}[/]")
+        console.input("Press Enter.")
+        return
+
+    # Extract state dicts — handle both raw state dicts and PL checkpoint format
+    def _get_state(ckpt):
+        if isinstance(ckpt, dict) and "state_dict" in ckpt:
+            return ckpt["state_dict"]
+        return ckpt
+
+    sd_a = _get_state(ckpt_a)
+    sd_b = _get_state(ckpt_b)
+
+    if set(sd_a.keys()) != set(sd_b.keys()):
+        missing_in_b = set(sd_a.keys()) - set(sd_b.keys())
+        missing_in_a = set(sd_b.keys()) - set(sd_a.keys())
+        console.print("[red]Architecture mismatch — checkpoints have different keys.[/]")
+        if missing_in_b:
+            console.print(f"[dim]Keys in A not in B: {len(missing_in_b)} (e.g. {next(iter(missing_in_b))})[/]")
+        if missing_in_a:
+            console.print(f"[dim]Keys in B not in A: {len(missing_in_a)} (e.g. {next(iter(missing_in_a))})[/]")
+        console.input("Press Enter.")
+        return
+
+    console.print(f"[dim]Blending {len(sd_a)} tensors at ratio {ratio:.2f} A / {1-ratio:.2f} B ...[/]")
+    merged_sd = {}
+    skipped = 0
+    for key in sd_a:
+        t_a = sd_a[key]
+        t_b = sd_b[key]
+        if t_a.shape != t_b.shape:
+            skipped += 1
+            merged_sd[key] = t_a  # keep A's value for mismatched shapes
+            continue
+        if t_a.is_floating_point():
+            merged_sd[key] = ratio * t_a.float() + (1 - ratio) * t_b.float()
+            if not t_a.is_floating_point() or t_a.dtype != merged_sd[key].dtype:
+                merged_sd[key] = merged_sd[key].to(t_a.dtype)
+        else:
+            merged_sd[key] = t_a  # non-float tensors (e.g. int buffers): keep A
+
+    if skipped:
+        console.print(f"[yellow]Warning: {skipped} tensor(s) had shape mismatches — kept A's values for those.[/]")
+
+    # Build output checkpoint in PL format, using A's structure as the base
+    if isinstance(ckpt_a, dict) and "state_dict" in ckpt_a:
+        out_ckpt = {k: v for k, v in ckpt_a.items() if k != "state_dict"}
+        out_ckpt["state_dict"] = merged_sd
+        # Clear optimizer state — it's no longer valid for the merged weights
+        out_ckpt.pop("optimizer_states", None)
+        out_ckpt.pop("lr_schedulers", None)
+    else:
+        out_ckpt = merged_sd
+
+    # Determine output path next to checkpoint A
+    ratio_tag = f"{int(ratio*100)}a_{int((1-ratio)*100)}b"
+    stem_a = _re.sub(r"^step=\d+-", "", path_a.stem)  # strip step= prefix
+    out_name = f"merged-{ratio_tag}-{stem_a}.ckpt"
+    out_path = path_a.parent / out_name
+
+    torch.save(out_ckpt, out_path)
+    console.print(f"[green]Saved merged checkpoint:[/] {out_path.name}")
+    console.print(f"[dim]Location: {out_path.parent}[/]")
+    console.input("\nPress Enter.")
+
+
 def screen_utilities(state: dict) -> None:
     while True:
         items = [
             "Clean chunks folder",
             "Clean old checkpoints (keep best 5)",
             "View training runs",
+            "Merge checkpoints",
             "Degrade audio",
             "Align audio",
             "Update Apollo",
@@ -1115,12 +1255,14 @@ def screen_utilities(state: dict) -> None:
         elif idx == 2:
             _util_view_runs()
         elif idx == 3:
+            _util_merge_checkpoints()
+        elif idx == 4:
             from degrade_audio import screen_degrade_audio
             screen_degrade_audio(state, console, _pick, _run_with_live_output, ROOT)
-        elif idx == 4:
+        elif idx == 5:
             from align_audio import screen_align_audio
             screen_align_audio(state, console, _pick, _run_with_live_output, ROOT)
-        elif idx == 5:
+        elif idx == 6:
             _util_update()
 
 
