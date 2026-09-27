@@ -63,6 +63,17 @@ When `extra_layers > 0`, all pretrained layers are frozen and N new trainable BS
 
 - **Merge checkpoints**: blends two checkpoints at a configurable ratio. Shared keys are interpolated; keys unique to one model pass through untouched (supports partial merges between models with different layer counts). Optimizer state is cleared in the merged output.
 
+## Experiment Identities
+
+| Config | Dataset | Target degradation |
+|--------|---------|-------------------|
+| `apollo_stfl` / `apollo_stfl-og` | Eminem *Straight From The Lab* / *Encore* 2003 leaks. Mix of real LQ/HQ aligned pairs and synthetic approximation: WMA 128 → 192 MP3 VBR x5 → 192 MP3 CBR. `stfl-og` is the original run; `stfl` (and `stfl_new`) use less synthetic data and more carefully hand-aligned real leak pairs. | Hard HF cutoff from multi-gen lossy encoding; Napster/Limewire-era file sharing artifact chain. |
+| `apollo_stfl2` | Koolos leaks (2011) — WAV files encoded through various iTunes MP3 encoder versions at 128–192 kbps. | **No hard cutoff** (iTunes encoder behaviour); single or 2-generation iTunes MP3; distinct spectral signature from the STFL chain. Fine-tuned specifically for this. |
+| `apollo_stfl_new` | New run currently in training. Less synthetic data than stfl-og; majority real aligned STFL pairs. | Same target as stfl/stfl-og but cleaner training pairs. |
+| `apollo_uni` | General-purpose base model (pretrained, not fine-tuned here). Used as the weight source for all fine-tunes. | — |
+
+Do not conflate these experiments. Each model is specialised and not interchangeable.
+
 ## Running
 
 ```bash
