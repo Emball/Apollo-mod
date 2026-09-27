@@ -166,6 +166,7 @@ system:
   target_band_loss_lo_hz: 3000.0
   target_band_loss_hi_hz: 10500.0
   target_band_loss_weight: 1.0
+  band_loss_schedule: null  # set to list of {lo_hz, hi_hz} dicts to enable progressive schedule
 
 checkpoint:
   _target_: pytorch_lightning.callbacks.ModelCheckpoint

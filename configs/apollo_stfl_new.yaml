@@ -161,6 +161,13 @@ system:
   target_band_loss_lo_hz: 13000.0
   target_band_loss_hi_hz: 19000.0
   target_band_loss_weight: 1.0
+  # Progressive band loss schedule: phases advance automatically on two consecutive visqol drops.
+  # Phase 0 (2–6 kHz) activates on first val run, replacing target_band_loss_enabled above.
+  # 0-2k: minimal damage, skip. 16-20k: inaudible, skip.
+  band_loss_schedule:
+    - {lo_hz: 2000.0, hi_hz: 6000.0}    # Phase 1: lower mids (easier, faster to learn)
+    - {lo_hz: 6000.0, hi_hz: 10000.0}   # Phase 2: important mid zone
+    - {lo_hz: 10000.0, hi_hz: 14000.0}  # Phase 3: most important transition region
 
 checkpoint:
   _target_: pytorch_lightning.callbacks.ModelCheckpoint
