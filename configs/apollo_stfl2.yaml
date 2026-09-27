@@ -2,6 +2,7 @@ exp:
   dir: ./runs
   name: apollo_stfl2
 
+resume_checkpoint: null  # set to explicit .ckpt path to override auto-resume
 resume: true
 
 optimizations:
