@@ -1064,7 +1064,7 @@ def append_extra_layers(model, n_extra: int, init_scale: float = 0.5):
     init_scale controls how new layer weights are initialized:
       > 0.0 (default 0.5): copy the last pretrained layer, then scale only the
                            three output projection weights (band_net.output,
-                           band_net.MLP_output, seq_net.conv[-1]) by init_scale.
+                           band_net.MLP_output, each seq_net.blocks[i].conv[-1]) by init_scale.
                            Internal weights are kept at full strength so the layer
                            computes sensibly; only its *contribution* to the residual
                            stream is dialed back. This does NOT compound across
