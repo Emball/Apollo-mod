@@ -48,12 +48,7 @@ Composite score tuple: `(visqol, sisdr, -hfnr)` — visqol primary, sisdr tiebre
 - `system.val_songs` / `system.val_rotate_every`: always `${training.val_songs}` / `${training.val_rotate_every}`
 - All augmentation keys must be present even if disabled (`mid_side_isolation`, `deep_gain`, `silence_dip`)
 - `system.target_band_loss_enabled` / `target_band_loss_lo_hz` / `target_band_loss_hi_hz` / `target_band_loss_weight`: always present; weight defaults to `1.0`. This is a **training loss** (direct MAE on generator output vs HQ in the specified band), not a val metric.
-- `training.extra_layers`: number of new BSNet layers to append on top of frozen pretrained layers (default `0`)
-- `training.extra_layers_init_scale`: `0.5` = copy last pretrained layer's output projections at half strength (recommended); `0.0` = zero-init. Only scales `band_net.output`, `band_net.MLP_output`, and each `seq_net.blocks[i].conv[-1]` — internal weights are untouched, so the effect does not compound across multiple new layers.
 
-## Extra Layers System
-
-When `extra_layers > 0`, all pretrained layers are frozen and N new trainable BSNet blocks are appended. On fresh start, new layers are initialised via `init_scale`. On resume, checkpoint weights overwrite the init. `append_extra_layers` always runs when `extra_layers > 0` (both fresh and resume) so architecture matches before checkpoint load.
 
 ## Target Band Loss
 
