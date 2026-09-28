@@ -204,8 +204,6 @@ class AudioLightningModule(pl.LightningModule):
         target_band_loss_weight=1.0,
         # VISQOL: fraction of val audio pairs to score (0.0 = off, 1.0 = all)
         visqol_fraction=1.0,
-        # Progressive band loss schedule: list of {lo_hz, hi_hz} dicts, or None to disable
-        band_loss_schedule=None,
     ):
         super().__init__()
         self.audio_model      = model
@@ -223,10 +221,6 @@ class AudioLightningModule(pl.LightningModule):
         self.target_band_loss_hi_hz   = target_band_loss_hi_hz
         self.target_band_loss_weight  = target_band_loss_weight
         self.visqol_fraction          = max(0.0, min(1.0, float(visqol_fraction)))
-        # Band loss schedule: list of {lo_hz, hi_hz}, None if disabled
-        self._band_schedule       = list(band_loss_schedule) if band_loss_schedule else None
-        self._band_phase          = 0           # current phase index
-        self._band_phase_visqol   = []          # last 2 visqol values for trigger check
 
         # Val fixed-index lock (for val_loss / SI-SDR computation in validation_step)
         self._val_fixed_indices = None   # set[int] locked after first real val run
@@ -617,17 +611,6 @@ class AudioLightningModule(pl.LightningModule):
     # Validation epoch end
     # ------------------------------------------------------------------
 
-    def _apply_band_phase(self, phase_idx: int, step: int) -> None:
-        """Apply phase_idx from the band loss schedule and log the transition."""
-        if self._band_schedule is None or phase_idx >= len(self._band_schedule):
-            return
-        phase = self._band_schedule[phase_idx]
-        self.target_band_loss_enabled = True
-        self.target_band_loss_lo_hz   = float(phase["lo_hz"])
-        self.target_band_loss_hi_hz   = float(phase["hi_hz"])
-        print(f"[band_schedule] Phase {phase_idx + 1}/{len(self._band_schedule)}: "
-              f"{phase['lo_hz']:.0f}–{phase['hi_hz']:.0f} Hz  (step {step})")
-
     def on_validation_epoch_end(self):
         self._last_val_sisdr  = None
         self._last_val_hfnr    = None
@@ -705,26 +688,6 @@ class AudioLightningModule(pl.LightningModule):
         self.log("hfnr",   float(_hfnr)   if _hfnr   is not None else 0.0, prog_bar=False, logger=True)
         self.log("visqol", float(_visqol) if _visqol is not None else -1.0, prog_bar=False, logger=True)
 
-        # --- Progressive band loss scheduler ---
-        if self._band_schedule and _visqol is not None:
-            # Apply phase 0 on first real val run
-            if not self.target_band_loss_enabled and self._band_phase == 0:
-                self._apply_band_phase(0, self.trainer.global_step)
-
-            # Maintain a rolling window of the last 3 visqol values
-            self._band_phase_visqol.append(float(_visqol))
-            if len(self._band_phase_visqol) > 3:
-                self._band_phase_visqol = self._band_phase_visqol[-3:]
-
-            # Advance when two consecutive drops detected (v[0] > v[1] > v[2])
-            v = self._band_phase_visqol
-            if (len(v) == 3
-                    and v[0] > v[1] > v[2]
-                    and self._band_phase + 1 < len(self._band_schedule)):
-                self._band_phase += 1
-                self._band_phase_visqol.clear()
-                self._apply_band_phase(self._band_phase, self.trainer.global_step)
-
     # ------------------------------------------------------------------
     # Checkpoint persistence
     # ------------------------------------------------------------------
@@ -738,9 +701,6 @@ class AudioLightningModule(pl.LightningModule):
         checkpoint["val_next_rotate"]   = self._val_next_rotate
         checkpoint["val_window_best"]   = self._val_window_best
 
-        checkpoint["band_phase"]        = self._band_phase
-        checkpoint["band_phase_visqol"] = self._band_phase_visqol
-
     def on_load_checkpoint(self, checkpoint: dict) -> None:
         self._val_fixed_indices = checkpoint.get("val_fixed_indices", None)
         self._val_song_refs     = checkpoint.get("val_song_refs",     {})
@@ -749,9 +709,6 @@ class AudioLightningModule(pl.LightningModule):
         self._val_window_idx    = checkpoint.get("val_window_idx",    0)
         self._val_next_rotate   = checkpoint.get("val_next_rotate",   -1)
         self._val_window_best   = checkpoint.get("val_window_best",   {})
-
-        self._band_phase        = checkpoint.get("band_phase",        0)
-        self._band_phase_visqol = checkpoint.get("band_phase_visqol", [])
 
         # Strip state_dict keys from older checkpoints that no longer exist in model
         sd = checkpoint.get("state_dict", {})

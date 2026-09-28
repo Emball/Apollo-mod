@@ -13,7 +13,6 @@ from omegaconf import OmegaConf, open_dict
 import argparse
 import pytorch_lightning as pl
 import torch
-import torch.nn as nn
 import hydra
 from pytorch_lightning import Callback, LightningDataModule, LightningModule, Trainer
 from omegaconf import DictConfig
@@ -1057,78 +1056,60 @@ def freeze_early_layers(model, n_layers_to_freeze=4):
     total  = sum(p.numel() for p in model.parameters())
     print_only(f"Frozen {frozen:,} / {total:,} parameters ({100*frozen/total:.1f}%)")
 
-def append_extra_layers(model, n_extra: int, init_scale: float = 0.5):
+def append_extra_layers(model, n_extra: int):
     """
-    Freeze all pretrained layers and append n_extra new BSNet blocks to model.net.
+    Freeze all pretrained layers (BN + entire net stack) and append n_extra new
+    BSNet blocks to model.net that start as near-identity.
 
-    init_scale controls how new layer weights are initialized:
-      > 0.0 (default 0.5): copy the last pretrained layer, then scale only the
-                           three output projection weights (band_net.output,
-                           band_net.MLP_output, each seq_net.blocks[i].conv[-1]) by init_scale.
-                           Internal weights are kept at full strength so the layer
-                           computes sensibly; only its *contribution* to the residual
-                           stream is dialed back. This does NOT compound across
-                           multiple new layers the way scaling all weights would.
-                           At 1.0 they are exact duplicates with full contribution.
-      0.0:                 zero-init (legacy behavior -- new layers start
-                           destructive and must first learn to be neutral).
+    Each new block is zero-initialized so it passes input through unchanged at
+    the start of training: Roformer.output and Roformer.MLP_output are zeroed
+    (Roformer then acts as identity via its internal residuals), and the final
+    conv of each ICB ConvActNorm1d block is zeroed (so seq_net output ≈ 0,
+    and BSNet output ≈ band_net output ≈ input). The new blocks are the only
+    trainable parameters.
     """
     if n_extra <= 0:
         return
 
-    # Freeze everything pretrained
+    # Freeze everything pretrained: BN front-end + all existing net layers + output heads
     for param in model.parameters():
         param.requires_grad = False
 
+    # Determine feature_dim from the existing net
     feature_dim = model.feature_dim
-    existing = list(model.net.children())
-    source_layer = existing[-1]  # last pretrained layer to copy from
 
     from look2hear.models.apollo import BSNet
-    import copy
 
     new_layers = nn.ModuleList()
     for _ in range(n_extra):
-        if init_scale > 0.0:
-            # Duplicate last pretrained layer, then scale only the output projection
-            # weights that add back to the residual stream. Scaling all weights
-            # compounds across multiple new layers and causes amplitude loss;
-            # scaling only the output projections keeps internal representations
-            # intact and does not stack multiplicatively.
-            block = copy.deepcopy(source_layer)
-            with torch.no_grad():
-                # band_net: attention output proj + MLP output proj
-                block.band_net.output.weight.mul_(init_scale)
-                block.band_net.MLP_output.weight.mul_(init_scale)
-                # seq_net (ICB): last Conv1d in each ConvActNorm1d block is the output proj
-                for can in block.seq_net.blocks:
-                    last_conv = can.conv[-1]
-                    last_conv.weight.mul_(init_scale)
-                    if last_conv.bias is not None:
-                        last_conv.bias.mul_(init_scale)
-        else:
-            # Zero-init: Roformer output projections + last ICB conv zeroed
-            block = BSNet(feature_dim)
-            nn.init.zeros_(block.band_net.output.weight)
-            nn.init.zeros_(block.band_net.MLP_output.weight)
-            for can in block.seq_net.blocks:
-                last_conv = can.conv[-1]
-                nn.init.zeros_(last_conv.weight)
-                if last_conv.bias is not None:
-                    nn.init.zeros_(last_conv.bias)
+        block = BSNet(feature_dim)
 
+        # Zero-init Roformer output projections so attention + MLP are identity at init
+        nn.init.zeros_(block.band_net.output.weight)
+        nn.init.zeros_(block.band_net.MLP_output.weight)
+
+        # Zero-init the last conv in each ConvActNorm1d inside ICB so seq_net ≈ 0
+        for can in block.seq_net.blocks:
+            # ConvActNorm1d.conv is Sequential; last element is the output Conv1d
+            last_conv = can.conv[-1]
+            nn.init.zeros_(last_conv.weight)
+            if last_conv.bias is not None:
+                nn.init.zeros_(last_conv.bias)
+
+        # New block trains freely
         for param in block.parameters():
             param.requires_grad = True
 
         new_layers.append(block)
 
+    # Extend model.net (nn.Sequential) with the new blocks
+    existing = list(model.net.children())
     model.net = nn.Sequential(*(existing + list(new_layers)))
 
     pretrained_frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
     trainable_new    = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total            = pretrained_frozen + trainable_new
-    init_desc = f"duplicate×{init_scale}" if init_scale > 0.0 else "zero-init"
-    print_only(f"[extra_layers] Added {n_extra} new BSNet layer(s) ({init_desc}). "
+    print_only(f"[extra_layers] Added {n_extra} new BSNet layer(s) (zero-init). "
                f"Pretrained frozen: {pretrained_frozen:,} | New trainable: {trainable_new:,} | Total: {total:,}")
 
 
@@ -1175,21 +1156,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     _base_dir = os.path.join(cfg.exp.dir, cfg.exp.name)
     ckpt_path = None
 
-    _explicit_ckpt = cfg.get("resume_checkpoint", None)
-
-    if _explicit_ckpt:
-        # Explicit checkpoint path -- resolve relative to CWD if not absolute.
-        _explicit_ckpt = os.path.abspath(_explicit_ckpt)
-        if not os.path.isfile(_explicit_ckpt):
-            raise FileNotFoundError(f"[resume] resume_checkpoint not found: {_explicit_ckpt}")
-        ckpt_path = _explicit_ckpt
-        # Infer run dir from checkpoint path (two levels up: runs/<name>/<run_id>/checkpoints/<file>)
-        _run_dir = os.path.dirname(os.path.dirname(ckpt_path))
-        _run_id  = os.path.basename(_run_dir)
-        _migrate_legacy_ckpt_names(os.path.join(_run_dir, "checkpoints"))
-        print_only(f"[resume] Explicit checkpoint: {os.path.basename(ckpt_path)}")
-        print_only("[resume] Skipping pretrain weight loading -- checkpoint takes precedence.")
-    elif cfg.get("resume", False):
+    if cfg.get("resume", False):
         # Find the most recently modified run folder that has checkpoints
         _run_dir = None
         if os.path.isdir(_base_dir):
@@ -1331,12 +1298,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             print_only("[weights] Pretrained weights loaded.")
 
     n_extra = cfg.training.get("extra_layers", 0)
-    if n_extra > 0:
-        # Always append extra layers when configured -- fresh start initializes them
-        # per extra_layers_init_scale; on resume the checkpoint carries their trained weights.
+    if n_extra > 0 and not is_resume:
+        # Freeze all pretrained weights and append new zero-init BSNet layers.
         # append_extra_layers handles all freezing, so skip freeze_early_layers.
-        init_scale = cfg.training.get("extra_layers_init_scale", 0.5)
-        append_extra_layers(model, n_extra, init_scale=init_scale)
+        append_extra_layers(model, n_extra)
     else:
         # Standard partial freeze: BN front-end + first N layers, rest trainable.
         # (no-op when resuming since frozen params are restored by the checkpoint too)
@@ -1525,7 +1490,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             self._last_global_step = trainer.global_step
             self._last_batch_idx   = 0
             self._val_t0           = None
-            self._post_val_t       = None   # set at end of on_validation_end; cleared on first batch
             self._session_t0       = None   # set on first optimizer step
             self._session_done     = 0      # optimizer steps this session
             self._val_elapsed      = 0.0    # cumulative val time excluded from rate
@@ -1537,13 +1501,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
             if self._session_t0 is None:
                 self._session_t0 = now
-
-            # Absorb any time spent in checkpoint saves after validation end.
-            # ModelCheckpoint fires after on_validation_end, so its wall time
-            # would otherwise appear as idle time, producing 0.00 it/s.
-            if hasattr(self, '_post_val_t') and self._post_val_t is not None:
-                self._val_elapsed += now - self._post_val_t
-                self._post_val_t = None
 
             # Count every batch so it/s matches the original batch-level rate
             self._session_done += 1
@@ -1613,9 +1570,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             val_dur = _time.monotonic() - self._val_t0 if self._val_t0 else 0.0
             if hasattr(self, '_val_elapsed'):
                 self._val_elapsed += val_dur
-            # Record when we finished validation — checkpoint save fires after this,
-            # and its wall time must be excluded from the it/s calculation too.
-            self._post_val_t = _time.monotonic()
             if not getattr(self, '_val_sanity', True):
                 # Reprint the progress bar line in place with updated val metrics
                 visqol = getattr(pl_module, "_last_val_visqol", None)
@@ -1844,42 +1798,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             _ckpt_data["optimizer_states"] = []
             _ckpt_data["lr_schedulers"] = []
             _patched = True
-        else:
-            # Validate optimizer states against the current model's trainable parameters.
-            # A freeze-config change alters which params are trainable, so the saved optimizer's
-            # param_groups will have a different total parameter count. Detect this by summing
-            # numel() across all param_groups in the saved state and comparing to the live model.
-            # This works without calling configure_optimizers() (which needs trainer context).
-            _live_trainable = sum(p.numel() for p in system.parameters() if p.requires_grad)
-            _mismatch = False
-            for _i, _saved_opt in enumerate(_ckpt_data["optimizer_states"]):
-                # Each param_group's "params" is a list of parameter indices into the flat
-                # param list; total count of unique indices = number of tracked parameters.
-                _saved_param_ids = set()
-                for _pg in _saved_opt.get("param_groups", []):
-                    _saved_param_ids.update(_pg.get("params", []))
-                # The optimizer "state" dict maps param index -> {exp_avg, exp_avg_sq, ...}.
-                # Total params in state can differ from param_groups when some have no history yet,
-                # so use param_groups as the authoritative count.
-                _saved_n_groups = len(_saved_opt.get("param_groups", []))
-                # Also check total numel via state tensors if available for a stronger check.
-                _saved_numel = sum(
-                    v.numel()
-                    for _pid, _pstate in _saved_opt.get("state", {}).items()
-                    for _k, v in _pstate.items()
-                    if hasattr(v, "numel") and _k == "exp_avg"  # one tensor per param
-                )
-                if _saved_numel > 0 and abs(_saved_numel - _live_trainable) > 1000:
-                    print_only(
-                        f"[resume] Optimizer {_i} param count mismatch "
-                        f"(saved ~{_saved_numel}, current {_live_trainable}) -- dropping optimizer state."
-                    )
-                    _mismatch = True
-                    break
-            if _mismatch:
-                _ckpt_data["optimizer_states"] = []
-                _ckpt_data["lr_schedulers"] = []
-                _patched = True
 
         if _patched:
             torch.save(_ckpt_data, ckpt_path)
