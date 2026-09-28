@@ -1525,6 +1525,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             self._last_global_step = trainer.global_step
             self._last_batch_idx   = 0
             self._val_t0           = None
+            self._post_val_t       = None   # set at end of on_validation_end; cleared on first batch
             self._session_t0       = None   # set on first optimizer step
             self._session_done     = 0      # optimizer steps this session
             self._val_elapsed      = 0.0    # cumulative val time excluded from rate
@@ -1536,6 +1537,13 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
             if self._session_t0 is None:
                 self._session_t0 = now
+
+            # Absorb any time spent in checkpoint saves after validation end.
+            # ModelCheckpoint fires after on_validation_end, so its wall time
+            # would otherwise appear as idle time, producing 0.00 it/s.
+            if hasattr(self, '_post_val_t') and self._post_val_t is not None:
+                self._val_elapsed += now - self._post_val_t
+                self._post_val_t = None
 
             # Count every batch so it/s matches the original batch-level rate
             self._session_done += 1
@@ -1605,6 +1613,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             val_dur = _time.monotonic() - self._val_t0 if self._val_t0 else 0.0
             if hasattr(self, '_val_elapsed'):
                 self._val_elapsed += val_dur
+            # Record when we finished validation — checkpoint save fires after this,
+            # and its wall time must be excluded from the it/s calculation too.
+            self._post_val_t = _time.monotonic()
             if not getattr(self, '_val_sanity', True):
                 # Reprint the progress bar line in place with updated val metrics
                 visqol = getattr(pl_module, "_last_val_visqol", None)
