@@ -1844,6 +1844,27 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             _ckpt_data["optimizer_states"] = []
             _ckpt_data["lr_schedulers"] = []
             _patched = True
+        else:
+            # Check that each saved optimizer's param_groups count matches the live optimizer.
+            # A freeze-config change between runs will change group sizes and cause a crash.
+            _live_optims = system.configure_optimizers()
+            if isinstance(_live_optims, (list, tuple)):
+                _live_optims = _live_optims[0] if isinstance(_live_optims[0], list) else _live_optims
+            if not isinstance(_live_optims, list):
+                _live_optims = [_live_optims]
+            _saved_states = _ckpt_data["optimizer_states"]
+            _mismatch = False
+            for _i, (_saved, _live) in enumerate(zip(_saved_states, _live_optims)):
+                _saved_n = len(_saved.get("param_groups", []))
+                _live_n = len(_live.param_groups) if hasattr(_live, "param_groups") else _saved_n
+                if _saved_n != _live_n:
+                    print_only(f"[resume] Optimizer {_i} group size mismatch (saved {_saved_n}, current {_live_n}) -- dropping optimizer state.")
+                    _mismatch = True
+                    break
+            if _mismatch:
+                _ckpt_data["optimizer_states"] = []
+                _ckpt_data["lr_schedulers"] = []
+                _patched = True
 
         if _patched:
             torch.save(_ckpt_data, ckpt_path)
