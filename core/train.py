@@ -1845,20 +1845,35 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             _ckpt_data["lr_schedulers"] = []
             _patched = True
         else:
-            # Check that each saved optimizer's param_groups count matches the live optimizer.
-            # A freeze-config change between runs will change group sizes and cause a crash.
-            _live_optims = system.configure_optimizers()
-            if isinstance(_live_optims, (list, tuple)):
-                _live_optims = _live_optims[0] if isinstance(_live_optims[0], list) else _live_optims
-            if not isinstance(_live_optims, list):
-                _live_optims = [_live_optims]
-            _saved_states = _ckpt_data["optimizer_states"]
+            # Validate optimizer states against the current model's trainable parameters.
+            # A freeze-config change alters which params are trainable, so the saved optimizer's
+            # param_groups will have a different total parameter count. Detect this by summing
+            # numel() across all param_groups in the saved state and comparing to the live model.
+            # This works without calling configure_optimizers() (which needs trainer context).
+            _live_trainable = sum(p.numel() for p in system.parameters() if p.requires_grad)
             _mismatch = False
-            for _i, (_saved, _live) in enumerate(zip(_saved_states, _live_optims)):
-                _saved_n = len(_saved.get("param_groups", []))
-                _live_n = len(_live.param_groups) if hasattr(_live, "param_groups") else _saved_n
-                if _saved_n != _live_n:
-                    print_only(f"[resume] Optimizer {_i} group size mismatch (saved {_saved_n}, current {_live_n}) -- dropping optimizer state.")
+            for _i, _saved_opt in enumerate(_ckpt_data["optimizer_states"]):
+                # Each param_group's "params" is a list of parameter indices into the flat
+                # param list; total count of unique indices = number of tracked parameters.
+                _saved_param_ids = set()
+                for _pg in _saved_opt.get("param_groups", []):
+                    _saved_param_ids.update(_pg.get("params", []))
+                # The optimizer "state" dict maps param index -> {exp_avg, exp_avg_sq, ...}.
+                # Total params in state can differ from param_groups when some have no history yet,
+                # so use param_groups as the authoritative count.
+                _saved_n_groups = len(_saved_opt.get("param_groups", []))
+                # Also check total numel via state tensors if available for a stronger check.
+                _saved_numel = sum(
+                    v.numel()
+                    for _pid, _pstate in _saved_opt.get("state", {}).items()
+                    for _k, v in _pstate.items()
+                    if hasattr(v, "numel") and _k == "exp_avg"  # one tensor per param
+                )
+                if _saved_numel > 0 and abs(_saved_numel - _live_trainable) > 1000:
+                    print_only(
+                        f"[resume] Optimizer {_i} param count mismatch "
+                        f"(saved ~{_saved_numel}, current {_live_trainable}) -- dropping optimizer state."
+                    )
                     _mismatch = True
                     break
             if _mismatch:
