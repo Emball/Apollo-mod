@@ -1016,7 +1016,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     if _explicit_ckpt:
         # Explicit checkpoint path -- resolve relative to CWD if not absolute.
-        _explicit_ckpt = os.path.abspath(_explicit_ckpt)
+        _explicit_ckpt = os.path.abspath(str(_explicit_ckpt).strip().strip("\"'").strip())
         if not os.path.isfile(_explicit_ckpt):
             raise FileNotFoundError(f"[resume] resume_checkpoint not found: {_explicit_ckpt}")
         ckpt_path = _explicit_ckpt
