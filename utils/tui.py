@@ -49,70 +49,6 @@ AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".aac", ".m4a", ".aiff", ".aif"}
 console = Console()
 
 # ---------------------------------------------------------------------------
-# Legacy checkpoint filename migration
-# ---------------------------------------------------------------------------
-
-def _migrate_checkpoint_name(path: Path) -> Path:
-    """
-    Rename a single checkpoint file from any legacy naming scheme to the current one.
-    Returns the (possibly new) path. No-ops if the name is already current.
-
-    Legacy → current:
-      val_loss=    → sisdr=
-      val_visqol=  → visqol=
-      val_sfr=     → hfnr=
-      val_hfnr=    → hfnr=
-      -sdr=<val>   → stripped  (bare sdr, not sisdr)
-    """
-    import re as _re
-    stem = path.stem          # excludes .ckpt
-    new  = stem
-
-    new = new.replace("val_loss=",   "sisdr=")
-    new = new.replace("val_visqol=", "visqol=")
-    new = new.replace("val_sfr=",    "hfnr=")
-    new = new.replace("val_hfnr=",   "hfnr=")
-    # Strip -val_sdr=<value> and bare -sdr=<value> segments (not sisdr=)
-    new = _re.sub(r"-val_sdr=[\d.]+", "", new)
-    new = _re.sub(r"-(?<!si)sdr=[\d.]+", "", new)
-
-    if new == stem:
-        return path  # nothing changed
-
-    new_path = path.with_name(new + ".ckpt")
-    if new_path.exists():
-        # Target already exists — stale duplicate from partial migration; delete the old file
-        try:
-            path.unlink()
-        except Exception:
-            pass
-        return new_path
-    try:
-        path.rename(new_path)
-    except Exception as exc:
-        print(f"[migrate] could not rename {path.name}: {exc}")
-        return path
-    return new_path
-
-
-def migrate_checkpoints(runs_dir: Path) -> int:
-    """
-    Walk all checkpoint dirs under runs_dir and migrate any legacy-named .ckpt files.
-    Returns count of files renamed.
-    """
-    count = 0
-    if not runs_dir.exists():
-        return count
-    for ckpt in runs_dir.rglob("*.ckpt"):
-        if ckpt.name in ("last.ckpt", "interrupted.ckpt"):
-            continue
-        result = _migrate_checkpoint_name(ckpt)
-        if result != ckpt:
-            count += 1
-    return count
-
-
-# ---------------------------------------------------------------------------
 # Persistent state
 # ---------------------------------------------------------------------------
 
@@ -295,86 +231,39 @@ def _list_configs() -> list[Path]:
     return sorted(configs, key=lambda p: p.stem)
 
 
-def _ckpt_score(stem: str) -> tuple:
-    """
-    Composite score tuple for checkpoint ranking.
-    Primary: visqol (higher better).
-    Tiebreakers in order: sisdr, hfnr (lower = less noise).
-    Returns a tuple suitable for max() comparison; missing metrics use worst-case values.
-    """
-    import re as _re
-    stem = _re.sub(r"^\[\d+\]-", "", stem)
-    def _get(pattern, default):
-        m = _re.search(pattern, stem)
-        try:
-            return float(m.group(1)) if m else default
-        except Exception:
-            return default
-
-    visqol = _get(r"visqol=(-?[\d.]+)", -999.0)
-    sisdr  = _get(r"sisdr=(-?[\d.]+)",   -999.0)
-    hfnr    = _get(r"hfnr=(-?[\d.]+)",     999.0)   # lower hfnr is better → negate
-
-    # Existing checkpoints on disk have negated sisdr (legacy loss value); normalise
-    # so that higher magnitude always wins regardless of which convention was used.
-    if sisdr < 0:
-        sisdr = -sisdr
-
-    if visqol < 0:
-        return None  # no visqol = unscored
-    return (visqol, sisdr, -hfnr)
-
-
-def _dedup_ckpts(ckpts):
-    """
-    Given an iterable of Path objects, return a deduplicated list where only
-    the best-scoring checkpoint per step number is kept.  Duplicate step files
-    arise from partial migrations that left old and new names both present.
-    """
-    import re as _re
-    by_step = {}
-    for ckpt in ckpts:
-        m = _re.search(r"step=(\d+)", ckpt.stem)
-        step = int(m.group(1)) if m else None
-        score = _ckpt_score(ckpt.stem)
-        key = (ckpt.parent, step)
-        if key not in by_step or (score is not None and (by_step[key][1] is None or score > by_step[key][1])):
-            by_step[key] = (ckpt, score)
-    return [v[0] for v in by_step.values()]
-
-
 def _config_summary(cfg_path: Path) -> str:
     """Return a one-line summary of training state for this config."""
     try:
         import yaml  # type: ignore
-        import re as _re
         cfg = yaml.safe_load(cfg_path.read_text())
         name = cfg.get("exp", {}).get("name") or cfg_path.stem
         runs_path = RUNS_DIR / name
         if not runs_path.exists():
             return "no runs yet"
-        best_score = None
-        best_stem  = None
+        # find best checkpoint across all timestamped runs
+        import re as _re
+        best_sisdr = None
         best_step  = None
         for run_dir in sorted(runs_path.iterdir()):
             ckpt_dir = run_dir / "checkpoints"
             if not ckpt_dir.exists():
                 continue
-            for ckpt in _dedup_ckpts(ckpt_dir.glob("*.ckpt")):
-                score = _ckpt_score(ckpt.stem)
-                if score is None:
-                    continue
-                s = _re.search(r"step=(\d+)", ckpt.stem)
-                step = int(s.group(1)) if s else 0
-                if best_score is None or score > best_score:
-                    best_score = score
-                    best_stem  = ckpt.stem
-                    best_step  = step
-        if best_score is not None:
-            visqol, sisdr, neg_hfnr = best_score
-            return (f"best visqol={visqol:.3f}  sisdr={sisdr:.2f}"
-                    f"  hfnr={-neg_hfnr:.3f}  step={best_step}")
-        return "checkpoint found (no metrics in name)"
+            for ckpt in ckpt_dir.glob("*.ckpt"):
+                stem = _re.sub(r"^\[\d+\]-", "", ckpt.stem)
+                m = _re.search(r"val_loss=(-?[\d.]+)", stem)
+                s = _re.search(r"step=(\d+)", stem)
+                if m and s:
+                    try:
+                        sisdr = float(m.group(1))
+                        step  = int(s.group(1))
+                        if best_sisdr is None or sisdr > best_sisdr:
+                            best_sisdr = sisdr
+                            best_step  = step
+                    except Exception:
+                        pass
+        if best_sisdr is not None:
+            return f"best sisdr={-best_sisdr:.3f}  step={best_step}"
+        return "checkpoint found (no loss in name)"
     except Exception:
         return ""
 
@@ -384,7 +273,8 @@ def _config_summary(cfg_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 def _find_best_checkpoint(cfg_path: Path) -> Path | None:
-    """Find best checkpoint using composite score: visqol > sisdr > hfnr."""
+    """Find best checkpoint (highest sisdr) for a config."""
+    import re as _re
     try:
         import yaml
         cfg = yaml.safe_load(cfg_path.read_text())
@@ -392,19 +282,23 @@ def _find_best_checkpoint(cfg_path: Path) -> Path | None:
         runs_path = RUNS_DIR / name
         if not runs_path.exists():
             return None
-        best_score = None
+        best_sisdr = None
         best_ckpt  = None
         for run_dir in sorted(runs_path.iterdir()):
             ckpt_dir = run_dir / "checkpoints"
             if not ckpt_dir.exists():
                 continue
-            for ckpt in _dedup_ckpts(ckpt_dir.glob("*.ckpt")):
-                score = _ckpt_score(ckpt.stem)
-                if score is None:
-                    continue
-                if best_score is None or score > best_score:
-                    best_score = score
-                    best_ckpt  = ckpt
+            for ckpt in ckpt_dir.glob("*.ckpt"):
+                stem = _re.sub(r"^\[\d+\]-", "", ckpt.stem)
+                m = _re.search(r"val_loss=(-?[\d.]+)", stem)
+                if m:
+                    try:
+                        sisdr = float(m.group(1))
+                        if best_sisdr is None or sisdr > best_sisdr:
+                            best_sisdr = sisdr
+                            best_ckpt  = ckpt
+                    except Exception:
+                        pass
         return best_ckpt
     except Exception:
         return None
@@ -485,8 +379,8 @@ def _run_mid_training_inference(state: dict, cfg_path: Path, pause_file: Path) -
     # Build and run inference cmd
     import re as _re2
     stem = _re2.sub(r"^\[\d+\]-", "", latest_ckpt.stem)
-    m = _re2.search(r"visqol=(-?[\d.]+)", stem)
-    visqol_str = f"visqol={float(m.group(1)):.3f}" if (m and float(m.group(1)) >= 0) else ""
+    m = _re2.search(r"val_loss=(-?[\d.]+)", stem)
+    sisdr_str = f"sisdr={-float(m.group(1)):.3f}" if m else ""
 
     try:
         cfg_data = __import__("yaml").safe_load(cfg_path.read_text())
@@ -503,7 +397,7 @@ def _run_mid_training_inference(state: dict, cfg_path: Path, pause_file: Path) -
         "--feature_dim", str(feature_dim),
     ]
 
-    console.print(f"\n[cyan]Checkpoint:[/] {latest_ckpt.name}  {visqol_str}")
+    console.print(f"\n[cyan]Checkpoint:[/] {latest_ckpt.name}  {sisdr_str}")
     console.print(f"[cyan]Input:[/]      {Path(input_path).name}")
     console.print(f"[cyan]Output:[/]     {output_path}\n")
 
@@ -860,15 +754,15 @@ def screen_inference(state: dict) -> None:
     latest_ckpt = _find_latest_checkpoint(cfg_path)
     if latest_ckpt:
         stem = _re2.sub(r"^\[\d+\]-", "", latest_ckpt.stem)
-        m = _re2.search(r"visqol=(-?[\d.]+)", stem)
-        visqol_str = f"visqol={float(m.group(1)):.3f}" if (m and float(m.group(1)) >= 0) else ""
-        model_options.append(f"Latest checkpoint  {visqol_str}  ({latest_ckpt.name})")
+        m = _re2.search(r"val_loss=(-?[\d.]+)", stem)
+        sisdr_str = f"sisdr={-float(m.group(1)):.3f}" if m else ""
+        model_options.append(f"Latest checkpoint  {sisdr_str}  ({latest_ckpt.name})")
         model_paths.append(str(latest_ckpt))
     if best_ckpt and (not latest_ckpt or best_ckpt != latest_ckpt):
         stem = _re2.sub(r"^\[\d+\]-", "", best_ckpt.stem)
-        m = _re2.search(r"visqol=(-?[\d.]+)", stem)
-        visqol_str = f"visqol={float(m.group(1)):.3f}" if (m and float(m.group(1)) >= 0) else ""
-        model_options.append(f"Best checkpoint  {visqol_str}  ({best_ckpt.name})")
+        m = _re2.search(r"val_loss=(-?[\d.]+)", stem)
+        sisdr_str = f"sisdr={-float(m.group(1)):.3f}" if m else ""
+        model_options.append(f"Best checkpoint  {sisdr_str}  ({best_ckpt.name})")
         model_paths.append(str(best_ckpt))
     if model_file:
         model_options.append(f"Model file  ({model_file.name})")
@@ -1206,15 +1100,12 @@ def _util_clean_checkpoints() -> None:
             ckpt_dir = run_dir / "checkpoints"
             if not ckpt_dir.exists():
                 continue
-            all_ckpts = list(ckpt_dir.glob("*.ckpt"))
-            # Score each checkpoint; unscored ones go to the bottom
-            scored = []
-            for c in all_ckpts:
-                score = _ckpt_score(c.stem)
-                scored.append((score or (-999.0, -999.0, -999.0, -999.0), c))
-            # Sort best-first, keep top 5
-            scored.sort(key=lambda x: x[0], reverse=True)
-            to_delete = [c for _, c in scored[5:]]
+            ckpts = sorted(
+                [c for c in ckpt_dir.glob("*.ckpt") if "val_loss=" in c.stem],
+                key=lambda c: float(c.stem.split("val_loss=")[1])
+            )
+            # keep best 5
+            to_delete = ckpts[5:]
             for c in to_delete:
                 c.unlink()
                 removed += 1
@@ -1229,7 +1120,7 @@ def _util_view_runs() -> None:
     table = Table(title="Training Runs", border_style="dim cyan", show_lines=True)
     table.add_column("Config", style="cyan")
     table.add_column("Run", style="dim")
-    table.add_column("Best sisdr", style="green")
+    table.add_column("Best val_loss", style="green")
     table.add_column("Step")
     table.add_column("Checkpoints")
 
@@ -1247,9 +1138,9 @@ def _util_view_runs() -> None:
                 best_loss = None
                 best_step = None
                 for c in ckpts:
-                    if "sisdr=" in c.stem:
+                    if "val_loss=" in c.stem:
                         try:
-                            loss = float(c.stem.split("sisdr=")[1])
+                            loss = float(c.stem.split("val_loss=")[1])
                             step = int(c.stem.split("step=")[1].split("-")[0])
                             if best_loss is None or loss < best_loss:
                                 best_loss = loss
@@ -1291,7 +1182,6 @@ def screen_evaluate(state: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    migrate_checkpoints(RUNS_DIR)
     state = _load_state()
 
     MAIN_ITEMS = [

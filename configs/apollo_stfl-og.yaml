@@ -15,8 +15,7 @@ optimizations:
 
 training:
   n_layers_to_freeze: 4
-  extra_layers: 0
-  val_songs: 6
+  val_songs: 3
   val_rotate_every: auto
   grad_accum_steps: 1
 
@@ -35,29 +34,10 @@ datas:
       stereo_alternation:
         enabled: false
         prob: 1.0
-      mid_side_isolation:
-        enabled: false
-        prob_mid: 0.1
-        prob_side: 0.1
       gain:
         enabled: false
         prob: 0.5
         db_max: 1.5
-      deep_gain:
-        enabled: false
-        prob: 0.03
-        db_min: -10.0
-        db_max: -6.0
-      silence_dip:
-        enabled: false
-        prob: 0.05
-        max_hold_sec: 2.0
-        short_ramp_ms: 10.0
-        short_ramp_max_ms: 50.0
-        medium_ramp_ms: 50.0
-        medium_ramp_max_ms: 200.0
-        long_ramp_ms: 200.0
-        long_ramp_max_ms: 1000.0
       polarity:
         enabled: false
         prob: 0.5
@@ -156,23 +136,27 @@ system:
   _target_: look2hear.system.audio_litmodule.AudioLightningModule
   gradient_checkpointing: false
   grad_accum_steps: ${training.grad_accum_steps}
-  val_songs: ${training.val_songs}
-  val_rotate_every: ${training.val_rotate_every}
   visqol_fraction: 1.0
   target_band_loss_enabled: false
   target_band_loss_lo_hz: 13000.0
   target_band_loss_hi_hz: 19000.0
-  target_band_loss_weight: 1.0
+
+early_stopping:
+  _target_: pytorch_lightning.callbacks.EarlyStopping
+  monitor: val_sfr
+  patience: 2000
+  mode: max
+  verbose: true
 
 checkpoint:
   _target_: pytorch_lightning.callbacks.ModelCheckpoint
   dirpath: ${exp.dir}/${exp.name}/checkpoints
-  monitor: visqol
+  monitor: val_sfr
   mode: max
   verbose: true
   save_top_k: -1
   save_last: false
-  filename: 'step={step:06d}-sisdr={sisdr:.3f}-visqol={visqol:.3f}-hfnr={hfnr:.3f}'
+  filename: 'step={step:06d}-sisdr={val_loss:.3f}-visqol={val_visqol:.3f}-sdr={val_sdr:.3f}-sfr={val_sfr:.3f}'
 
 logger:
   _target_: pytorch_lightning.loggers.TensorBoardLogger
@@ -189,7 +173,6 @@ trainer:
   accelerator: cuda
   precision: 16-mixed
   limit_train_batches: 1.0
-  limit_val_batches: 1.0
   fast_dev_run: false
   val_check_interval: 306
   check_val_every_n_epoch: null

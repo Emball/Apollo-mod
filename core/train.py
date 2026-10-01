@@ -99,39 +99,6 @@ from look2hear.utils import print_only
 import warnings
 warnings.filterwarnings("ignore")
 
-def _migrate_legacy_ckpt_names(base_dir: str) -> None:
-    """Rename legacy-formatted checkpoint files to the current naming scheme."""
-    import re as _re
-    _SKIP = {"last.ckpt", "interrupted.ckpt"}
-    for root, _, files in os.walk(base_dir):
-        for fname in files:
-            if not fname.endswith(".ckpt") or fname in _SKIP:
-                continue
-            stem = fname[:-5]
-            new  = stem
-            new  = new.replace("val_loss=",   "sisdr=")
-            new  = new.replace("val_visqol=", "visqol=")
-            new  = new.replace("val_sfr=",    "hfnr=")
-            new  = new.replace("val_hfnr=",   "hfnr=")
-            new  = _re.sub(r"-val_sdr=[\d.]+", "", new)
-            new  = _re.sub(r"-(?<!si)sdr=[\d.]+", "", new)
-            if new == stem:
-                continue
-            src = os.path.join(root, fname)
-            dst = os.path.join(root, new + ".ckpt")
-            if os.path.exists(dst):
-                # stale duplicate — delete old file
-                try:
-                    os.unlink(src)
-                except Exception:
-                    pass
-                continue
-            try:
-                os.rename(src, dst)
-            except Exception as exc:
-                print_only(f"[migrate] could not rename {fname}: {exc}")
-
-
 # Constants -- chunk size is read from cfg.datas.segment_sec at runtime in prepare_data()
 _SR      = 44100
 _OVERLAP = 0.5
@@ -753,18 +720,14 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         _json.dump(_manifest_params(), _f, indent=2)
     return total
 
-def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 10.0, fixed_delay: int = None) -> None:
+def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 30.0, fixed_delay: int = None) -> None:
     """
-    Extract two content-rich 10s clips per LQ/HQ pair in src_root, following ViSQOL
-    input guidelines:
-      - ~8-10s per clip (clip_sec, default 10)
-      - Selected by highest-RMS energy windows (not silence, not intro/outro)
-      - Mono-mixed for RMS selection only; saved as stereo at model SR
-      - Two non-overlapping clips per song, with at least clip_sec gap between them
-    Files written: {stem}_clip0.wav, {stem}_clip1.wav in dst_root/LQ/ and dst_root/HQ/.
+    Extract exactly one random clip of clip_sec from each LQ/HQ pair in src_root.
+    Reuses the per-file WAV cache from _chunk_split. Writes one LQ and one HQ WAV
+    per song into dst_root/LQ/ and dst_root/HQ/.
     """
-    import hashlib
-    import torch
+    import random as _random
+    import hashlib, tempfile
     import torchaudio
 
     lq_src = os.path.join(src_root, "LQ")
@@ -775,6 +738,7 @@ def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 10.0, fix
     os.makedirs(os.path.join(dst_root, "LQ"), exist_ok=True)
     os.makedirs(os.path.join(dst_root, "HQ"), exist_ok=True)
 
+    # Reuse the same per-file WAV cache key as _chunk_split
     def _file_md5(path):
         h = hashlib.md5()
         with open(path, "rb") as f:
@@ -805,53 +769,9 @@ def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 10.0, fix
             torchaudio.save(dst, wav, _SR, encoding="PCM_F", bits_per_sample=32)
         return dst
 
-    def _pick_two_rms_clips(wav: "torch.Tensor", clip_samples: int, sr: int,
-                             margin_sec: float = 5.0) -> "list[int]":
-        """
-        Return start-sample offsets for two non-overlapping highest-RMS windows.
-        Skips the first and last margin_sec of the file. Clips must be separated
-        by at least clip_samples samples.
-        mono wav: shape (T,)
-        """
-        margin = int(margin_sec * sr)
-        n = wav.shape[-1]
-        search_start = margin
-        search_end   = n - margin - clip_samples
-        if search_end <= search_start:
-            # File too short for margin -- fall back to start/middle
-            mid = max(0, n // 2 - clip_samples // 2)
-            return [0, min(mid, max(0, n - clip_samples))]
-
-        # Scan with hop = clip_samples // 4 for reasonable resolution
-        hop = max(1, clip_samples // 4)
-        offsets = list(range(search_start, search_end + 1, hop))
-        if not offsets:
-            offsets = [search_start]
-
-        rms_scores = []
-        for s in offsets:
-            window = wav[s: s + clip_samples]
-            rms = float(window.pow(2).mean().sqrt())
-            rms_scores.append((rms, s))
-        rms_scores.sort(key=lambda x: -x[0])
-
-        # Best clip
-        best_rms, best_start = rms_scores[0]
-        # Second-best non-overlapping clip (gap >= clip_samples)
-        second_start = None
-        for rms, s in rms_scores[1:]:
-            if abs(s - best_start) >= clip_samples:
-                second_start = s
-                break
-        if second_start is None:
-            # Fallback: place second clip as far from first as possible
-            candidate = search_end if best_start < (search_start + search_end) // 2 else search_start
-            second_start = max(search_start, min(search_end, candidate))
-
-        return sorted([best_start, second_start])
-
     clip_samples = int(clip_sec * _SR)
 
+    # Match LQ/HQ pairs by stem, supporting any audio format (wav, flac, mp3)
     def _find_audio_pairs(lq_dir, hq_dir):
         lq_map = {os.path.splitext(f)[0]: os.path.join(lq_dir, f)
                   for f in os.listdir(lq_dir)
@@ -865,45 +785,38 @@ def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 10.0, fix
     pairs = _find_audio_pairs(lq_src, hq_src)
 
     print_only(f"\n[data/val] ==========================================================")
-    print_only(f"[data/val] Extracting 2x{clip_sec:.0f}s clips (highest-RMS, ViSQOL-compliant)")
-    print_only(f"[data/val] from {len(pairs)} val pair(s)")
+    print_only(f"[data/val] Extracting {clip_sec:.0f}s clips from {len(pairs)} val pair(s)")
     print_only(f"[data/val] ==========================================================\n")
     n = 0
     for song_idx, (lq_path, hq_path) in enumerate(pairs):
-        lq_wav_path = _cached_wav(lq_path)
-        hq_wav_path = _cached_wav(hq_path)
+        lq_wav = _cached_wav(lq_path)
+        hq_wav = _cached_wav(hq_path)
 
-        lq_wav, _ = torchaudio.load(lq_wav_path)  # already at _SR, stereo
-        hq_wav, _ = torchaudio.load(hq_wav_path)
+        lq_info = torchaudio.info(lq_wav)
+        hq_info = torchaudio.info(hq_wav)
+        min_frames = min(lq_info.num_frames, hq_info.num_frames)
 
-        min_frames = min(lq_wav.shape[-1], hq_wav.shape[-1])
+        if min_frames <= clip_samples:
+            start = 0
+        else:
+            start = _random.randint(0, min_frames - clip_samples)
 
-        # Mono mix HQ for RMS selection (reference should be clean per ViSQOL spec)
-        hq_mono = hq_wav[:, :min_frames].mean(dim=0)  # (T,)
-        starts = _pick_two_rms_clips(hq_mono, clip_samples, _SR)
+        lq_start = max(0, start - fixed_delay) if fixed_delay and fixed_delay > 0 else start
+        hq_start = max(0, start + fixed_delay) if fixed_delay and fixed_delay < 0 else start
+
+        lq_clip, _ = torchaudio.load(lq_wav, frame_offset=lq_start, num_frames=clip_samples)
+        hq_clip, _ = torchaudio.load(hq_wav, frame_offset=hq_start, num_frames=clip_samples)
+        if lq_clip.shape[0] == 1: lq_clip = lq_clip.repeat(2, 1)
+        if hq_clip.shape[0] == 1: hq_clip = hq_clip.repeat(2, 1)
 
         stem = os.path.splitext(os.path.basename(lq_path))[0]
-        for clip_idx, start in enumerate(starts):
-            lq_start = max(0, start - fixed_delay) if fixed_delay and fixed_delay > 0 else start
-            hq_start = max(0, start + fixed_delay) if fixed_delay and fixed_delay < 0 else start
+        torchaudio.save(os.path.join(dst_root, "LQ", f"{stem}.wav"), lq_clip, _SR, encoding="PCM_F", bits_per_sample=32)
+        torchaudio.save(os.path.join(dst_root, "HQ", f"{stem}.wav"), hq_clip, _SR, encoding="PCM_F", bits_per_sample=32)
 
-            lq_clip = lq_wav[:, lq_start: lq_start + clip_samples]
-            hq_clip = hq_wav[:, hq_start: hq_start + clip_samples]
+        print_only(f"[data/val]   {stem}: {clip_sec:.0f}s clip @ {start//_SR}s  [{song_idx+1}/{len(pairs)}]")
+        n += 1
 
-            # Pad to exact clip_samples if the file was shorter
-            if lq_clip.shape[-1] < clip_samples:
-                lq_clip = torch.nn.functional.pad(lq_clip, (0, clip_samples - lq_clip.shape[-1]))
-            if hq_clip.shape[-1] < clip_samples:
-                hq_clip = torch.nn.functional.pad(hq_clip, (0, clip_samples - hq_clip.shape[-1]))
-
-            out_name = f"{stem}_clip{clip_idx}.wav"
-            torchaudio.save(os.path.join(dst_root, "LQ", out_name), lq_clip, _SR, encoding="PCM_F", bits_per_sample=32)
-            torchaudio.save(os.path.join(dst_root, "HQ", out_name), hq_clip, _SR, encoding="PCM_F", bits_per_sample=32)
-
-            print_only(f"[data/val]   {stem} clip{clip_idx}: {clip_sec:.0f}s @ {start//_SR}s  [{song_idx+1}/{len(pairs)}]")
-            n += 1
-
-    print_only(f"[data/val] Done -- {n} clip files -> {dst_root}")
+    print_only(f"[data/val] Done -- {n} clip pairs -> {dst_root}")
 
 
 def prepare_data(cfg: DictConfig) -> None:
@@ -957,10 +870,10 @@ def prepare_data(cfg: DictConfig) -> None:
         train_chunks = os.path.join(_CHUNK_CACHE_DIR, train_key, "train")
         _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, fixed_delay=fixed_delay)
 
-    # Val clips: two 10s highest-RMS clips per song (ViSQOL-compliant), cached to disk.
+    # Val clips: one random 30s clip per song, cached to disk.
     # Reuses the WAV conversion cache from _chunk_split so no re-encoding.
-    val_clip_sec = 10.0
-    val_clip_key = _chunk_cache_key(data_val, fixed_delay, None, extra=f"valclip_2x{val_clip_sec:.0f}s_rms")
+    val_clip_sec = float(getattr(cfg.datas, "segment_sec", 3)) * 10
+    val_clip_key = _chunk_cache_key(data_val, fixed_delay, None, extra=f"valclip_{val_clip_sec:.0f}")
     val_wav_dir  = os.path.join(_CHUNK_CACHE_DIR, val_clip_key, "val")
     val_lq_check = os.path.join(val_wav_dir, "LQ")
     if os.path.isdir(val_lq_check) and any(f.endswith(".wav") for f in os.listdir(val_lq_check)):
@@ -1056,63 +969,6 @@ def freeze_early_layers(model, n_layers_to_freeze=4):
     total  = sum(p.numel() for p in model.parameters())
     print_only(f"Frozen {frozen:,} / {total:,} parameters ({100*frozen/total:.1f}%)")
 
-def append_extra_layers(model, n_extra: int):
-    """
-    Freeze all pretrained layers (BN + entire net stack) and append n_extra new
-    BSNet blocks to model.net that start as near-identity.
-
-    Each new block is zero-initialized so it passes input through unchanged at
-    the start of training: Roformer.output and Roformer.MLP_output are zeroed
-    (Roformer then acts as identity via its internal residuals), and the final
-    conv of each ICB ConvActNorm1d block is zeroed (so seq_net output ≈ 0,
-    and BSNet output ≈ band_net output ≈ input). The new blocks are the only
-    trainable parameters.
-    """
-    if n_extra <= 0:
-        return
-
-    # Freeze everything pretrained: BN front-end + all existing net layers + output heads
-    for param in model.parameters():
-        param.requires_grad = False
-
-    # Determine feature_dim from the existing net
-    feature_dim = model.feature_dim
-
-    from look2hear.models.apollo import BSNet
-
-    new_layers = nn.ModuleList()
-    for _ in range(n_extra):
-        block = BSNet(feature_dim)
-
-        # Zero-init Roformer output projections so attention + MLP are identity at init
-        nn.init.zeros_(block.band_net.output.weight)
-        nn.init.zeros_(block.band_net.MLP_output.weight)
-
-        # Zero-init the last conv in each ConvActNorm1d inside ICB so seq_net ≈ 0
-        for can in block.seq_net.blocks:
-            # ConvActNorm1d.conv is Sequential; last element is the output Conv1d
-            last_conv = can.conv[-1]
-            nn.init.zeros_(last_conv.weight)
-            if last_conv.bias is not None:
-                nn.init.zeros_(last_conv.bias)
-
-        # New block trains freely
-        for param in block.parameters():
-            param.requires_grad = True
-
-        new_layers.append(block)
-
-    # Extend model.net (nn.Sequential) with the new blocks
-    existing = list(model.net.children())
-    model.net = nn.Sequential(*(existing + list(new_layers)))
-
-    pretrained_frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
-    trainable_new    = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total            = pretrained_frozen + trainable_new
-    print_only(f"[extra_layers] Added {n_extra} new BSNet layer(s) (zero-init). "
-               f"Pretrained frozen: {pretrained_frozen:,} | New trainable: {trainable_new:,} | Total: {total:,}")
-
-
 def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # Apply hardware / compiler optimisations declared in cfg.optimizations
     apply_optimizations(cfg)
@@ -1126,8 +982,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # Recompute val_clip_key here (same formula as prepare_data) for use in the baseline cache.
     _vck_data_val    = os.path.join(_REPO_ROOT, "data", cfg.exp.name, "val")
     _vck_fixed_delay = int(cfg.datas.fixed_align_samples) if getattr(cfg.datas, "fixed_align_samples", None) else None
-    _vck_clip_sec    = 10.0
-    val_clip_key     = _chunk_cache_key(_vck_data_val, _vck_fixed_delay, None, extra=f"valclip_2x{_vck_clip_sec:.0f}s_rms")
+    _vck_clip_sec    = float(getattr(cfg.datas, "segment_sec", 3)) * 10
+    val_clip_key     = _chunk_cache_key(_vck_data_val, _vck_fixed_delay, None, extra=f"valclip_{_vck_clip_sec:.0f}")
 
     # Verify chunks exist -- if data/ was empty, provide a clear error
     train_lq   = os.path.join(cfg.datas.train_dir, "LQ")
@@ -1160,7 +1016,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         # Find the most recently modified run folder that has checkpoints
         _run_dir = None
         if os.path.isdir(_base_dir):
-            _migrate_legacy_ckpt_names(_base_dir)
             _subdirs = [
                 os.path.join(_base_dir, d)
                 for d in os.listdir(_base_dir)
@@ -1297,15 +1152,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             )
             print_only("[weights] Pretrained weights loaded.")
 
-    n_extra = cfg.training.get("extra_layers", 0)
-    if n_extra > 0 and not is_resume:
-        # Freeze all pretrained weights and append new zero-init BSNet layers.
-        # append_extra_layers handles all freezing, so skip freeze_early_layers.
-        append_extra_layers(model, n_extra)
-    else:
-        # Standard partial freeze: BN front-end + first N layers, rest trainable.
-        # (no-op when resuming since frozen params are restored by the checkpoint too)
-        freeze_early_layers(model, n_layers_to_freeze=cfg.training.n_layers_to_freeze)
+    # Freeze early layers for fine-tuning -- count driven by config
+    # (no-op when resuming since frozen params are restored by the checkpoint too)
+    freeze_early_layers(model, n_layers_to_freeze=cfg.training.n_layers_to_freeze)
 
     # Instantiate discriminator fresh -- learns your artifact type from scratch
     print_only(f"Instantiating Discriminator <{cfg.discriminator._target_}>")
@@ -1488,7 +1337,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         def on_train_epoch_start(self, trainer, pl_module):
             self._epoch_batches    = trainer.num_training_batches
             self._last_global_step = trainer.global_step
-            self._last_batch_idx   = 0
             self._val_t0           = None
             self._session_t0       = None   # set on first optimizer step
             self._session_done     = 0      # optimizer steps this session
@@ -1514,16 +1362,17 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             done  = batch_idx + 1
             total = self._epoch_batches
             pct   = 100 * done / total
-            self._last_batch_idx = batch_idx
             # Show last val metrics inline if available
             visqol = getattr(pl_module, "_last_val_visqol", None)
-            hfnr    = getattr(pl_module, "_last_val_hfnr",    None)
+            sdr    = getattr(pl_module, "_last_val_sdr",    None)
+            sfr    = getattr(pl_module, "_last_val_sfr",    None)
             sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
             tbl    = getattr(pl_module, "_last_val_tbl",    None)
             val_parts = []
             if visqol is not None: val_parts.append(f"visqol={float(visqol):.3f}")
-            if sisdr  is not None: val_parts.append(f"sisdr={float(sisdr):.3f}")
-            if hfnr    is not None: val_parts.append(f"hfnr={float(hfnr):.3f}")
+            if sdr    is not None: val_parts.append(f"sdr={float(sdr):.3f}")
+            if sfr    is not None: val_parts.append(f"sfr={float(sfr):.3f}")
+            if sisdr  is not None: val_parts.append(f"sisdr={-float(sisdr):.3f}")
             if tbl    is not None: val_parts.append(f"tbl={float(tbl):.4f}")
             val_str = "  " + "  ".join(val_parts) if val_parts else ""
             print(
@@ -1560,37 +1409,34 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         def on_validation_epoch_start(self, trainer, pl_module):
             self._val_t0     = _time.monotonic()
             self._val_sanity = trainer.sanity_checking
-            if not self._val_sanity:
-                print("\r  Validating...                                                  ", end="", flush=True)
 
         def on_validation_epoch_end(self, trainer, pl_module):
+            # Do NOT stop the timer here -- AudioLightningModule.on_validation_epoch_end
+            # fires AFTER this callback hook and runs _save_val_audio() + metrics.
+            # Timer stops in on_validation_end which fires after all module hooks.
             pass
 
         def on_validation_end(self, trainer, pl_module):
+            # Timer stops here -- after all val hooks including audio saves/metrics.
             val_dur = _time.monotonic() - self._val_t0 if self._val_t0 else 0.0
             if hasattr(self, '_val_elapsed'):
                 self._val_elapsed += val_dur
             if not getattr(self, '_val_sanity', True):
-                # Reprint the progress bar line in place with updated val metrics
                 visqol = getattr(pl_module, "_last_val_visqol", None)
-                hfnr    = getattr(pl_module, "_last_val_hfnr",    None)
+                sdr    = getattr(pl_module, "_last_val_sdr",    None)
+                sfr    = getattr(pl_module, "_last_val_sfr",    None)
                 sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
                 tbl    = getattr(pl_module, "_last_val_tbl",    None)
-                val_parts = []
-                if visqol is not None: val_parts.append(f"visqol={float(visqol):.3f}")
-                if sisdr  is not None: val_parts.append(f"sisdr={float(sisdr):.3f}")
-                if hfnr    is not None: val_parts.append(f"hfnr={float(hfnr):.3f}")
-                if tbl    is not None: val_parts.append(f"tbl={float(tbl):.4f}")
-                val_str = "  " + "  ".join(val_parts) if val_parts else ""
-                step  = trainer.global_step
-                epoch = trainer.current_epoch
-                total = getattr(self, "_epoch_batches", 0)
-                done  = getattr(self, "_last_batch_idx", 0) + 1 if total else 0
-                pct   = 100 * done / total if total else 0.0
-                print(
-                    f"\r  {pct:5.1f}%  step={step}  {done}/{total}  --{val_str}",
-                    end="", flush=True
-                )
+                parts = []
+                if visqol is not None: parts.append(f"visqol={float(visqol):.3f}")
+                if sdr    is not None: parts.append(f"sdr={float(sdr):.3f}")
+                if sfr    is not None:
+                    flag = " noise^" if float(sfr) > 1.05 else ""
+                    parts.append(f"sfr={float(sfr):.3f}{flag}")
+                if sisdr  is not None: parts.append(f"sisdr={-float(sisdr):.3f}")
+                if tbl    is not None: parts.append(f"tbl={float(tbl):.4f}")
+                if parts:
+                    print(f"\n  [val] {' '.join(parts)}  ({val_dur:.1f}s)", flush=True)
 
     callbacks: List[Callback] = [StepPrinter()]
 
@@ -1600,23 +1446,33 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         print_only("[train] limit_val_batches=0 -- skipping early_stopping and checkpoint callbacks")
 
     checkpoint = None
+    if cfg.get("early_stopping") and not val_disabled:
+        print_only(f"Instantiating early_stopping")
+        es = hydra.utils.instantiate(cfg.early_stopping)
+        # Monitor sfr directly -- it's the metric that actually flags GAN
+        # collapse (discriminator-satisfying noise instead of real signal).
+        # Lower = better; the "noise^" flag in the printout fires above 1.05.
+        es.monitor = "val_sfr"
+        es.mode    = "min"
+        callbacks.append(es)
     if cfg.get("checkpoint") and not val_disabled:
         print_only(f"Instantiating checkpoint")
         checkpoint = hydra.utils.instantiate(cfg.checkpoint)
-        # Monitor hfnr, not a composite -- see note above.
-        checkpoint.monitor = "visqol"
+        # Monitor sfr, not a composite -- see note above.
+        checkpoint.monitor = "val_sfr"
         checkpoint.mode    = "min"
         checkpoint.save_top_k = -1
         # Full stats in filename; all metrics are logged via self.log() so
         # Lightning can interpolate them here.
         # Lightning interpolates {metric:fmt} as metric=VALUE automatically.
         # Don't add extra label= text before {metric} tokens or they double up.
-        # Result: step=000200-sisdr=-20.892-visqol=3.821-hfnr=0.968
+        # Result: step=000200-val_loss=-20.892-val_visqol=3.821-val_sdr=10.234-val_sfr=0.968
         checkpoint.filename = (
             "{step:06d}"
-            "-{sisdr:.3f}"
-            "-{visqol:.3f}"
-            "-{hfnr:.3f}"
+            "-{val_loss:.3f}"
+            "-{val_visqol:.3f}"
+            "-{val_sdr:.3f}"
+            "-{val_sfr:.3f}"
         )
         callbacks.append(checkpoint)
 
@@ -1652,13 +1508,15 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             step = trainer.global_step
             try:
                 m = trainer.callback_metrics
-                vl     = m.get("sisdr",   None)
-                visqol = m.get("visqol", None)
-                hfnr    = m.get("hfnr",    None)
+                vl     = m.get("val_loss",   None)
+                visqol = m.get("val_visqol", None)
+                sdr    = m.get("val_sdr",    None)
+                sfr    = m.get("val_sfr",    None)
                 parts = [f"{step:06d}"]
-                if vl     is not None: parts.append(f"sisdr={float(vl):.3f}")
-                if visqol is not None: parts.append(f"visqol={float(visqol):.3f}")
-                if hfnr    is not None: parts.append(f"hfnr={float(hfnr):.3f}")
+                if vl     is not None: parts.append(f"val_loss={float(vl):.3f}")
+                if visqol is not None: parts.append(f"val_visqol={float(visqol):.3f}")
+                if sdr    is not None: parts.append(f"val_sdr={float(sdr):.3f}")
+                if sfr    is not None: parts.append(f"val_sfr={float(sfr):.3f}")
                 fname = "-".join(parts) + ".ckpt"
             except Exception:
                 fname = f"{step:06d}.ckpt"
@@ -1697,31 +1555,26 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         )
         _baseline_cache_file = os.path.join(_baseline_cache_dir, f"{_baseline_cache_key_}.json")
 
-        def _apply_baseline_to_system(bl_dict: dict) -> None:
-            """Populate system._last_val_* from a baseline results dict so the
-            progress bar shows baseline values before the first training step."""
-            system._last_val_sisdr  = bl_dict.get("sisdr")
-            system._last_val_hfnr    = bl_dict.get("hfnr")
-            system._last_val_visqol = bl_dict.get("visqol")
-
         if os.path.isfile(_baseline_cache_file):
             try:
                 with open(_baseline_cache_file) as _bcf:
                     _cached_bl = _json.load(_bcf)
-                print_only(f"[baseline] Cached ({_baseline_cache_key_[:8]}...)")
-                _apply_baseline_to_system(_cached_bl)
+                _parts = "  ".join(f"{k}={v:.3f}" for k, v in _cached_bl.items())
+                print_only(f"\n[baseline] Cache hit ({_baseline_cache_key_[:8]}...) -- skipping val pass.")
+                print_only(f"[baseline] {_parts}  (pretrained, before any training)")
             except Exception as _e:
                 print_only(f"[baseline] Cache read failed ({_e}) -- will re-run.")
                 os.remove(_baseline_cache_file)
         else:
-            print_only("[baseline] Evaluating pretrained weights...")
+            print_only("\n[baseline] Evaluating pretrained weights before training...")
             _baseline_ok = True
             try:
                 import psutil as _ps
                 _vm = _ps.virtual_memory()
                 _headroom = (_vm.total * opt.get("ram_limit_fraction", 0.95)) - _vm.used
                 if _headroom < 1.5 * (1024 ** 3):
-                    print_only(f"[baseline] Skipped -- only {_headroom/(1024**3):.1f} GB RAM headroom.")
+                    print_only(f"[baseline] Skipped -- only {_headroom/(1024**3):.1f} GB RAM headroom "
+                               f"(system RAM already near threshold). First val run after training starts will serve as baseline.")
                     _baseline_ok = False
             except Exception:
                 pass
@@ -1742,7 +1595,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                         os.makedirs(_baseline_cache_dir, exist_ok=True)
                         with open(_baseline_cache_file, "w") as _bcf:
                             _json.dump(_to_cache, _bcf, indent=2)
-                        _apply_baseline_to_system(_to_cache)
+                        print_only(f"[baseline] Cached to {_baseline_cache_key_[:8]}...")
+                        bl_sisdr = bl.get("val_loss", None)
+                        if bl_sisdr is not None:
+                            print_only(f"[baseline] sisdr={-float(bl_sisdr):.3f}  (pretrained, before any training)")
                 except Exception as e:
                     print_only(f"[baseline] Skipped: {e}")
 

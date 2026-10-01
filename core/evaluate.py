@@ -6,20 +6,24 @@ Launched from tui.py as a TUI screen, or standalone:
 
 Metrics computed per checkpoint:
     visqol  -- ViSQOL perceptual score (primary; requires: uv pip install "visqol-python[all]")
-    hfnr     -- Spectral flatness ratio (HF noise canary)
-    sisdr   -- SI-SDR (scale-invariant waveform quality)
+    sdr     -- Signal-to-Distortion Ratio (waveform integrity)
+    sfr     -- Spectral flatness ratio (artifact canary)
+    sisdr   -- SI-SDR (legacy, noisy -- low weight)
+    msstft  -- Multi-scale log-STFT loss (computed here; not in live training)
     hfmae   -- HF band MAE (configurable; computed here for legacy checkpoints)
 
 Ranking weights (evaluate.py only -- offline, VISQOL-anchored):
-    visqol=0.60, hfnr=0.25, sisdr=0.15
+    visqol=0.50, sdr=0.25, sfr=0.15, sisdr=0.10
+
+Training-time RankBadger uses a separate weighting (no VISQOL).
 
 Metrics already encoded in the checkpoint filename are read directly --
 only missing metrics trigger inference. This means subsequent evaluate runs
 on the same checkpoint set are fast (VISQOL only).
 
 VISQOL scores are cached in <ckpt_dir>/.eval_cache.json so they survive
-across sessions. hfmae, hfnr are always re-read from the filename
-or recomputed fresh.
+across sessions. SDR, hfmae, msstft, sfr are always re-read from the
+filename or recomputed fresh.
 """
 
 from __future__ import annotations
@@ -40,7 +44,7 @@ _CORE_DIR  = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(_CORE_DIR)
 sys.path.insert(0, _CORE_DIR)
 from look2hear.system.audio_litmodule import (
-    _hf_noise_ratio, _hf_band_mae_cpu,
+    _ms_log_stft_loss, _spectral_flatness_ratio, _hf_band_mae_cpu,
     _get_visqol_api, _visqol_score,
 )
 import look2hear.models.apollo
@@ -52,55 +56,25 @@ _SR = 44100
 # Weights (evaluate.py offline ranking -- VISQOL-anchored)
 # ---------------------------------------------------------------------------
 _EVAL_WEIGHTS = {
-    "visqol": 0.60,
-    "hfnr":    0.25,
-    "sisdr":  0.15,
+    "visqol": 0.50,
+    "sdr":    0.25,
+    "sfr":    0.15,
+    "sisdr":  0.10,
+    "msstft": 0.00,  # kept for display; excluded from composite (superseded by visqol)
     "hfmae":  0.00,  # kept for display; excluded from composite (use target_band_loss in config)
 }
 
 # Metrics where higher = better (will be inverted during normalization)
-_HIGHER_IS_BETTER = {"visqol", "sisdr"}
+_HIGHER_IS_BETTER = {"visqol", "sisdr", "sdr"}
 
 # Patterns to parse metric values out of checkpoint filenames
 _FILENAME_PATS = {
     "sisdr":  re.compile(r"sisdr=(-?[\d.]+)"),
-    "hfnr":    re.compile(r"hfnr=(-?[\d.]+)"),
+    "msstft": re.compile(r"msstft=(-?[\d.]+)"),
+    "sfr":    re.compile(r"sfr=(-?[\d.]+)"),
     "hfmae":  re.compile(r"hfmae=(-?[\d.]+)"),
+    "sdr":    re.compile(r"(?<![a-z])sdr=(-?[\d.]+)"),
 }
-
-
-# ---------------------------------------------------------------------------
-# Legacy checkpoint filename migration
-# ---------------------------------------------------------------------------
-
-def _migrate_legacy_ckpt_names_eval(ckpt_dir: str) -> None:
-    """Rename legacy-formatted .ckpt files in ckpt_dir to the current scheme."""
-    _SKIP = {"last.ckpt", "interrupted.ckpt"}
-    for fname in os.listdir(ckpt_dir):
-        if not fname.endswith(".ckpt") or fname in _SKIP:
-            continue
-        stem = fname[:-5]
-        new  = stem
-        new  = new.replace("val_loss=",   "sisdr=")
-        new  = new.replace("val_visqol=", "visqol=")
-        new  = new.replace("val_sfr=",    "hfnr=")
-        new  = new.replace("val_hfnr=",   "hfnr=")
-        new  = re.sub(r"-val_sdr=[\d.]+", "", new)
-        new  = re.sub(r"-(?<!si)sdr=[\d.]+", "", new)
-        if new == stem:
-            continue
-        src = os.path.join(ckpt_dir, fname)
-        dst = os.path.join(ckpt_dir, new + ".ckpt")
-        if os.path.exists(dst):
-            try:
-                os.unlink(src)
-            except Exception:
-                pass
-            continue
-        try:
-            os.rename(src, dst)
-        except Exception as exc:
-            print(f"[migrate] could not rename {fname}: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -213,9 +187,9 @@ def _parse_filename_metrics(fname: str) -> dict:
         m = pat.search(clean)
         if m:
             v = float(m.group(1))
-            # normalise sisdr sign: old checkpoints stored negated loss value
+            # sisdr is stored as negative val_loss in filename; convert back to positive
             if key == "sisdr":
-                v = abs(v)
+                v = -v
             vals[key] = v
     return vals
 
@@ -235,15 +209,19 @@ def _eval_checkpoint(
     Compute metrics for one checkpoint. Skips metrics already in known_metrics.
     Returns a dict of all metrics (known + newly computed).
     """
-    need_inference = not all(k in known_metrics for k in ("hfnr", "hfmae"))
+    need_inference = not all(k in known_metrics for k in ("msstft", "sfr", "hfmae", "sdr"))
 
     metrics = dict(known_metrics)
 
     if not need_inference and not run_visqol:
         return metrics
 
-    hfnr_sum    = 0.0
+    _sdr_fn = look2hear.losses.MultiSrcNegSDR("snr", zero_mean=True)
+
+    msstft_sum = 0.0
+    sfr_sum    = 0.0
     hfmae_sum  = 0.0
+    sdr_sum    = 0.0
     sisdr_sum  = 0.0
     visqol_sum = 0.0
     visqol_n   = 0
@@ -269,10 +247,14 @@ def _eval_checkpoint(
                     r_cpu  = r_gpu.float().cpu()
 
                 if need_inference:
-                    if "hfnr" not in known_metrics:
-                        hfnr_sum    += _hf_noise_ratio(e_cpu, r_cpu)
+                    if "msstft" not in known_metrics:
+                        msstft_sum += _ms_log_stft_loss(e_cpu, r_cpu)
+                    if "sfr" not in known_metrics:
+                        sfr_sum    += _spectral_flatness_ratio(e_cpu, r_cpu)
                     if "hfmae" not in known_metrics:
                         hfmae_sum  += _hf_band_mae_cpu(e_cpu, r_cpu)
+                    if "sdr" not in known_metrics:
+                        sdr_sum    += -float(_sdr_fn(e_cpu.unsqueeze(0), r_cpu.unsqueeze(0)).mean())
                     if "sisdr" not in known_metrics:
                         _sisdr_fn = look2hear.losses.MultiSrcNegSDR("sisdr", zero_mean=True)
                         sisdr_sum  += -float(_sisdr_fn(e_cpu.unsqueeze(0), r_cpu.unsqueeze(0)).mean())
@@ -291,8 +273,10 @@ def _eval_checkpoint(
         return metrics
 
     if need_inference:
-        if "hfnr"    not in known_metrics: metrics["hfnr"]    = hfnr_sum    / n
+        if "msstft" not in known_metrics: metrics["msstft"] = msstft_sum / n
+        if "sfr"    not in known_metrics: metrics["sfr"]    = sfr_sum    / n
         if "hfmae"  not in known_metrics: metrics["hfmae"]  = hfmae_sum  / n
+        if "sdr"    not in known_metrics: metrics["sdr"]    = sdr_sum    / n
         if "sisdr"  not in known_metrics: metrics["sisdr"]  = sisdr_sum  / n
 
     if run_visqol and visqol_n > 0:
@@ -310,7 +294,7 @@ def _rank_results(results: list[tuple]) -> list[tuple]:
     """
     results: list of (fname, ckpt_path, metrics_dict)
     Returns same list sorted best-first with 'rank' and 'composite' added to metrics.
-    Weights: visqol=0.60, hfnr=0.25, sisdr=0.15
+    Weights: visqol=0.40, hfmae=0.25, msstft=0.20, sfr=0.10, sdr=0.05
     Falls back gracefully when VISQOL is absent (renormalizes weights).
     """
     keys = list(_EVAL_WEIGHTS.keys())
@@ -434,7 +418,6 @@ def run_evaluation(
     print_fn(f"[eval] {len(chunks)} chunks across {len(_by_s)} songs "
              f"({min(_by_s.values())}-{max(_by_s.values())} per song)")
 
-    _migrate_legacy_ckpt_names_eval(ckpt_dir)
     ckpt_files = sorted(
         f for f in os.listdir(ckpt_dir)
         if f.endswith(".ckpt") and (pattern is None or pattern in f)
@@ -465,12 +448,12 @@ def run_evaluation(
             known["visqol"] = cache[cache_key]["visqol"]
 
         needs_model = (
-            not all(k in known for k in ("hfnr", "hfmae"))
+            not all(k in known for k in ("msstft", "sfr", "hfmae", "sdr"))
             or (run_visqol and "visqol" not in known)
         )
 
         parts = []
-        for k in ("hfnr", "hfmae", "sisdr"):
+        for k in ("msstft", "sfr", "hfmae", "sdr", "sisdr"):
             if k in known:
                 parts.append(f"{k}={known[k]:.4f}")
         cached_str = "  ".join(parts) if parts else ""
@@ -490,7 +473,7 @@ def run_evaluation(
                     _save_cache(ckpt_dir, cache)
 
                 new_parts = []
-                for k in ("hfnr", "hfmae", "sisdr", "visqol"):
+                for k in ("msstft", "sfr", "hfmae", "sdr", "sisdr", "visqol"):
                     if k in metrics and k not in known:
                         new_parts.append(f"{k}={metrics[k]:.4f}")
                 print_fn("  ".join(new_parts) if new_parts else "ok")
@@ -514,7 +497,7 @@ def run_evaluation(
 def print_results_table(results: list[tuple], print_fn=print) -> None:
     has_visqol = any("visqol" in m for _, _, m in results)
     cols = ["visqol"] if has_visqol else []
-    cols += ["hfmae", "hfnr", "sisdr"]
+    cols += ["hfmae", "msstft", "sfr", "sdr", "sisdr"]
 
     header = f"{'Rank':<5}"
     for c in cols:
@@ -530,8 +513,8 @@ def print_results_table(results: list[tuple], print_fn=print) -> None:
         for c in cols:
             if c in m:
                 val = m[c]
-                hfnr_flag = " ^" if c == "hfnr" and val > 1.05 else "  "
-                row += f" {val:>8.4f}{hfnr_flag}" if c == "hfnr" else f" {val:>8.4f}  "
+                sfr_flag = " ^" if c == "sfr" and val > 1.05 else "  "
+                row += f" {val:>8.4f}{sfr_flag}" if c == "sfr" else f" {val:>8.4f}  "
             else:
                 row += f" {'--':>8}  "
         row += f" {fname}"
@@ -542,7 +525,7 @@ def print_results_table(results: list[tuple], print_fn=print) -> None:
         best_fname, _, best_m = results[0]
         print_fn(f"\nBest: {best_fname}")
         summary = "  ".join(
-            f"{k}={best_m[k]:.4f}" for k in ("visqol", "hfmae", "hfnr", "sisdr")
+            f"{k}={best_m[k]:.4f}" for k in ("visqol", "hfmae", "msstft", "sfr", "sdr", "sisdr")
             if k in best_m
         )
         print_fn(f"  {summary}")
