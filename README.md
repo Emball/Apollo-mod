@@ -197,6 +197,7 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 |---|---|
 | `dir` | Root directory for run outputs. Default `./runs`. |
 | `name` | Subfolder name for this run. Derived from config filename if not set. |
+| `resume_checkpoint` | Path to a specific `.ckpt` file to resume from. Overrides `resume`. `null` = use `resume` behavior. |
 | `resume` | `true` = resume from most recent checkpoint. `false` = start a new run. |
 
 ### optimizations

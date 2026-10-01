@@ -1012,7 +1012,20 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     _base_dir = os.path.join(cfg.exp.dir, cfg.exp.name)
     ckpt_path = None
 
-    if cfg.get("resume", False):
+    _explicit_ckpt = cfg.get("resume_checkpoint", None)
+
+    if _explicit_ckpt:
+        # Explicit checkpoint path -- resolve relative to CWD if not absolute.
+        _explicit_ckpt = os.path.abspath(_explicit_ckpt)
+        if not os.path.isfile(_explicit_ckpt):
+            raise FileNotFoundError(f"[resume] resume_checkpoint not found: {_explicit_ckpt}")
+        ckpt_path = _explicit_ckpt
+        # Infer run dir from checkpoint path (runs/<name>/<run_id>/checkpoints/<file>)
+        _run_dir = os.path.dirname(os.path.dirname(ckpt_path))
+        _run_id  = os.path.basename(_run_dir)
+        print_only(f"[resume] Explicit checkpoint: {os.path.basename(ckpt_path)}")
+        print_only("[resume] Skipping pretrain weight loading -- checkpoint takes precedence.")
+    elif cfg.get("resume", False):
         # Find the most recently modified run folder that has checkpoints
         _run_dir = None
         if os.path.isdir(_base_dir):
