@@ -367,8 +367,11 @@ def _segment_worker(job: dict) -> dict:
             res["status"] = "rejected: too short after alignment"
             return res
 
-        sf.write(job["out_hq"], hq_c, sr, subtype="PCM_24")
-        sf.write(job["out_lq"], lq_c, sr, subtype="PCM_24")
+        tmp_hq, tmp_lq = job["out_hq"] + ".part", job["out_lq"] + ".part"
+        sf.write(tmp_hq, hq_c, sr, subtype="PCM_24", format="WAV")
+        sf.write(tmp_lq, lq_c, sr, subtype="PCM_24", format="WAV")
+        os.replace(tmp_lq, job["out_lq"])
+        os.replace(tmp_hq, job["out_hq"])
         res["seconds"] = round(len(hq_c) / sr, 3)
     except Exception as ex:
         res["status"] = f"error: {ex} {' | '.join(log[-4:])}"
@@ -464,17 +467,21 @@ def run_randomized(config: dict, input_path: str | Path, output_dir: str | Path,
     with open(output_dir / "_chains.jsonl", "a", encoding="utf-8") as logf, \
             ProcessPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(_segment_worker, j) for j in jobs]
-        for n, fut in enumerate(as_completed(futures), start=1):
-            r = fut.result()
-            results.append(r)
-            logf.write(json.dumps(r) + "\n")
-            logf.flush()
-            if r["status"] == "ok":
-                done_sec += r["seconds"]
-                print_fn(f"[{n}/{len(jobs)}] {r['name']}  lag={r['lag']}  corr={r['corr']}  {r['chain']}")
-            else:
-                rejects[r["status"]] = rejects.get(r["status"], 0) + 1
-                print_fn(f"[{n}/{len(jobs)}] {r['name']}  {r['status']}  {r['chain']}")
+        try:
+            for n, fut in enumerate(as_completed(futures), start=1):
+                r = fut.result()
+                results.append(r)
+                logf.write(json.dumps(r) + "\n")
+                logf.flush()
+                if r["status"] == "ok":
+                    done_sec += r["seconds"]
+                    print_fn(f"[{n}/{len(jobs)}] {r['name']}  lag={r['lag']}  corr={r['corr']}  {r['chain']}")
+                else:
+                    rejects[r["status"]] = rejects.get(r["status"], 0) + 1
+                    print_fn(f"[{n}/{len(jobs)}] {r['name']}  {r['status']}  {r['chain']}")
+        except KeyboardInterrupt:
+            pool.shutdown(wait=False, cancel_futures=True)
+            print_fn("Interrupted. Rerun with the same settings to continue; finished pairs are kept.")
     shutil.rmtree(tmp_root, ignore_errors=True)
 
     print_fn(f"Kept {sum(1 for r in results if r['status'] == 'ok')}/{len(jobs)} segments, {done_sec / 60:.1f} min.")
@@ -486,6 +493,57 @@ def run_randomized(config: dict, input_path: str | Path, output_dir: str | Path,
 # ---------------------------------------------------------------------------
 # TUI entry point
 # ---------------------------------------------------------------------------
+
+def _screen_randomized(state: dict, console, _pick, _run_with_live_output, ROOT: Path, cfg_path: Path) -> None:
+    """TUI flow for randomized recipes. Runs the CLI as a subprocess, like inference does."""
+    from rich.markup import escape
+
+    st = state.setdefault("degrade", {}).setdefault("random", {})
+    input_dir = ROOT / "input"
+    input_dir.mkdir(exist_ok=True)
+    files = sorted(f for f in input_dir.iterdir() if f.suffix.lower() in AUDIO_EXTS)
+    all_label = (f"[ Process all {len(files)} file(s) in /input ]" if files
+                 else "[ Process all in /input (folder empty) ]")
+    items = [all_label, "[ Enter custom file/folder path ]"] + [f.name for f in files]
+
+    idx = _pick("Randomized degrade -- select input", items, hint="Enter=select  Esc=back")
+    if idx is None:
+        return
+    if idx == 0:
+        if not files:
+            console.print("[yellow]No files in /input.[/]")
+            console.input("Press Enter to return.")
+            return
+        src = str(input_dir)
+    elif idx == 1:
+        console.clear()
+        src = console.input("[cyan]Enter file or folder path:[/] ").strip().strip('"')
+        if not src:
+            return
+    else:
+        src = str(files[idx - 2])
+
+    console.clear()
+    console.print(f"[bold cyan]Randomized degrade[/]  --  recipe: {cfg_path.stem}\n")
+    default_out = st.get("last_output") or str(ROOT / "output" / "pairs")
+    out = console.input(f"[cyan]Output folder, LQ/ and HQ/ are created inside[/] (default: {escape(default_out)}): ").strip().strip('"') or default_out
+    seed = console.input(f"[cyan]Seed[/] (default: {st.get('seed', 0)}): ").strip() or str(st.get("seed", 0))
+    mins = console.input(f"[cyan]Max minutes of synthetic audio, 0 for no cap[/] (default: {st.get('max_minutes', 0)}): ").strip() or str(st.get("max_minutes", 0))
+    try:
+        seed_i, mins_f = int(seed), float(mins)
+    except ValueError:
+        console.print("[red]Seed must be a whole number and max minutes a number.[/]")
+        console.input("Press Enter to return.")
+        return
+
+    st.update({"last_output": out, "seed": seed_i, "max_minutes": mins_f})
+    cmd = [sys.executable, str(ROOT / "utils" / "degrade_audio.py"),
+           "--config", str(cfg_path), "--input", src, "--output", out,
+           "--randomize", "--seed", str(seed_i)]
+    if mins_f > 0:
+        cmd += ["--max_minutes", str(mins_f)]
+    _run_with_live_output(cmd, f"Randomized degrade: {cfg_path.stem}")
+
 
 def screen_degrade_audio(state: dict, console, _pick, _run_with_live_output, ROOT: Path) -> None:
     """Entry point called from tui.py."""
@@ -506,6 +564,16 @@ def screen_degrade_audio(state: dict, console, _pick, _run_with_live_output, ROO
         return
     cfg_path = configs[idx]
     state.setdefault("degrade", {})["last_config"] = cfg_path.name
+
+    try:
+        is_random = "random" in load_config(cfg_path)
+    except DegradeError as ex:
+        console.print(f"[red]Error: {ex}[/]")
+        console.input("Press Enter to return.")
+        return
+    if is_random:
+        _screen_randomized(state, console, _pick, _run_with_live_output, ROOT, cfg_path)
+        return
 
     input_dir = ROOT / "input"
     output_dir = ROOT / "output"
