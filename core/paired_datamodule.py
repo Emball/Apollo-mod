@@ -55,14 +55,6 @@ class SimpleAugCfg:
     prob: float   = 0.5
 
 @dataclass
-class Mp3AugCfg:
-    enabled:  bool  = False
-    prob:     float = 0.5
-    kbps_min: int   = 64
-    kbps_max: int   = 256
-    target:   str   = "lq"   # "lq" = LQ only (default), "both" = LQ and HQ at same bitrate
-
-@dataclass
 class DeepGainAugCfg:
     enabled: bool  = True
     prob:    float = 0.03   # rare -- ~1 in 33 chunks
@@ -95,7 +87,6 @@ class AugmentationCfg:
     deep_gain:          DeepGainAugCfg   = field(default_factory=DeepGainAugCfg)
     polarity:           SimpleAugCfg     = field(default_factory=SimpleAugCfg)
     silence_dip:        SilenceDipAugCfg = field(default_factory=SilenceDipAugCfg)
-    mp3_degradation:    Mp3AugCfg        = field(default_factory=Mp3AugCfg)
     stereo_alternation: SimpleAugCfg     = field(default_factory=SimpleAugCfg)
     mid_side_isolation: MidSideAugCfg   = field(default_factory=MidSideAugCfg)
 
@@ -116,11 +107,17 @@ def _parse_aug_cfg(raw) -> AugmentationCfg:
     if live is not None:
         raw = live
 
+    for key in ("compression", "mp3_degradation"):
+        if _get(raw, key, None) is not None:
+            raise ValueError(
+                f"augmentation.live.{key} is not allowed: compression augmentation is cached only. "
+                "Move it to augmentation.cached.compression."
+            )
+
     gain_raw = _get(raw, "gain", {})
     dg_raw   = _get(raw, "deep_gain", {})
     pol_raw  = _get(raw, "polarity", {})
     sil_raw  = _get(raw, "silence_dip", {})
-    mp3_raw  = _get(raw, "mp3_degradation", {})
     mono_raw = _get(raw, "stereo_alternation", {})
     ms_raw   = _get(raw, "mid_side_isolation", {})
 
@@ -152,13 +149,6 @@ def _parse_aug_cfg(raw) -> AugmentationCfg:
             long_ramp_ms=       _get(sil_raw, "long_ramp_ms",      200.0),
             long_ramp_max_ms=   _get(sil_raw, "long_ramp_max_ms",  1000.0),
         ),
-        mp3_degradation=Mp3AugCfg(
-            enabled= _get(mp3_raw, "enabled",  False),
-            prob=    _get(mp3_raw, "prob",     0.5),
-            kbps_min=_get(mp3_raw, "kbps_min", 64),
-            kbps_max=_get(mp3_raw, "kbps_max", 256),
-            target=  _get(mp3_raw, "target",   "lq"),
-        ),
         stereo_alternation=SimpleAugCfg(
             enabled=_get(mono_raw, "enabled", True),
             prob=   _get(mono_raw, "prob",    1.0),
@@ -171,20 +161,6 @@ def _parse_aug_cfg(raw) -> AugmentationCfg:
     )
 
 # Individual augmentation implementations
-
-_ffmpeg_available: Optional[bool] = None
-
-def _check_ffmpeg() -> bool:
-    global _ffmpeg_available
-    if _ffmpeg_available is None:
-        try:
-            import ffmpeg
-            _ffmpeg_available = True
-        except ImportError:
-            print("[augmentation] WARNING: ffmpeg-python not installed -- mp3_degradation disabled.")
-            print("               Install with: pip install ffmpeg-python")
-            _ffmpeg_available = False
-    return _ffmpeg_available
 
 def _pitch_shift_tensor(wav: torch.Tensor, semitones: float, sr: int) -> torch.Tensor:
     """Pitch shift via resampling. No external deps, exact same shape guaranteed."""
@@ -199,63 +175,8 @@ def _pitch_shift_tensor(wav: torch.Tensor, semitones: float, sr: int) -> torch.T
         wav = torch.nn.functional.pad(wav, (0, original_length - wav.shape[-1]))
     return wav.float()
 
-def _mp3_degrade_tensor(wav: torch.Tensor, kbps: int, sr: int) -> torch.Tensor:
-    """Encode wav to MP3 at kbps then decode back, with encoder delay compensation.
 
-    MP3 encoding introduces a fixed encoder delay at the start of the decoded audio
-    (typically 576 or 1152 samples with LAME). We detect this by prepending a known
-    impulse, encoding, decoding, then finding where the impulse lands to measure the
-    exact delay introduced at this bitrate. The delay is then stripped from the front
-    of the decoded audio so it stays perfectly aligned with HQ.
-    """
-    import ffmpeg
-    import numpy as np
 
-    original_length = wav.shape[-1]
-    n_channels = wav.shape[0]
-
-    # --- Measure encoder delay using an impulse probe ---
-    # We prepend a short impulse and detect its position after encode/decode.
-    # This accounts for any LAME delay regardless of bitrate.
-    probe_len = 2048
-    impulse = torch.zeros(n_channels, probe_len)
-    impulse[:, 0] = 1.0  # single-sample impulse at position 0
-    probed = torch.cat([impulse, wav.float()], dim=-1)
-
-    def _encode_decode(tensor):
-        pcm_bytes = tensor.numpy().T.tobytes()
-        mp3_bytes, _ = (
-            ffmpeg
-            .input("pipe:", format="f32le", ar=sr, ac=n_channels)
-            .output("pipe:", format="mp3", audio_bitrate=f"{kbps}k", codec="libmp3lame")
-            .run(input=pcm_bytes, capture_stdout=True, capture_stderr=True, quiet=True)
-        )
-        pcm_out, _ = (
-            ffmpeg
-            .input("pipe:", format="mp3")
-            .output("pipe:", format="f32le", ar=sr, ac=n_channels)
-            .run(input=mp3_bytes, capture_stdout=True, capture_stderr=True, quiet=True)
-        )
-        samples = np.frombuffer(pcm_out, dtype=np.float32).reshape(-1, n_channels).T
-        return torch.from_numpy(samples.copy())
-
-    decoded_probed = _encode_decode(probed)
-
-    # Find the impulse peak in the decoded output to measure actual delay
-    probe_region = decoded_probed[0, :probe_len * 2].abs()
-    delay = int(probe_region.argmax().item())
-
-    # Now encode/decode just the original audio and strip the measured delay
-    decoded = _encode_decode(wav.float())
-    decoded = decoded[:, delay:]
-
-    # Trim or pad to exact original length
-    if decoded.shape[-1] >= original_length:
-        decoded = decoded[:, :original_length]
-    else:
-        decoded = torch.nn.functional.pad(decoded, (0, original_length - decoded.shape[-1]))
-
-    return decoded.float()
 def _silence_dip_envelope(n_samples: int, sr: int, cfg: "SilenceDipAugCfg") -> "torch.Tensor":
     """Build a [1, n_samples] amplitude envelope that dips to zero somewhere inside
     the chunk. Shape: ramp down -> hold at zero -> ramp back up. The dip is placed
@@ -300,7 +221,6 @@ def augment_pair(
     sr: int = 44100,
     idx: Optional[int] = None,
     in_second_half: bool = False,
-    forced_kbps: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Apply augmentations to an LQ/HQ pair. Shape: (2, samples).
@@ -316,7 +236,6 @@ def augment_pair(
         variation within a song is realistic and benefits from fine-grained
         coverage rather than coarse half-level assignment.
 
-    mp3_degradation: applied per-chunk when enabled (unchanged).
     """
     if not cfg.enabled:
         return lq, hq
@@ -383,16 +302,6 @@ def augment_pair(
         env = _silence_dip_envelope(lq.shape[-1], sr, cfg.silence_dip)
         lq  = lq * env
         hq  = hq * env
-
-    # MP3 degradation (unchanged -- per-chunk when enabled).
-    if cfg.mp3_degradation.enabled and random.random() < cfg.mp3_degradation.prob:
-        if _check_ffmpeg():
-            kbps = forced_kbps if forced_kbps is not None else random.randint(
-                cfg.mp3_degradation.kbps_min, cfg.mp3_degradation.kbps_max
-            )
-            lq = _mp3_degrade_tensor(lq, kbps, sr)
-            if cfg.mp3_degradation.target == "both":
-                hq = _mp3_degrade_tensor(hq, kbps, sr)
 
     return lq, hq
 
@@ -485,8 +394,6 @@ class ChunkedPairDataset(Dataset):
             f"{aug.deep_gain.db_min}..{aug.deep_gain.db_max}dB)  "
             f"silence_dip={aug.silence_dip.enabled}(p={aug.silence_dip.prob}, "
             f"hold<={aug.silence_dip.max_hold_sec}s)  "
-            f"mp3={aug.mp3_degradation.enabled}(p={aug.mp3_degradation.prob}, "
-            f"{aug.mp3_degradation.kbps_min}-{aug.mp3_degradation.kbps_max}kbps)  "
             f"mid_side_isolation={aug.mid_side_isolation.enabled}"
             f"(p_mid={aug.mid_side_isolation.prob_mid}, p_side={aug.mid_side_isolation.prob_side})"
         )
