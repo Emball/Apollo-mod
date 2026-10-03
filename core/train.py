@@ -5,6 +5,7 @@
 # device init time. Setting it inside apply_optimizations() (post-import) has
 # no effect because CUDA is already initialised by then.
 import os
+import sys
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import json
@@ -178,12 +179,19 @@ def _slice_and_save(
     lq_wav, hq_wav, stem: str, lq_out: str, hq_out: str,
     cached_aug_fn=None,
     progress_cb=None,
+    compression=None,
 ) -> list:
-    """Slice a pair into overlapping chunks, write each immediately to avoid
-    accumulating all chunks in memory (critical for long source files).
+    """Slice a pair into overlapping chunks and write each one immediately, so long
+    songs never sit in memory as chunk lists.
 
+    cached_aug_fn: callable(lq, hq, in_second_half) -> (lq, hq) for gain, polarity and
+        stereo alternation.
+    compression: optional _CompressionAug. When it applies to this song, every chunk's LQ is
+        re-encoded through its own random codec chain before cached_aug_fn runs.
     progress_cb: optional callable(chunks_done, chunks_total) called after each chunk write.
     """
+    import concurrent.futures as _cf
+
     min_len = min(lq_wav.shape[-1], hq_wav.shape[-1])
     lq_wav  = lq_wav[:, :min_len]
     hq_wav  = hq_wav[:, :min_len]
@@ -193,35 +201,37 @@ def _slice_and_save(
         lq_wav = lq_wav / song_peak
         hq_wav = hq_wav / song_peak
 
-    def _write_chunk(t, path):
-        _save_wav_f32(t, path)
+    starts = list(range(0, max(0, min_len - _CHUNK_SAMPLES) + 1, _HOP_SAMPLES)) if min_len >= _CHUNK_SAMPLES else []
+    total_chunks = len(starts)
+    use_comp = compression is not None and compression.applies_to(stem)
+    half = min_len / 2
 
-    # Pre-compute total chunk count for progress reporting without storing chunks
-    total_chunks = max(0, (min_len - _CHUNK_SAMPLES) // _HOP_SAMPLES + 1)
+    def _make(idx_start):
+        idx, start = idx_start
+        lq_c = lq_wav[:, start:start + _CHUNK_SAMPLES].clone()
+        hq_c = hq_wav[:, start:start + _CHUNK_SAMPLES].clone()
+        if use_comp:
+            lq_c = compression.apply(lq_wav, start, _CHUNK_SAMPLES, stem, idx, lq_c)
+        if cached_aug_fn is not None:
+            lq_c, hq_c = cached_aug_fn(lq_c, hq_c, in_second_half=start >= half)
+        fname = f"{stem}_{idx:04d}.wav"
+        _save_wav_f32(lq_c, os.path.join(lq_out, fname))
+        _save_wav_f32(hq_c, os.path.join(hq_out, fname))
+        return fname
 
     saved = []
-    start = 0
-    idx   = 0
-    while start + _CHUNK_SAMPLES <= min_len:
-        lq_c = lq_wav[:, start:start + _CHUNK_SAMPLES]
-        hq_c = hq_wav[:, start:start + _CHUNK_SAMPLES]
-        fname = f"{stem}_{idx:04d}.wav"
-
-        if cached_aug_fn is not None:
-            lq_out_c, hq_out_c = cached_aug_fn(lq_c.clone(), hq_c.clone())
-            _write_chunk(lq_out_c, os.path.join(lq_out, fname))
-            _write_chunk(hq_out_c, os.path.join(hq_out, fname))
-        else:
-            _write_chunk(lq_c, os.path.join(lq_out, fname))
-            _write_chunk(hq_c, os.path.join(hq_out, fname))
-
-        saved.append(fname)
-        if progress_cb:
-            progress_cb(idx + 1, total_chunks)
-
-        start += _HOP_SAMPLES
-        idx   += 1
-
+    workers = compression.workers if use_comp else 1
+    if workers > 1:
+        with _cf.ThreadPoolExecutor(max_workers=workers) as pool:
+            for n, fname in enumerate(pool.map(_make, enumerate(starts)), start=1):
+                saved.append(fname)
+                if progress_cb:
+                    progress_cb(n, total_chunks)
+    else:
+        for n, item in enumerate(enumerate(starts), start=1):
+            saved.append(_make(item))
+            if progress_cb:
+                progress_cb(n, total_chunks)
     return saved
 
 def _has_wav_pairs(lq_dir: str, hq_dir: str) -> bool:
@@ -341,87 +351,176 @@ def _normalize_data_dir(src_root: str, split_name: str) -> bool:
     print_only(f"[data/{split_name}] Normalized {total_pairs} pairs into LQ/ + HQ/")
     return True
 
+def _cached_block(cfg: "DictConfig"):
+    """The enabled augmentation.cached block, or None."""
+    aug = getattr(cfg.datas, "augmentation", None)
+    cached = getattr(aug, "cached", None) if aug is not None else None
+    if cached is None or not getattr(cached, "enabled", False):
+        return None
+    if getattr(cached, "mp3_degradation", None) is not None:
+        raise ValueError("augmentation.cached.mp3_degradation was replaced by augmentation.cached.compression.")
+    for key in ("pitch_shift", "noise"):
+        blk = getattr(cached, key, None)
+        if blk is not None and bool(blk.get("enabled", False)):
+            raise ValueError(f"augmentation.cached.{key} is not supported. Set enabled: false.")
+    return cached
+
+
 def _build_cached_aug_fn(cfg: "DictConfig"):
     """
-    Build a callable (lq, hq) -> (lq_aug, hq_aug) from the cached_augmentation
-    block in the config, using fraction-based selection instead of per-sample prob.
-    Returns None if cached augmentation is disabled or not configured.
+    Build callable (lq, hq, in_second_half) -> (lq, hq) for the cached gain, polarity and
+    stereo_alternation augmentations, using fraction-based selection. Returns None if
+    cached augmentation is off or none of those are enabled. Compression is handled
+    separately by _build_compression.
     """
-    import random as _random
-    cached_cfg = getattr(cfg.datas, "augmentation", None)
+    cached_cfg = _cached_block(cfg)
     if cached_cfg is None:
-        return None
-    cached_cfg = getattr(cached_cfg, "cached", None)
-    if cached_cfg is None or not getattr(cached_cfg, "enabled", False):
         return None
 
     from paired_datamodule import (
         augment_pair, AugmentationCfg, GainAugCfg, SimpleAugCfg,
-        PitchShiftAugCfg, NoiseAugCfg, Mp3AugCfg,
+        DeepGainAugCfg, SilenceDipAugCfg, MidSideAugCfg,
     )
 
-    def _frac(block, key, default=0.0):
-        try:
-            return float(block[key])
-        except (KeyError, TypeError):
-            return default
+    def _blk(name):
+        return getattr(cached_cfg, name, None) or {}
 
-    def _bool(block, key, default=False):
-        try:
-            return bool(block[key])
-        except (KeyError, TypeError):
-            return default
-
-    g   = getattr(cached_cfg, "gain",            {})
-    pol = getattr(cached_cfg, "polarity",         {})
-    ps  = getattr(cached_cfg, "pitch_shift",      {})
-    ns  = getattr(cached_cfg, "noise",            {})
-    mp3 = getattr(cached_cfg, "mp3_degradation",  {})
-    mc  = getattr(cached_cfg, "stereo_alternation",     {})
+    g, pol, mc = _blk("gain"), _blk("polarity"), _blk("stereo_alternation")
+    if not any(bool(b.get("enabled", False)) for b in (g, pol, mc)):
+        return None
 
     aug_cfg = AugmentationCfg(
         enabled=True,
-        gain=GainAugCfg(
-            enabled=_bool(g,   "enabled", False),
-            prob=   _frac(g,   "fraction", 0.0),
-            db_max= _frac(g,   "db_max",   1.5),
-        ),
-        polarity=SimpleAugCfg(
-            enabled=_bool(pol, "enabled", False),
-            prob=   _frac(pol, "fraction", 0.0),
-        ),
-        pitch_shift=PitchShiftAugCfg(
-            enabled=       _bool(ps, "enabled",       False),
-            prob=          _frac(ps, "fraction",       0.0),
-            semitones_max= _frac(ps, "semitones_max",  1.5),
-        ),
-        noise=NoiseAugCfg(
-            enabled=_bool(ns, "enabled", False),
-            prob=   _frac(ns, "fraction", 0.0),
-            sigma=  _frac(ns, "sigma",    0.002),
-        ),
-        mp3_degradation=Mp3AugCfg(
-            enabled= _bool(mp3, "enabled",  False),
-            prob=    _frac(mp3, "fraction",  0.5),
-            kbps_min=int(_frac(mp3, "kbps_min", 64)),
-            kbps_max=int(_frac(mp3, "kbps_max", 256)),
-        ),
-        stereo_alternation=SimpleAugCfg(
-            enabled=_bool(mc, "enabled", False),
-            prob=   _frac(mc, "fraction", 1.0),
-        ),
+        gain=GainAugCfg(enabled=bool(g.get("enabled", False)), prob=float(g.get("fraction", 0.0)),
+                        db_max=float(g.get("db_max", 1.5))),
+        polarity=SimpleAugCfg(enabled=bool(pol.get("enabled", False)), prob=float(pol.get("fraction", 0.0))),
+        stereo_alternation=SimpleAugCfg(enabled=bool(mc.get("enabled", False)), prob=float(mc.get("fraction", 1.0))),
+        deep_gain=DeepGainAugCfg(enabled=False),
+        silence_dip=SilenceDipAugCfg(enabled=False),
+        mid_side_isolation=MidSideAugCfg(enabled=False),
     )
-
     sr = int(getattr(cfg.datas, "sr", 44100))
 
-    def _apply(lq, hq):
-        # Single roll per chunk: augment_pair's own prob check decides whether
-        # mp3_degradation fires at all, and if so draws one random bitrate from
-        # [kbps_min, kbps_max]. No duplication, no stratified variants -- variety
-        # across the song comes naturally from each chunk rolling independently.
-        return augment_pair(lq, hq, aug_cfg, sr=sr)
+    def _apply(lq, hq, in_second_half=False):
+        return augment_pair(lq, hq, aug_cfg, sr=sr, in_second_half=in_second_half)
 
     return _apply
+
+
+class _CompressionAug:
+    """Cached compression augmentation. Each chunk's LQ goes through its own random codec
+    chain drawn from a recipe, is re-aligned to the source, and replaces the LQ chunk."""
+
+    def __init__(self, rc, ffmpeg, sr, fraction, seed, pad_sec, workers, exclude, tmp_root,
+                 max_lag, min_corr, silence_dbfs):
+        import threading
+        self.rc, self.ffmpeg, self.sr = rc, ffmpeg, sr
+        self.fraction, self.seed, self.pad = fraction, seed, int(pad_sec * sr)
+        self.workers, self.exclude, self.tmp_root = workers, [e.lower() for e in exclude], tmp_root
+        self.max_lag, self.min_corr, self.silence_dbfs = max_lag, min_corr, silence_dbfs
+        self.stats: dict = {}
+        self._lock = threading.Lock()
+
+    def applies_to(self, stem: str) -> bool:
+        import fnmatch
+        name = stem.lower()
+        for pat in self.exclude:
+            if not any(c in pat for c in "*?["):
+                pat = f"*{pat}*"
+            if fnmatch.fnmatch(name, pat):
+                return False
+        return True
+
+    def _count(self, key: str) -> None:
+        with self._lock:
+            self.stats[key] = self.stats.get(key, 0) + 1
+
+    def apply(self, lq_wav, start: int, length: int, stem: str, idx: int, lq_chunk):
+        import random as _random
+        import uuid
+        from pathlib import Path
+        import numpy as np
+        import torch
+        import compression as cmp
+
+        rng = _random.Random(f"{self.seed}:{stem}:{idx}")
+        if rng.random() >= self.fraction:
+            self._count("skipped (fraction)")
+            return lq_chunk
+        chain = cmp.sample_chain(self.rc, rng)
+        rd_start = max(0, start - self.pad)
+        rd_stop = min(lq_wav.shape[-1], start + length + self.pad)
+        window = lq_wav[:, rd_start:rd_stop].T.numpy().astype(np.float64)
+        core, info = cmp.degrade_window(
+            window, start - rd_start, length, self.sr, chain, self.ffmpeg,
+            Path(self.tmp_root) / uuid.uuid4().hex,
+            max_lag=self.max_lag, min_corr=self.min_corr, silence_dbfs=self.silence_dbfs)
+        if core is None:
+            self._count(info["status"].split(":")[0] + ": " + info["status"].split(": ", 1)[-1][:40])
+            return lq_chunk
+        self._count("compressed")
+        return torch.from_numpy(np.ascontiguousarray(core.T)).float()
+
+
+def _compression_cfg(cfg: "DictConfig"):
+    """The enabled augmentation.cached.compression block, or None."""
+    cached = _cached_block(cfg)
+    blk = getattr(cached, "compression", None) if cached is not None else None
+    if blk is None or not bool(blk.get("enabled", False)):
+        return None
+    return blk
+
+
+def _load_recipe(blk) -> tuple:
+    import json as _json
+    path = str(blk.get("recipe", "utils/degrade/stfl_random.json"))
+    if not os.path.isabs(path):
+        path = os.path.join(_REPO_ROOT, path)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"compression recipe not found: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        data = _json.load(f)
+    if "random" not in data:
+        raise ValueError(f"compression recipe has no 'random' block: {path}")
+    return data, path
+
+
+def _compression_digest(cfg: "DictConfig") -> str:
+    """Recipe contents, so editing the recipe invalidates the chunk cache."""
+    import hashlib, json as _json
+    blk = _compression_cfg(cfg)
+    if blk is None:
+        return ""
+    data, _ = _load_recipe(blk)
+    return hashlib.md5(_json.dumps(data, sort_keys=True).encode()).hexdigest()[:12]
+
+
+def _build_compression(cfg: "DictConfig"):
+    """Build the _CompressionAug for this config, or None when compression is off."""
+    blk = _compression_cfg(cfg)
+    if blk is None:
+        return None
+    sys.path.insert(0, os.path.join(_REPO_ROOT, "utils"))
+    import compression as cmp
+    import tempfile
+
+    data, path = _load_recipe(blk)
+    rc = data["random"]
+    ffmpeg = str(blk.get("ffmpeg", data.get("tools", {}).get("ffmpeg", "ffmpeg")))
+    cmp.check_encoders(ffmpeg, rc)
+    workers = int(blk.get("workers", 0)) or max(1, (os.cpu_count() or 2) - 1)
+    exclude = [str(e) for e in (blk.get("exclude", None) or [])]
+    obj = _CompressionAug(
+        rc=rc, ffmpeg=ffmpeg, sr=int(getattr(cfg.datas, "sr", _SR)),
+        fraction=float(blk.get("fraction", 1.0)), seed=int(blk.get("seed", 0)),
+        pad_sec=float(blk.get("pad_sec", rc.get("pad_sec", 1.0))), workers=workers, exclude=exclude,
+        tmp_root=tempfile.mkdtemp(prefix="apollo_comp_"),
+        max_lag=int(rc.get("max_lag", 16384)), min_corr=float(rc.get("min_corr", 0.5)),
+        silence_dbfs=float(rc.get("silence_dbfs", -60)))
+    print_only(f"[compression] recipe={os.path.basename(path)}  fraction={obj.fraction}  workers={workers}  "
+               f"exclude={exclude or 'none'}")
+    return obj
+
 
 _CHUNK_CACHE_DIR = os.path.join(_REPO_ROOT, "usr", "cache", "chunks")
 
@@ -475,7 +574,8 @@ def _chunk_cache_lookup(key: str, split: str) -> str | None:
 
 
 
-def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=None, fixed_delay: int = None) -> int:
+def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=None, fixed_delay: int = None,
+                 compression=None) -> int:
     """
     Normalize src_root into LQ/ + HQ/ layout (if not already), then chunk all
     matched pairs into dst_root/LQ and dst_root/HQ.
@@ -682,7 +782,8 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     # --- Phase 2: Parallel WAV chunking ---
     # Sources are now guaranteed WAV. torchaudio WAV load is near-zero-copy
     # (GIL released during I/O). Numpy slicing and wave.write are also GIL-free.
-    n_workers = min(len(matched), 2)  # cap at 2 to avoid OOM on long source files
+    # cap at 2 to avoid OOM on long source files; one at a time when compression runs its own pool
+    n_workers = 1 if compression is not None else min(len(matched), 2)
     total = 0
     chunks_done = [0]
     songs_done = [0]
@@ -704,7 +805,8 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
 
         saved = _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out,
                                 cached_aug_fn=cached_aug_fn,
-                                progress_cb=_progress)
+                                progress_cb=_progress,
+                                compression=compression)
         with print_lock:
             songs_done[0] += 1
             print_only(f"[data/{split_name}]   {stem}: done ({len(saved)} chunks)  [{songs_done[0]}/{n_songs}]")
@@ -715,6 +817,14 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
             total += n
 
     print_only(f"[data/{split_name}] Done -- {total} chunk pairs -> {dst_root}\n")
+    if compression is not None:
+        import shutil as _shutil
+        _shutil.rmtree(compression.tmp_root, ignore_errors=True)
+        if compression.stats:
+            print_only(f"[data/{split_name}] compression: " + ", ".join(f"{v} {k}" for k, v in sorted(compression.stats.items())))
+        excluded = sorted(m for m in matched if not compression.applies_to(m))
+        if excluded:
+            print_only(f"[data/{split_name}] compression excluded: {', '.join(excluded)}")
     import json as _json
     with open(manifest_path, "w") as _f:
         _json.dump(_manifest_params(), _f, indent=2)
@@ -860,7 +970,7 @@ def prepare_data(cfg: DictConfig) -> None:
 
     # Chunks live in usr/cache/chunks/<key>/<split>/ keyed on (source md5s + params).
     # Any config that requests the same dataset with the same params reuses the cache.
-    train_key = _chunk_cache_key(data_train, fixed_delay, aug_cfg)
+    train_key = _chunk_cache_key(data_train, fixed_delay, aug_cfg, extra=_compression_digest(cfg))
     val_key   = _chunk_cache_key(data_val,   fixed_delay, None)
 
     train_chunks = _chunk_cache_lookup(train_key, "train")
@@ -868,7 +978,8 @@ def prepare_data(cfg: DictConfig) -> None:
         print_only(f"[data/train] Cache hit ({train_key[:8]}...) -- skipping chunking.")
     else:
         train_chunks = os.path.join(_CHUNK_CACHE_DIR, train_key, "train")
-        _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, fixed_delay=fixed_delay)
+        _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, fixed_delay=fixed_delay,
+                     compression=_build_compression(cfg))
 
     # Val clips: one random 30s clip per song, cached to disk.
     # Reuses the WAV conversion cache from _chunk_split so no re-encoding.
