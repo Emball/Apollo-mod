@@ -66,7 +66,7 @@ input/ output/           -- inference I/O staging dirs
 | `utils/tui.py` | Keyboard-navigated TUI. Latest/Best checkpoint options in inference picker. Ctrl+C during training saves checkpoint. Ensemble picker after output path selection. "Update Apollo" in Utilities runs `git pull --ff-only`. `--dev` flag adds `dev/*.yaml` to config picker. |
 | `core/evaluate.py` | Offline checkpoint evaluator. Reads metrics from filenames; runs inference only for missing ones. VISQOL via `visqol-python`. Scores cached in `<ckpt_dir>/.eval_cache.json`. |
 | `utils/align_audio.py` | LQ/HQ temporal alignment. Global sinc resample for speed drift, chunked cross-correlation micro-alignment. |
-| `utils/degrade_audio.py` | Synthetic degradation pipeline via JSON configs. |
+| `utils/degrade_audio.py` | Synthetic degradation pipeline via JSON configs. Fixed-chain mode (`chain`) or `--randomize` mode (`random` block). |
 
 ---
 
@@ -105,5 +105,7 @@ input/ output/           -- inference I/O staging dirs
 **Gefen optimizer:** `type: gefen` in the optimizer config. Drop-in AdamW replacement with ~8x lower optimizer-state memory and faster optimizer steps. Requires `pip install gefen`; builds CUDA kernels via JIT on first run (needs `nvcc` in PATH). Falls back to AdamW32bit with a warning if not installed. Recommended over `adamw_8bit` for new runs.
 
 **GefenMuon optimizer:** `type: gefen_muon`. Routes 2D parameters (Linear weights — attention layers) to GefenMuon (no second-moment state, momentum-only) and all other parameters (Conv1d, norms, biases) to Gefen. Gefen's paper recommends this split for fine-tuning over plain Gefen. Implemented via `_ComboOpt` wrapper that exposes a unified `param_groups`, `step()`, `zero_grad()`, `state_dict()`, and `load_state_dict()` so PyTorch schedulers and Lightning checkpointing work transparently. If no 2D params exist, falls back to Gefen-only; if no non-2D params exist, uses GefenMuon-only.
+
+**Randomized degradation (`--randomize`):** Sources are cut into `segment_sec` (30 s) segments with `pad_sec` of context each side. Each segment gets its own chain from `sample_chain()`, seeded by `seed` + segment name, so reruns reproduce. The chain runs on the padded segment, one integer delay is measured per segment (0-4 kHz cross-correlation, `measure_offset`), and the pair is cropped to the unpadded window. Segments that are near-silent or below `min_corr` are dropped. Output is one LQ/HQ file pair per segment under `<output>/LQ` and `<output>/HQ`, plus `_chains.jsonl` with the chain, lag and correlation per segment. Existing pairs are skipped on rerun. ffmpeg's WMA path measured a constant -2048 sample lag in testing, so the per-segment measurement is required, not optional. Sources must be 32/44.1/48 kHz (MP3 rates).
 
 **Config key aliases:** `val_songs` is the current key. `val_metric_songs`, `val_metric_samples`, and `val_audio_pairs` are accepted as fallbacks in `train.py` for old configs.
