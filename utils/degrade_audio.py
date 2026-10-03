@@ -262,8 +262,9 @@ def sample_chain(rc: dict, rng: random.Random) -> list[dict]:
     final = _wpick(rng, rc["final"])
     if final == "cbr192":
         chain.append({"type": "mp3_lame", "bitrate": 192})
-    elif final == "cbr_other":
-        chain.append({"type": "mp3_lame", "bitrate": rng.choice(rc["final_cbr_other"])})
+    elif final == "cbr192_extra":
+        chain.append({"type": "mp3_lame", "bitrate": 192})
+        chain.append({"type": "mp3_lame", "bitrate": int(_wpick(rng, rc["final_extra_bitrate"]))})
     elif final == "vbr":
         chain.append({"type": "mp3_lame", "quality": int(_wpick(rng, rc["mp3_vbr_quality"]))})
 

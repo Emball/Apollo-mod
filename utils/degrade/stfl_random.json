@@ -1,20 +1,58 @@
 {
   "name": "stfl_random",
   "description": "Randomized STFL chain, one draw per 30 s segment. Baseline: WMA 128k first, 5 VBR LAME passes, CBR 192 last.",
-  "tools": { "ffmpeg": "ffmpeg" },
+  "tools": {
+    "ffmpeg": "ffmpeg"
+  },
   "random": {
     "segment_sec": 30,
     "pad_sec": 1.0,
     "max_lag": 8192,
     "min_corr": 0.5,
     "silence_dbfs": -60,
-    "wma_position": { "first": 75, "last": 8, "middle": 8, "double": 4, "none": 5 },
-    "wma_bitrate": { "128k": 55, "96k": 20, "64k": 15, "160k": 10 },
-    "mp3_passes": { "3": 20, "4": 25, "5": 27, "6": 13, "7": 10, "8": 5 },
+    "wma_position": {
+      "first": 75,
+      "last": 8,
+      "middle": 8,
+      "double": 4,
+      "none": 5
+    },
+    "wma_bitrate": {
+      "128k": 55,
+      "96k": 20,
+      "64k": 15,
+      "160k": 10
+    },
+    "mp3_passes": {
+      "3": 20,
+      "4": 25,
+      "5": 27,
+      "6": 13,
+      "7": 10,
+      "8": 5
+    },
     "mp3_vbr_prob": 0.85,
-    "mp3_vbr_quality": { "2": 30, "3": 12, "4": 15, "5": 30, "6": 13 },
-    "mp3_cbr_bitrate": { "128": 25, "160": 25, "192": 50 },
-    "final": { "cbr192": 75, "cbr_other": 10, "vbr": 10, "none": 5 },
-    "final_cbr_other": [128, 160, 224, 256]
+    "mp3_vbr_quality": {
+      "2": 30,
+      "3": 12,
+      "4": 15,
+      "5": 30,
+      "6": 13
+    },
+    "mp3_cbr_bitrate": {
+      "128": 10,
+      "160": 25,
+      "192": 65
+    },
+    "final": {
+      "cbr192": 77,
+      "cbr192_extra": 8,
+      "vbr": 10,
+      "none": 5
+    },
+    "final_extra_bitrate": {
+      "128": 40,
+      "160": 60
+    }
   }
 }
