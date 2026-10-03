@@ -440,7 +440,7 @@ def run_randomized(config: dict, input_path: str | Path, output_dir: str | Path,
                 "max_lag": int(rc.get("max_lag", 8192)),
                 "min_corr": float(rc.get("min_corr", 0.5)),
                 "silence_dbfs": float(rc.get("silence_dbfs", -60)),
-                "min_len": int(min_sec * sr),
+                "min_len": int(min(min_sec, seg_sec * 0.9) * sr),
                 "out_lq": str(out_lq), "out_hq": str(out_hq),
             })
 
