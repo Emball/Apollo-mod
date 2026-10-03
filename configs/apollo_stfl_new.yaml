@@ -67,13 +67,8 @@ datas:
         enabled: false
         prob: 0.5
         sigma: 0.002
-      mp3_degradation:
-        enabled: false
-        prob: 0.5
-        kbps_min: 64
-        kbps_max: 256
     cached:
-      enabled: false
+      enabled: true
       cached_variants: 1
       stereo_alternation:
         enabled: false
@@ -93,11 +88,18 @@ datas:
         enabled: false
         fraction: 0.5
         sigma: 0.002
-      mp3_degradation:
-        enabled: false
-        fraction: 0.5
-        kbps_min: 64
-        kbps_max: 256
+      compression:
+        enabled: true
+        recipe: utils/degrade/stfl_random.json
+        fraction: 1.0
+        seed: 0
+        pad_sec: 1.0
+        workers: 0
+        exclude:
+          - "*6*in*the*morning*"
+          - "*love*you*more*"
+          - "*we*as*americans*"
+          - "*doe*rae*me*"
 
 model:
   _target_: look2hear.models.apollo.Apollo

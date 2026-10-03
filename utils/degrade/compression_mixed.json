@@ -1,0 +1,81 @@
+{
+  "name": "compression_mixed",
+  "description": "Broad codec robustness: MP3 (VBR and CBR, 1-5 passes), optional WMA, and optional AAC, Vorbis, Opus or MP2 passes.",
+  "tools": {
+    "ffmpeg": "ffmpeg"
+  },
+  "random": {
+    "segment_sec": 30,
+    "pad_sec": 1.0,
+    "max_lag": 16384,
+    "min_corr": 0.5,
+    "silence_dbfs": -60,
+    "wma_position": {
+      "first": 15,
+      "last": 5,
+      "middle": 5,
+      "double": 2,
+      "none": 73
+    },
+    "wma_bitrate": {
+      "64k": 20,
+      "96k": 25,
+      "128k": 35,
+      "160k": 20
+    },
+    "mp3_passes": {
+      "1": 30,
+      "2": 28,
+      "3": 20,
+      "4": 14,
+      "5": 8
+    },
+    "mp3_vbr_prob": 0.5,
+    "mp3_vbr_quality": {
+      "1": 8,
+      "2": 18,
+      "3": 16,
+      "4": 18,
+      "5": 18,
+      "6": 14,
+      "7": 8
+    },
+    "mp3_cbr_bitrate": {
+      "96": 10,
+      "128": 30,
+      "160": 20,
+      "192": 25,
+      "256": 10,
+      "320": 5
+    },
+    "final": {
+      "cbr192": 20,
+      "cbr192_extra": 0,
+      "vbr": 30,
+      "none": 50
+    },
+    "final_extra_bitrate": {
+      "128": 50,
+      "160": 50
+    },
+    "other_codecs": {
+      "prob": 0.35,
+      "count": {
+        "1": 80,
+        "2": 20
+      },
+      "codec": {
+        "aac": 35,
+        "vorbis": 25,
+        "opus": 15,
+        "mp2": 25
+      },
+      "bitrate": {
+        "64k": 15,
+        "96k": 25,
+        "128k": 35,
+        "192k": 25
+      }
+    }
+  }
+}
