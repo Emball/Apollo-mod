@@ -35,6 +35,8 @@ import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
+import compression as cmp
+
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".aac", ".m4a", ".aiff", ".aif"}
 
 FHG_CODEC_NAME = "Fraunhofer IIS MPEG Layer-3 Codec (professional)"
@@ -83,7 +85,7 @@ def _run(cmd: list[str], print_fn) -> None:
 def _step_wma_encode(step: dict, src: Path, tmpdir: Path, n: int, tools: dict, print_fn) -> Path:
     bitrate = step.get("bitrate", "128k")
     out = tmpdir / f"gen{n}_wma.wma"
-    _run([tools["ffmpeg"], "-y", "-i", str(src), "-vn", "-c:a", "wmav2", "-b:a", str(bitrate), str(out)], print_fn)
+    _run([tools["ffmpeg"], "-y", "-i", str(src), "-vn", "-c:a", "wmav2", "-b:a", cmp.bitrate_arg(bitrate), str(out)], print_fn)
     return out
 
 
@@ -93,7 +95,7 @@ def _step_mp3_lame(step: dict, src: Path, tmpdir: Path, n: int, tools: dict, pri
     if "quality" in step:
         cmd += ["-q:a", str(step["quality"])]
     elif "bitrate" in step:
-        cmd += ["-b:a", str(step["bitrate"])]
+        cmd += ["-b:a", cmp.bitrate_arg(step["bitrate"])]
     else:
         raise DegradeError("mp3_lame step needs 'quality' or 'bitrate'.")
     cmd.append(str(out))
@@ -243,126 +245,27 @@ def run_bulk(config: dict, input_dir: str | Path, output_dir: str | Path, print_
 # Randomized per-segment mode
 # ---------------------------------------------------------------------------
 
-def _wpick(rng: random.Random, weights: dict) -> str:
-    keys = list(weights)
-    return rng.choices(keys, weights=[weights[k] for k in keys])[0]
-
-
-def sample_chain(rc: dict, rng: random.Random) -> list[dict]:
-    """Draw one chain from the 'random' block of a recipe."""
-    def mp3_pass() -> dict:
-        if rng.random() < rc["mp3_vbr_prob"]:
-            return {"type": "mp3_lame", "quality": int(_wpick(rng, rc["mp3_vbr_quality"]))}
-        return {"type": "mp3_lame", "bitrate": int(_wpick(rng, rc["mp3_cbr_bitrate"]))}
-
-    def wma() -> dict:
-        return {"type": "wma_encode", "bitrate": _wpick(rng, rc["wma_bitrate"])}
-
-    chain = [mp3_pass() for _ in range(int(_wpick(rng, rc["mp3_passes"])))]
-    final = _wpick(rng, rc["final"])
-    if final == "cbr192":
-        chain.append({"type": "mp3_lame", "bitrate": 192})
-    elif final == "cbr192_extra":
-        chain.append({"type": "mp3_lame", "bitrate": 192})
-        chain.append({"type": "mp3_lame", "bitrate": int(_wpick(rng, rc["final_extra_bitrate"]))})
-    elif final == "vbr":
-        chain.append({"type": "mp3_lame", "quality": int(_wpick(rng, rc["mp3_vbr_quality"]))})
-
-    pos = _wpick(rng, rc["wma_position"])
-    if pos == "first":
-        chain.insert(0, wma())
-    elif pos == "last":
-        chain.append(wma())
-    elif pos == "middle":
-        chain.insert(rng.randint(1, len(chain) - 1), wma())
-    elif pos == "double":
-        chain.insert(0, wma())
-        chain.append(wma())
-    return chain
-
-
-def describe_chain(chain: list[dict]) -> str:
-    parts = []
-    for s in chain:
-        if s["type"] == "wma_encode":
-            parts.append("wma" + str(s["bitrate"]).rstrip("k"))
-        elif "quality" in s:
-            parts.append(f"q{s['quality']}")
-        else:
-            parts.append(f"c{s['bitrate']}")
-    return ">".join(parts)
-
-
-def measure_offset(hq, lq, sr: int, max_lag: int) -> tuple[int, float]:
-    """Integer-sample delay of lq relative to hq on the 0-4 kHz band, plus the correlation
-    coefficient at that lag. lag > 0 means lq is late."""
-    import numpy as np
-    from scipy.signal import butter, sosfiltfilt
-
-    sos = butter(4, 4000, btype="low", fs=sr, output="sos")
-    a = sosfiltfilt(sos, hq.mean(axis=1))
-    b = sosfiltfilt(sos, lq.mean(axis=1))
-    n = min(len(a), len(b))
-    a, b = a[:n], b[:n]
-    nfft = 1 << (2 * n - 1).bit_length()
-    R = np.fft.irfft(np.fft.rfft(b, nfft) * np.conj(np.fft.rfft(a, nfft)), nfft)
-    lags = np.arange(-max_lag, max_lag + 1)
-    r = R[lags % nfft]
-    i = int(np.argmax(r))
-    norm = float(np.sqrt(np.dot(a, a) * np.dot(b, b))) + 1e-12
-    return int(lags[i]), float(r[i] / norm)
-
-
-def _encode_chain(chain: list[dict], src_wav: Path, tmpdir: Path, tools: dict, sr: int, log) -> Path:
-    current = src_wav
-    for i, step in enumerate(chain, start=1):
-        if step["type"] == "wma_encode":
-            current = _step_wma_encode(step, current, tmpdir, i, tools, log)
-        else:
-            current = _step_mp3_lame(step, current, tmpdir, i, tools, log)
-    out = tmpdir / "final.wav"
-    _run([tools["ffmpeg"], "-y", "-i", str(current), "-vn", "-ar", str(sr), "-c:a", "pcm_s16le", str(out)], log)
-    return out
-
-
 def _segment_worker(job: dict) -> dict:
-    import numpy as np
     import soundfile as sf
 
-    res = {"name": job["name"], "chain": describe_chain(job["chain"]), "status": "ok"}
+    res = {"name": job["name"], "chain": cmp.describe_chain(job["chain"]), "status": "ok"}
     tmpdir = Path(job["tmp_root"]) / job["name"]
-    log: list[str] = []
     try:
-        tmpdir.mkdir(parents=True, exist_ok=True)
         sr = job["sr"]
         hq, _ = sf.read(job["src"], start=job["rd_start"], stop=job["rd_stop"], always_2d=True, dtype="float64")
-        core = hq[job["pad_start"]: job["pad_start"] + job["core_len"]]
-        if len(core) == 0 or 20 * np.log10(np.sqrt(np.mean(core ** 2)) + 1e-12) < job["silence_dbfs"]:
-            res["status"] = "rejected: silent"
+        lq_core, info = cmp.degrade_window(
+            hq, job["pad_start"], job["core_len"], sr, job["chain"], job["tools"]["ffmpeg"], tmpdir,
+            max_lag=job["max_lag"], min_corr=job["min_corr"], silence_dbfs=job["silence_dbfs"])
+        for k in ("lag", "corr"):
+            if k in info:
+                res[k] = info[k]
+        if lq_core is None:
+            res["status"] = info["status"]
             return res
 
-        src_wav = tmpdir / "seg.wav"
-        sf.write(str(src_wav), hq, sr, subtype="PCM_24")
-        lq_wav = _encode_chain(job["chain"], src_wav, tmpdir, job["tools"], sr, log.append)
-        lq, _ = sf.read(str(lq_wav), always_2d=True, dtype="float64")
-
-        lag, corr = measure_offset(hq, lq, sr, job["max_lag"])
-        res["lag"], res["corr"] = lag, round(corr, 4)
-        if corr < job["min_corr"]:
-            res["status"] = "rejected: weak alignment"
-            return res
-
-        if lag > 0:
-            lq = lq[lag:]
-        elif lag < 0:
-            hq = hq[-lag:]
-        start = job["pad_start"] + min(lag, 0)
-        length = job["core_len"]
-        if start < 0:
-            length += start
-            start = 0
-        end = min(start + length, len(hq), len(lq))
-        hq_c, lq_c = hq[start:end], lq[start:end]
+        lo, hi = info["valid"]
+        hq_c = hq[job["pad_start"]: job["pad_start"] + job["core_len"]][lo:hi]
+        lq_c = lq_core[lo:hi]
         if len(hq_c) < job["min_len"]:
             res["status"] = "rejected: too short after alignment"
             return res
@@ -374,9 +277,7 @@ def _segment_worker(job: dict) -> dict:
         os.replace(tmp_hq, job["out_hq"])
         res["seconds"] = round(len(hq_c) / sr, 3)
     except Exception as ex:
-        res["status"] = f"error: {ex} {' | '.join(log[-4:])}"
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        res["status"] = f"error: {ex}"
     return res
 
 
@@ -391,6 +292,10 @@ def run_randomized(config: dict, input_path: str | Path, output_dir: str | Path,
     if not rc:
         raise DegradeError("Config has no 'random' block.")
     tools = config["tools"]
+    try:
+        cmp.check_encoders(tools["ffmpeg"], rc)
+    except cmp.CompressionError as ex:
+        raise DegradeError(str(ex))
     input_path, output_dir = Path(input_path), Path(output_dir)
     if input_path.is_file():
         files = [input_path]
@@ -435,7 +340,7 @@ def run_randomized(config: dict, input_path: str | Path, output_dir: str | Path,
                 "name": name, "src": str(f), "sr": sr,
                 "rd_start": rd_start, "rd_stop": rd_stop,
                 "pad_start": s - rd_start, "core_len": e - s,
-                "chain": sample_chain(rc, random.Random(f"{seed}:{name}")),
+                "chain": cmp.sample_chain(rc, random.Random(f"{seed}:{name}")),
                 "tools": tools, "tmp_root": str(tmp_root),
                 "max_lag": int(rc.get("max_lag", 8192)),
                 "min_corr": float(rc.get("min_corr", 0.5)),

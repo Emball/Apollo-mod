@@ -197,7 +197,8 @@ def degrade_window(window: np.ndarray, pad_start: int, core_len: int, sr: int, c
                    silence_dbfs: float = -60.0) -> tuple[np.ndarray | None, dict]:
     """Run chain on a padded window and return the degraded core, aligned sample-for-sample
     to window[pad_start : pad_start + core_len]. Returns (None, info) when the core is
-    near-silent or the alignment is weak. info has status, lag and corr."""
+    near-silent or the alignment is weak. info has status, lag, corr and valid, the (lo, hi)
+    range of core samples that came from real decoded audio rather than zero fill."""
     import soundfile as sf
 
     info: dict = {"chain": describe_chain(chain), "status": "ok"}
@@ -224,4 +225,6 @@ def degrade_window(window: np.ndarray, pad_start: int, core_len: int, sr: int, c
     if corr < min_corr:
         info["status"] = "rejected: weak alignment"
         return None, info
+    s0 = pad_start + lag
+    info["valid"] = (max(0, -s0), min(core_len, len(lq) - s0))
     return shift_to_length(lq, lag, pad_start, core_len).astype(np.float32), info
