@@ -27,9 +27,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import random
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".aac", ".m4a", ".aiff", ".aif"}
@@ -53,7 +56,7 @@ def load_config(config_path: str | Path) -> dict:
     cfg.setdefault("tools", {})
     cfg["tools"].setdefault("ffmpeg", "ffmpeg")
     cfg.setdefault("external_codecs", {})
-    if "chain" not in cfg or not cfg["chain"]:
+    if not cfg.get("chain") and "random" not in cfg:
         raise DegradeError(f"Config {path} has no 'chain' steps.")
     return cfg
 
@@ -151,7 +154,9 @@ def run_chain(config: dict, input_path: str | Path, output_dir: str | Path, prin
 
     tools = config["tools"]
     external_codecs = config["external_codecs"]
-    chain = config["chain"]
+    chain = config.get("chain")
+    if not chain:
+        raise DegradeError("This config is randomized: run it with --randomize.")
     basename = _sanitize_basename(input_path.stem)
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -231,6 +236,249 @@ def run_bulk(config: dict, input_dir: str | Path, output_dir: str | Path, print_
             print_fn(f"  ERROR: {ex} -- skipping.")
         print_fn("")
     print_fn(f"BULK MODE complete. {len(results)}/{len(files)} succeeded.")
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Randomized per-segment mode
+# ---------------------------------------------------------------------------
+
+def _wpick(rng: random.Random, weights: dict) -> str:
+    keys = list(weights)
+    return rng.choices(keys, weights=[weights[k] for k in keys])[0]
+
+
+def sample_chain(rc: dict, rng: random.Random) -> list[dict]:
+    """Draw one chain from the 'random' block of a recipe."""
+    def mp3_pass() -> dict:
+        if rng.random() < rc["mp3_vbr_prob"]:
+            return {"type": "mp3_lame", "quality": int(_wpick(rng, rc["mp3_vbr_quality"]))}
+        return {"type": "mp3_lame", "bitrate": int(_wpick(rng, rc["mp3_cbr_bitrate"]))}
+
+    def wma() -> dict:
+        return {"type": "wma_encode", "bitrate": _wpick(rng, rc["wma_bitrate"])}
+
+    chain = [mp3_pass() for _ in range(int(_wpick(rng, rc["mp3_passes"])))]
+    final = _wpick(rng, rc["final"])
+    if final == "cbr192":
+        chain.append({"type": "mp3_lame", "bitrate": 192})
+    elif final == "cbr_other":
+        chain.append({"type": "mp3_lame", "bitrate": rng.choice(rc["final_cbr_other"])})
+    elif final == "vbr":
+        chain.append({"type": "mp3_lame", "quality": int(_wpick(rng, rc["mp3_vbr_quality"]))})
+
+    pos = _wpick(rng, rc["wma_position"])
+    if pos == "first":
+        chain.insert(0, wma())
+    elif pos == "last":
+        chain.append(wma())
+    elif pos == "middle":
+        chain.insert(rng.randint(1, len(chain) - 1), wma())
+    elif pos == "double":
+        chain.insert(0, wma())
+        chain.append(wma())
+    return chain
+
+
+def describe_chain(chain: list[dict]) -> str:
+    parts = []
+    for s in chain:
+        if s["type"] == "wma_encode":
+            parts.append("wma" + str(s["bitrate"]).rstrip("k"))
+        elif "quality" in s:
+            parts.append(f"q{s['quality']}")
+        else:
+            parts.append(f"c{s['bitrate']}")
+    return ">".join(parts)
+
+
+def measure_offset(hq, lq, sr: int, max_lag: int) -> tuple[int, float]:
+    """Integer-sample delay of lq relative to hq on the 0-4 kHz band, plus the correlation
+    coefficient at that lag. lag > 0 means lq is late."""
+    import numpy as np
+    from scipy.signal import butter, sosfiltfilt
+
+    sos = butter(4, 4000, btype="low", fs=sr, output="sos")
+    a = sosfiltfilt(sos, hq.mean(axis=1))
+    b = sosfiltfilt(sos, lq.mean(axis=1))
+    n = min(len(a), len(b))
+    a, b = a[:n], b[:n]
+    nfft = 1 << (2 * n - 1).bit_length()
+    R = np.fft.irfft(np.fft.rfft(b, nfft) * np.conj(np.fft.rfft(a, nfft)), nfft)
+    lags = np.arange(-max_lag, max_lag + 1)
+    r = R[lags % nfft]
+    i = int(np.argmax(r))
+    norm = float(np.sqrt(np.dot(a, a) * np.dot(b, b))) + 1e-12
+    return int(lags[i]), float(r[i] / norm)
+
+
+def _encode_chain(chain: list[dict], src_wav: Path, tmpdir: Path, tools: dict, sr: int, log) -> Path:
+    current = src_wav
+    for i, step in enumerate(chain, start=1):
+        if step["type"] == "wma_encode":
+            current = _step_wma_encode(step, current, tmpdir, i, tools, log)
+        else:
+            current = _step_mp3_lame(step, current, tmpdir, i, tools, log)
+    out = tmpdir / "final.wav"
+    _run([tools["ffmpeg"], "-y", "-i", str(current), "-vn", "-ar", str(sr), "-c:a", "pcm_s16le", str(out)], log)
+    return out
+
+
+def _segment_worker(job: dict) -> dict:
+    import numpy as np
+    import soundfile as sf
+
+    res = {"name": job["name"], "chain": describe_chain(job["chain"]), "status": "ok"}
+    tmpdir = Path(job["tmp_root"]) / job["name"]
+    log: list[str] = []
+    try:
+        tmpdir.mkdir(parents=True, exist_ok=True)
+        sr = job["sr"]
+        hq, _ = sf.read(job["src"], start=job["rd_start"], stop=job["rd_stop"], always_2d=True, dtype="float64")
+        core = hq[job["pad_start"]: job["pad_start"] + job["core_len"]]
+        if len(core) == 0 or 20 * np.log10(np.sqrt(np.mean(core ** 2)) + 1e-12) < job["silence_dbfs"]:
+            res["status"] = "rejected: silent"
+            return res
+
+        src_wav = tmpdir / "seg.wav"
+        sf.write(str(src_wav), hq, sr, subtype="PCM_24")
+        lq_wav = _encode_chain(job["chain"], src_wav, tmpdir, job["tools"], sr, log.append)
+        lq, _ = sf.read(str(lq_wav), always_2d=True, dtype="float64")
+
+        lag, corr = measure_offset(hq, lq, sr, job["max_lag"])
+        res["lag"], res["corr"] = lag, round(corr, 4)
+        if corr < job["min_corr"]:
+            res["status"] = "rejected: weak alignment"
+            return res
+
+        if lag > 0:
+            lq = lq[lag:]
+        elif lag < 0:
+            hq = hq[-lag:]
+        start = job["pad_start"] + min(lag, 0)
+        length = job["core_len"]
+        if start < 0:
+            length += start
+            start = 0
+        end = min(start + length, len(hq), len(lq))
+        hq_c, lq_c = hq[start:end], lq[start:end]
+        if len(hq_c) < job["min_len"]:
+            res["status"] = "rejected: too short after alignment"
+            return res
+
+        sf.write(job["out_hq"], hq_c, sr, subtype="PCM_24")
+        sf.write(job["out_lq"], lq_c, sr, subtype="PCM_24")
+        res["seconds"] = round(len(hq_c) / sr, 3)
+    except Exception as ex:
+        res["status"] = f"error: {ex} {' | '.join(log[-4:])}"
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    return res
+
+
+def run_randomized(config: dict, input_path: str | Path, output_dir: str | Path,
+                   seed: int = 0, workers: int | None = None, max_minutes: float | None = None,
+                   print_fn=print) -> list[dict]:
+    """Cut each source into segments, give every segment its own random chain, align it,
+    and write LQ/HQ pairs to <output_dir>/LQ and <output_dir>/HQ."""
+    import soundfile as sf
+
+    rc = config.get("random")
+    if not rc:
+        raise DegradeError("Config has no 'random' block.")
+    tools = config["tools"]
+    input_path, output_dir = Path(input_path), Path(output_dir)
+    if input_path.is_file():
+        files = [input_path]
+    else:
+        files = sorted(f for f in input_path.iterdir() if f.suffix.lower() in AUDIO_EXTS)
+    if not files:
+        raise DegradeError(f"No audio files found in {input_path}")
+
+    lq_dir, hq_dir, tmp_root = output_dir / "LQ", output_dir / "HQ", output_dir / "_tmp"
+    lq_dir.mkdir(parents=True, exist_ok=True)
+    hq_dir.mkdir(parents=True, exist_ok=True)
+
+    seg_sec = float(rc.get("segment_sec", 30))
+    pad_sec = float(rc.get("pad_sec", 1.0))
+    min_sec = float(rc.get("min_segment_sec", 3.0))
+
+    jobs: list[dict] = []
+    skipped_existing = 0
+    for f in files:
+        try:
+            info = sf.info(str(f))
+        except Exception as ex:
+            print_fn(f"  skip {f.name}: unreadable ({ex})")
+            continue
+        sr = info.samplerate
+        if sr not in (32000, 44100, 48000):
+            print_fn(f"  skip {f.name}: {sr} Hz is not an MP3 sample rate")
+            continue
+        seg_n, pad_n, total = int(seg_sec * sr), int(pad_sec * sr), info.frames
+        base = _sanitize_basename(f.stem)
+        for idx, s in enumerate(range(0, total, seg_n), start=1):
+            e = min(s + seg_n, total)
+            if (e - s) < min_sec * sr:
+                continue
+            name = f"{base}_s{idx:03d}"
+            out_lq, out_hq = lq_dir / f"{name}.wav", hq_dir / f"{name}.wav"
+            if out_lq.exists() and out_hq.exists():
+                skipped_existing += 1
+                continue
+            rd_start, rd_stop = max(0, s - pad_n), min(total, e + pad_n)
+            jobs.append({
+                "name": name, "src": str(f), "sr": sr,
+                "rd_start": rd_start, "rd_stop": rd_stop,
+                "pad_start": s - rd_start, "core_len": e - s,
+                "chain": sample_chain(rc, random.Random(f"{seed}:{name}")),
+                "tools": tools, "tmp_root": str(tmp_root),
+                "max_lag": int(rc.get("max_lag", 8192)),
+                "min_corr": float(rc.get("min_corr", 0.5)),
+                "silence_dbfs": float(rc.get("silence_dbfs", -60)),
+                "min_len": int(min_sec * sr),
+                "out_lq": str(out_lq), "out_hq": str(out_hq),
+            })
+
+    if max_minutes:
+        rng = random.Random(seed)
+        rng.shuffle(jobs)
+        kept, total_min = [], 0.0
+        for j in jobs:
+            if total_min >= max_minutes:
+                break
+            kept.append(j)
+            total_min += j["core_len"] / j["sr"] / 60
+        jobs = sorted(kept, key=lambda j: j["name"])
+
+    planned = sum(j["core_len"] / j["sr"] for j in jobs) / 60
+    print_fn(f"Randomized degradation: {len(files)} file(s), {len(jobs)} segment(s), ~{planned:.1f} min"
+             f" ({skipped_existing} already done)")
+    if not jobs:
+        return []
+
+    workers = workers or max(1, (os.cpu_count() or 2) - 1)
+    results: list[dict] = []
+    done_sec, rejects = 0.0, {}
+    with open(output_dir / "_chains.jsonl", "a", encoding="utf-8") as logf, \
+            ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_segment_worker, j) for j in jobs]
+        for n, fut in enumerate(as_completed(futures), start=1):
+            r = fut.result()
+            results.append(r)
+            logf.write(json.dumps(r) + "\n")
+            logf.flush()
+            if r["status"] == "ok":
+                done_sec += r["seconds"]
+                print_fn(f"[{n}/{len(jobs)}] {r['name']}  lag={r['lag']}  corr={r['corr']}  {r['chain']}")
+            else:
+                rejects[r["status"]] = rejects.get(r["status"], 0) + 1
+                print_fn(f"[{n}/{len(jobs)}] {r['name']}  {r['status']}  {r['chain']}")
+    shutil.rmtree(tmp_root, ignore_errors=True)
+
+    print_fn(f"Kept {sum(1 for r in results if r['status'] == 'ok')}/{len(jobs)} segments, {done_sec / 60:.1f} min.")
+    for reason, count in sorted(rejects.items()):
+        print_fn(f"  {count} x {reason}")
     return results
 
 
@@ -315,10 +563,16 @@ def main() -> None:
     parser.add_argument("--input", required=True, help="Input audio file or folder (with --bulk).")
     parser.add_argument("--output", required=True, help="Output directory.")
     parser.add_argument("--bulk", action="store_true", help="Treat --input as a folder and process every audio file in it.")
+    parser.add_argument("--randomize", action="store_true", help="Segment each file and give every segment its own random chain; writes <output>/LQ and <output>/HQ.")
+    parser.add_argument("--seed", type=int, default=0, help="Seed for --randomize.")
+    parser.add_argument("--workers", type=int, default=None, help="Parallel segments for --randomize (default: CPU count - 1).")
+    parser.add_argument("--max_minutes", type=float, default=None, help="Cap the synthetic total for --randomize.")
     args = parser.parse_args()
 
     config = load_config(args.config)
-    if args.bulk:
+    if args.randomize:
+        run_randomized(config, args.input, args.output, seed=args.seed, workers=args.workers, max_minutes=args.max_minutes)
+    elif args.bulk:
         run_bulk(config, args.input, args.output)
     else:
         run_chain(config, args.input, args.output)
