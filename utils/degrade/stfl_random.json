@@ -7,7 +7,7 @@
   "random": {
     "segment_sec": 30,
     "pad_sec": 1.0,
-    "max_lag": 8192,
+    "max_lag": 16384,
     "min_corr": 0.5,
     "silence_dbfs": -60,
     "wma_position": {

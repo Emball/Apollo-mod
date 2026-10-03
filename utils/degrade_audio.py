@@ -382,7 +382,7 @@ def _segment_worker(job: dict) -> dict:
 
 def run_randomized(config: dict, input_path: str | Path, output_dir: str | Path,
                    seed: int = 0, workers: int | None = None, max_minutes: float | None = None,
-                   print_fn=print) -> list[dict]:
+                   segment_sec: float | None = None, print_fn=print) -> list[dict]:
     """Cut each source into segments, give every segment its own random chain, align it,
     and write LQ/HQ pairs to <output_dir>/LQ and <output_dir>/HQ."""
     import soundfile as sf
@@ -403,9 +403,9 @@ def run_randomized(config: dict, input_path: str | Path, output_dir: str | Path,
     lq_dir.mkdir(parents=True, exist_ok=True)
     hq_dir.mkdir(parents=True, exist_ok=True)
 
-    seg_sec = float(rc.get("segment_sec", 30))
+    seg_sec = float(segment_sec or rc.get("segment_sec", 30))
     pad_sec = float(rc.get("pad_sec", 1.0))
-    min_sec = float(rc.get("min_segment_sec", 3.0))
+    min_sec = min(float(rc.get("min_segment_sec", 3.0)), seg_sec)
 
     jobs: list[dict] = []
     skipped_existing = 0
@@ -529,17 +529,20 @@ def _screen_randomized(state: dict, console, _pick, _run_with_live_output, ROOT:
     out = console.input(f"[cyan]Output folder, LQ/ and HQ/ are created inside[/] (default: {escape(default_out)}): ").strip().strip('"') or default_out
     seed = console.input(f"[cyan]Seed[/] (default: {st.get('seed', 0)}): ").strip() or str(st.get("seed", 0))
     mins = console.input(f"[cyan]Max minutes of synthetic audio, 0 for no cap[/] (default: {st.get('max_minutes', 0)}): ").strip() or str(st.get("max_minutes", 0))
+    seg = console.input(f"[cyan]Segment length in seconds, each segment gets its own chain[/] (default: {st.get('segment_sec', 30)}): ").strip() or str(st.get("segment_sec", 30))
     try:
-        seed_i, mins_f = int(seed), float(mins)
+        seed_i, mins_f, seg_f = int(seed), float(mins), float(seg)
+        if seg_f < 1:
+            raise ValueError
     except ValueError:
-        console.print("[red]Seed must be a whole number and max minutes a number.[/]")
+        console.print("[red]Seed must be a whole number, max minutes a number, and segment length at least 1.[/]")
         console.input("Press Enter to return.")
         return
 
-    st.update({"last_output": out, "seed": seed_i, "max_minutes": mins_f})
+    st.update({"last_output": out, "seed": seed_i, "max_minutes": mins_f, "segment_sec": seg_f})
     cmd = [sys.executable, str(ROOT / "utils" / "degrade_audio.py"),
            "--config", str(cfg_path), "--input", src, "--output", out,
-           "--randomize", "--seed", str(seed_i)]
+           "--randomize", "--seed", str(seed_i), "--segment_sec", str(seg_f)]
     if mins_f > 0:
         cmd += ["--max_minutes", str(mins_f)]
     _run_with_live_output(cmd, f"Randomized degrade: {cfg_path.stem}")
@@ -636,11 +639,12 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0, help="Seed for --randomize.")
     parser.add_argument("--workers", type=int, default=None, help="Parallel segments for --randomize (default: CPU count - 1).")
     parser.add_argument("--max_minutes", type=float, default=None, help="Cap the synthetic total for --randomize.")
+    parser.add_argument("--segment_sec", type=float, default=None, help="Segment length for --randomize, overrides the recipe (each segment gets its own chain).")
     args = parser.parse_args()
 
     config = load_config(args.config)
     if args.randomize:
-        run_randomized(config, args.input, args.output, seed=args.seed, workers=args.workers, max_minutes=args.max_minutes)
+        run_randomized(config, args.input, args.output, seed=args.seed, workers=args.workers, max_minutes=args.max_minutes, segment_sec=args.segment_sec)
     elif args.bulk:
         run_bulk(config, args.input, args.output)
     else:
