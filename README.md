@@ -244,7 +244,23 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 | `mid_side_isolation` | Live | Collapses the pair to mid `(L+R)/2` or side `(L-R)/2`, duplicated to both channels. Applied identically to LQ and HQ. Helps the model generalize to stereo field components. Rolls before stereo_alternation; if it fires, stereo_alternation is skipped. |
 | `noise` | Live | Matched Gaussian noise added to both LQ and HQ. **Do not use with fragile/synthetic degradation** — it pollutes the gradient signal. Safe for clean/consistent degradation. |
 | `pitch_shift` | Cached | Disabled recommended for codec restoration. |
-| `mp3_degradation` | Cached | CBR MP3 re-encode on LQ only. |
+| `compression` | Cached | Re-encodes each LQ chunk through its own random codec chain drawn from a recipe. Cached only; placing it under `live` is an error. |
+
+#### compression
+
+Set under `augmentation.cached.compression`. Each chunk is encoded through a chain sampled from the recipe (WMA, MP3, AAC, Vorbis, Opus, MP2; order, pass count, and CBR/VBR are drawn per chunk), then re-aligned to the source by measured delay. Requires `ffmpeg` with the encoders the recipe uses.
+
+| Key | Description |
+|---|---|
+| `enabled` | Turns the augmentation on. |
+| `recipe` | Path to a recipe JSON with a `random` block, e.g. `utils/degrade/stfl_random.json` or `utils/degrade/compression_mixed.json`. |
+| `fraction` | Share of chunks that receive a chain. The rest keep their original LQ. |
+| `seed` | Seed for chain sampling. Each chunk is seeded from the seed, file name, and chunk index. |
+| `pad_sec` | Seconds of surrounding audio encoded with each chunk and discarded after alignment. |
+| `workers` | Threads used while chunking. `0` uses CPU count minus 1. |
+| `exclude` | Filename patterns (case-insensitive, `*` wildcards, plain text matches as a substring) for songs that are skipped because their LQ is already degraded. |
+
+Chunks whose chain fails the recipe's alignment or silence checks keep their original LQ. A summary of compressed, skipped, and excluded chunks is printed after chunking. The compression settings are part of the chunk cache key.
 
 ### loss_g (band weight)
 

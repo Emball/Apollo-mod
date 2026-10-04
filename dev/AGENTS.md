@@ -36,6 +36,7 @@ core/                    -- training/inference engine
 utils/                   -- TUI and tools
   tui.py                 -- keyboard-navigated launcher (primary interface)
   degrade_audio.py       -- synthetic degradation pipeline
+  compression.py         -- shared codec-chain sampling, encoding, alignment
   degrade/               -- degradation JSON configs
 configs/                 -- training YAML configs
   apollo.yaml            -- base config (feature_dim=256)
@@ -66,7 +67,8 @@ input/ output/           -- inference I/O staging dirs
 | `utils/tui.py` | Keyboard-navigated TUI. Latest/Best checkpoint options in inference picker. Ctrl+C during training saves checkpoint. Ensemble picker after output path selection. "Update Apollo" in Utilities runs `git pull --ff-only`. `--dev` flag adds `dev/*.yaml` to config picker. |
 | `core/evaluate.py` | Offline checkpoint evaluator. Reads metrics from filenames; runs inference only for missing ones. VISQOL via `visqol-python`. Scores cached in `<ckpt_dir>/.eval_cache.json`. |
 | `utils/align_audio.py` | LQ/HQ temporal alignment. Global sinc resample for speed drift, chunked cross-correlation micro-alignment. |
-| `utils/degrade_audio.py` | Synthetic degradation pipeline via JSON configs. Fixed-chain mode (`chain`) or `--randomize` mode (`random` block). |
+| `utils/degrade_audio.py` | Synthetic degradation pipeline via JSON configs. Fixed-chain mode (`chain`) or `--randomize` mode (`random` block). Randomized mode cuts each file into `--segment_sec` segments (down to 3 s), gives each its own chain, writes one LQ/HQ pair per segment plus `_chains.jsonl`. TUI flow lives in `_screen_randomized`. |
+| `utils/compression.py` | Shared codec-chain module used by `degrade_audio.py` and the cached `compression` augmentation: chain sampling from a `random` recipe, ffmpeg encoders, per-window delay measurement and alignment (`degrade_window`). Padding is encoded with each window and cropped after alignment so codec edge artifacts never reach the pair. |
 
 ---
 
@@ -85,6 +87,8 @@ input/ output/           -- inference I/O staging dirs
 **VISQOL:** Uses the `visqol-python` package (pip-installable, pure-Python port of ViSQOL v3.3.3, Windows-compatible). Install: `uv pip install "visqol-python[all]"`. Added to `requirements.txt`. If not installed, `val_visqol=0.000` with no crash. Both `audio_litmodule.py` and `evaluate.py` use the same `_get_visqol_api()` / `_visqol_score()` helpers.
 
 **Band weight:** `MultiFrequencyGenLoss` applies a penalty curve over STFT bins. Three shapes: `"gaussian"` (bump centered at `band_weight_center_hz`), `"trapezoid"` (flat band with soft ramps), `"piecewise"` (list of `[hz, weight]` breakpoints, linearly interpolated — use to match the exact codec damage curve for your material). `band_weight_gain=0` is flat regardless of shape. `apollo_stfl_new.yaml` uses piecewise shape tuned for MP3 restoration: flat at 0.15 below 550Hz, peaks at 1.0 from 12–14kHz, drops to 0.1 above 16.5kHz.
+
+**Compression augmentation:** `augmentation.cached.compression` only. A `compression` or `mp3_degradation` key under `live` raises an error, and `cached.mp3_degradation` raises a pointer to `compression`. Applied to the LQ chunk during chunking in `core/train.py` (`_CompressionAug`); `exclude` patterns skip songs whose LQ is already degraded. Delay is measured per chunk, since chain order changes the total encoder delay (WMA adds one 2048-sample frame). Verified on real material at 3 s chunks: residual lag under 0.1 sample across WMA-first, WMA-last, WMA-middle and double-WMA chains.
 
 **Mid/side isolation augmentation:** Live augmentation option (`mid_side_isolation` block). When enabled, randomly collapses the LQ/HQ pair to mid `(L+R)/2` or side `(L-R)/2`, duplicated to both channels. Applied identically to LQ and HQ. Rolls before `stereo_alternation` — if mid/side fires, stereo_alternation is skipped for that chunk. Only runs on stereo input. Off by default. Config keys: `enabled`, `prob_mid`, `prob_side`.
 
