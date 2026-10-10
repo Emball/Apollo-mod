@@ -173,14 +173,12 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 - Keep batch size at 1 (`batch_size: 1`, `grad_accum_steps: 1`)
 - Disable noise augmentation (`noise.enabled: false`)
 - Set `val_check_interval` to 200-300 for cleaner metrics
-- Disable TF32 (`tf32: false`)
 - Start with `band_weight_gain: 0`, enable after baseline
 
 **Real / consistent degradation (e.g., iTunes MP3s, single encoder fingerprint):**
 - Unfreeze all layers (`n_layers_to_freeze: 0`)
 - Can increase batch size to 2-4 (`batch_size: 2`, `grad_accum_steps: 2`)
 - Noise augmentation is safe (`noise.enabled: true`)
-- TF32 is optional but safer to disable (`tf32: false`)
 - Start with `band_weight_gain: 0`, enable after baseline
 
 **General:**
@@ -202,7 +200,6 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 
 | Key | Description |
 |---|---|
-| `tf32` | TF32 matmuls. Only benefits Ampere+ GPUs (RTX 3000/4000 series). **Disable for GAN training** — spectral loss landscapes are sensitive to numerical error. Default `false`. |
 | `cudnn_benchmark` | Benchmarks cuDNN conv algorithms on first batch. Leave `true` for fixed input shapes. |
 | `expandable_segments` | Reduces CUDA allocator fragmentation. Leave `true`. |
 | `triton_cache` | Caches compiled Triton kernels. Saves 30-60s on startup after first run. |
@@ -291,7 +288,7 @@ Songs without an LQ file need the `LQ/` and `HQ/` folder layout, with the song i
 
 | Key | Description |
 |---|---|
-| `type` | `adamw`, `gefen` (recommended — lower memory, faster steps; `uv pip install gefen`), `gefen_muon` (same as `gefen` for Apollo — no 2D params), `adamw_8bit` (bitsandbytes), or `cpu_offload`. |
+| `type` | `adamw`, `gefen` (recommended — lower memory, faster steps; `uv pip install gefen`), `gefen_muon` (same as `gefen` for Apollo — no 2D params), `adamw_8bit` (bitsandbytes). |
 | `lr_g` | Generator learning rate. `3e-6` recommended for fine-tuning close to the target distribution; `1e-5` for more aggressive adaptation. |
 | `lr_d` | Discriminator learning rate. Keep ~10x lower than `lr_g`. |
 | `betas_g` | Generator Adam betas. Default `[0.9, 0.999]`. |

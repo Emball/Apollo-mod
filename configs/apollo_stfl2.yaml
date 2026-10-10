@@ -6,7 +6,6 @@ resume_checkpoint: null  # set to explicit .ckpt path to override auto-resume
 resume: true
 
 optimizations:
-  tf32: true
   cudnn_benchmark: true
   expandable_segments: true
   triton_cache: true

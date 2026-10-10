@@ -25,8 +25,8 @@ def apply_optimizations(cfg: DictConfig) -> None:
     """Apply hardware/compiler optimisations declared in cfg.optimizations."""
     opt = cfg.get("optimizations", {})
 
-    # TF32 disabled -- GAN spectral loss landscapes are sensitive to accumulated
-    # numerical error. Keep highest precision regardless of config.
+    # TF32 is always disabled -- GAN spectral loss landscapes are sensitive to accumulated
+    # numerical error. There is no config switch for it.
     torch.set_float32_matmul_precision("highest")
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
@@ -1514,7 +1514,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # Reads cfg.optimizer.type to select the optimizer:
     #   adamw        -- standard 32-bit AdamW
     #   adamw_8bit   -- 8-bit AdamW via bitsandbytes (pip install bitsandbytes)
-    #   cpu_offload  -- 32-bit AdamW with momentum states in CPU RAM
     #   gefen        -- Gefen (drop-in AdamW, ~8x lower optimizer memory, pip install gefen)
     #   gefen_muon   -- GefenMuon for 2D params + Gefen for rest (recommended for fine-tuning)
 
@@ -1592,12 +1591,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 print_only("[optimizer] bitsandbytes not installed -- falling back to AdamW32bit")
 
         if opt_type == "cpu_offload":
-            try:
-                opt = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay, betas=betas, fused=False)
-                print_only(f"[optimizer] AdamW32bit with CPU offload -- lr={lr}")
-                return opt
-            except Exception as e:
-                print_only(f"[optimizer] CPU offload failed ({e}), falling back to AdamW32bit")
+            print_only("[optimizer] cpu_offload is no longer a separate optimizer (it never offloaded) -- using AdamW32bit")
 
         opt = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay, betas=betas)
         print_only(f"[optimizer] AdamW32bit -- lr={lr}")
