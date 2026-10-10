@@ -26,6 +26,9 @@ class CompressionError(RuntimeError):
     pass
 
 
+_STEP_TIMEOUT_SEC = 1800
+
+
 _CODEC_ARGS = {
     "aac":    ("aac",        "m4a"),
     "vorbis": ("libvorbis",  "ogg"),
@@ -157,16 +160,22 @@ def check_encoders(ffmpeg: str, rc: dict, acmenc: str | None = None) -> None:
         if not shutil.which(acmenc) and not Path(acmenc).exists():
             raise CompressionError(f"acmenc not found at '{acmenc}'")
     try:
-        out = subprocess.run([ffmpeg, "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
+        out = subprocess.run([ffmpeg, "-hide_banner", "-encoders"], capture_output=True, text=True,
+                             timeout=60).stdout
     except OSError as ex:
         raise CompressionError(f"ffmpeg not found ({ffmpeg}): {ex}")
+    except subprocess.TimeoutExpired:
+        raise CompressionError(f"ffmpeg did not answer within 60 s ({ffmpeg})")
     missing = sorted(e for e in recipe_encoders(rc) if f" {e} " not in out)
     if missing:
         raise CompressionError(f"ffmpeg has no encoder for: {', '.join(missing)}")
 
 
 def _run(cmd: list, log: list) -> None:
-    r = subprocess.run([str(c) for c in cmd], capture_output=True, text=True)
+    try:
+        r = subprocess.run([str(c) for c in cmd], capture_output=True, text=True, timeout=_STEP_TIMEOUT_SEC)
+    except subprocess.TimeoutExpired:
+        raise CompressionError(f"{Path(str(cmd[0])).name} timed out after {_STEP_TIMEOUT_SEC} s")
     if r.returncode != 0:
         log.append(r.stderr[-300:])
         raise CompressionError(f"{Path(str(cmd[0])).name} exit {r.returncode}")

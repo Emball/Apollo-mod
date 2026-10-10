@@ -75,7 +75,10 @@ def list_configs(configs_dir: Path) -> list[Path]:
 
 def _run(cmd: list[str], print_fn) -> None:
     print_fn(f"    $ {' '.join(str(c) for c in cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    except subprocess.TimeoutExpired:
+        raise DegradeError(f"Command timed out after 1800 s: {cmd[0]}")
     if result.returncode != 0:
         print_fn(result.stdout)
         print_fn(result.stderr)

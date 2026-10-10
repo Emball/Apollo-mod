@@ -442,6 +442,20 @@ class AudioLightningModule(pl.LightningModule):
     # Full-song val ref locking + rotation
     # ------------------------------------------------------------------
 
+    def _apply_val_subset(self) -> None:
+        """Tell the datamodule to load only the locked val chunks."""
+        if self._val_fixed_indices is None:
+            return
+        try:
+            dm = self.trainer.datamodule
+            if hasattr(dm, "set_val_subset"):
+                dm.set_val_subset(self._val_fixed_indices)
+        except Exception as e:
+            print(f"[val] Could not restrict val dataloader to locked chunks: {e}")
+
+    def on_validation_start(self):
+        self._apply_val_subset()
+
     def _resolve_rotate_steps(self):
         rotate_steps = self.val_rotate_every
         if rotate_steps == "auto" or rotate_steps is None:
@@ -627,6 +641,7 @@ class AudioLightningModule(pl.LightningModule):
         # --- Lock fixed indices on first real val run ---
         if self._val_fixed_indices is None and self._val_seen_indices:
             self._lock_val_fixed_indices()
+            self._apply_val_subset()
 
         # --- Lock full-song metric refs on first real val run ---
         if not self._val_song_refs and self._val_fixed_indices is not None:

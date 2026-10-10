@@ -151,6 +151,65 @@ _REPO_ROOT  = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _MODELS_DIR = os.path.join(_REPO_ROOT, "models")
 _CACHE_DIR  = os.path.join(_REPO_ROOT, "usr", "cache")
 
+_MD5_INDEX_FILE = os.path.join(_CACHE_DIR, "md5_index.json")
+_md5_index = None
+_md5_lock = None
+
+
+def _md5_index_load() -> dict:
+    global _md5_index, _md5_lock
+    import threading as _th
+    if _md5_lock is None:
+        _md5_lock = _th.Lock()
+    if _md5_index is None:
+        try:
+            with open(_MD5_INDEX_FILE) as _f:
+                _md5_index = json.load(_f)
+        except FileNotFoundError:
+            _md5_index = {}
+        except Exception as _e:
+            print_only(f"[md5] Index unreadable ({_e}) -- rebuilding.")
+            _md5_index = {}
+    return _md5_index
+
+
+def _md5_index_save() -> None:
+    if _md5_index is None:
+        return
+    try:
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        tmp = _MD5_INDEX_FILE + ".tmp"
+        with _md5_lock:
+            with open(tmp, "w") as _f:
+                json.dump(_md5_index, _f)
+        os.replace(tmp, _MD5_INDEX_FILE)
+    except Exception as _e:
+        print_only(f"[md5] Could not save index: {_e}")
+
+
+def _md5_file(path: str) -> str:
+    """md5 of a file's contents, reused while its size and mtime are unchanged."""
+    import hashlib
+    idx = _md5_index_load()
+    ap = os.path.abspath(path)
+    st = os.stat(ap)
+    ent = idx.get(ap)
+    if ent and ent[0] == st.st_size and ent[1] == st.st_mtime_ns:
+        return ent[2]
+    h = hashlib.md5(usedforsecurity=False)
+    with open(ap, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    digest = h.hexdigest()
+    with _md5_lock:
+        idx[ap] = [st.st_size, st.st_mtime_ns, digest]
+    return digest
+
+
+import atexit as _atexit
+_atexit.register(_md5_index_save)
+
+
 # Pretrained model filenames to search for (base -> universal).
 # Set download URLs here once you have them; None = skip auto-download.
 _PRETRAINED_MODELS = {
@@ -519,7 +578,7 @@ def _compression_digest(cfg: "DictConfig") -> str:
         return ""
     data, _ = _load_recipe(blk)
     data = {k: v for k, v in data.items() if k != "external_codecs"}
-    return hashlib.md5(_json.dumps(data, sort_keys=True).encode()).hexdigest()[:12]
+    return hashlib.md5(_json.dumps(data, sort_keys=True).encode(), usedforsecurity=False).hexdigest()[:12]
 
 
 def _build_compression(cfg: "DictConfig"):
@@ -559,7 +618,7 @@ _CHUNK_CACHE_DIR = os.path.join(_REPO_ROOT, "usr", "cache", "chunks")
 def _source_md5s(src_root: str) -> str:
     """Return a stable hex digest over all LQ + HQ source files in src_root (sorted by name)."""
     import hashlib
-    h = hashlib.md5()
+    h = hashlib.md5(usedforsecurity=False)
     lq_dir = os.path.join(src_root, "LQ")
     hq_dir = os.path.join(src_root, "HQ")
     for d in (lq_dir, hq_dir):
@@ -570,11 +629,8 @@ def _source_md5s(src_root: str) -> str:
             if not os.path.isfile(p):
                 continue
             h.update(fname.encode())
-            fh = hashlib.md5()
-            with open(p, "rb") as f:
-                for block in iter(lambda: f.read(1 << 20), b""):
-                    fh.update(block)
-            h.update(fh.hexdigest().encode())
+            h.update(_md5_file(p).encode())
+    _md5_index_save()
     return h.hexdigest()
 
 
@@ -590,7 +646,7 @@ def _chunk_cache_key(src_root: str, fixed_delay, aug_cfg, extra: str = "") -> st
         ),
         "extra": extra,
     }
-    h = hashlib.md5()
+    h = hashlib.md5(usedforsecurity=False)
     h.update(_source_md5s(src_root).encode())
     h.update(_json.dumps(params, sort_keys=True).encode())
     return h.hexdigest()[:16]
@@ -707,13 +763,7 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         except ImportError:
             return False
 
-    def _file_md5(path: str) -> str:
-        import hashlib
-        h = hashlib.md5()
-        with open(path, "rb") as _f:
-            for _block in iter(lambda: _f.read(1 << 20), b""):
-                h.update(_block)
-        return h.hexdigest()
+    _file_md5 = _md5_file
 
     def _cached_wav_path(src: str, trim_samples: int) -> str:
         """Return the usr/cache path for this source + trim combo."""
@@ -889,12 +939,7 @@ def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 10.0, fix
     os.makedirs(os.path.join(dst_root, "LQ"), exist_ok=True)
     os.makedirs(os.path.join(dst_root, "HQ"), exist_ok=True)
 
-    def _file_md5(path):
-        h = hashlib.md5()
-        with open(path, "rb") as f:
-            for block in iter(lambda: f.read(1 << 20), b""):
-                h.update(block)
-        return h.hexdigest()
+    _file_md5 = _md5_file
 
     def _cached_wav(src):
         md5 = _file_md5(src)
@@ -1759,13 +1804,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         import hashlib as _hashlib, json as _json
 
         def _baseline_cache_key(weights_path: str, val_clip_key: str) -> str:
-            h = _hashlib.md5()
+            h = _hashlib.md5(usedforsecurity=False)
             if weights_path and os.path.isfile(weights_path):
-                wh = _hashlib.md5()
-                with open(weights_path, "rb") as _wf:
-                    for _blk in iter(lambda: _wf.read(1 << 20), b""):
-                        wh.update(_blk)
-                h.update(wh.hexdigest().encode())
+                h.update(_md5_file(weights_path).encode())
             h.update(val_clip_key.encode())
             return h.hexdigest()[:16]
 

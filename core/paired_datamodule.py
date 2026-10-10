@@ -467,6 +467,22 @@ class FullLengthPairDataset(Dataset):
 
 # DataModule
 
+class _SwitchableSampler(torch.utils.data.Sampler):
+    """Random order over the whole dataset until a subset is set, then a fixed sorted subset."""
+
+    def __init__(self, n: int):
+        self.n = n
+        self.indices = None
+
+    def __iter__(self):
+        if self.indices is None:
+            return iter(torch.randperm(self.n).tolist())
+        return iter(list(self.indices))
+
+    def __len__(self) -> int:
+        return self.n if self.indices is None else len(self.indices)
+
+
 class PairedAudioDataModule(LightningDataModule):
     def __init__(
         self,
@@ -494,6 +510,14 @@ class PairedAudioDataModule(LightningDataModule):
 
         self.data_train: Optional[Dataset] = None
         self.data_val:   Optional[Dataset] = None
+        self._val_sampler: Optional[_SwitchableSampler] = None
+        self._val_subset = None
+
+    def set_val_subset(self, indices) -> None:
+        """Restrict validation to these dataset indices (applies from the next val run)."""
+        self._val_subset = sorted(int(i) for i in indices)
+        if self._val_sampler is not None:
+            self._val_sampler.indices = self._val_subset
 
     def setup(self, stage: Optional[str] = None):
         if self.data_train is None:
@@ -523,10 +547,12 @@ class PairedAudioDataModule(LightningDataModule):
         )
 
     def val_dataloader(self) -> DataLoader:
+        self._val_sampler = _SwitchableSampler(len(self.data_val))
+        self._val_sampler.indices = self._val_subset
         return DataLoader(
             self.data_val,
             batch_size=1,
-            shuffle=True,
+            sampler=self._val_sampler,
             num_workers=0,
             pin_memory=False,
             persistent_workers=False,

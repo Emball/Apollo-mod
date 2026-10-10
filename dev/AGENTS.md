@@ -80,7 +80,7 @@ input/ output/           -- inference I/O staging dirs
 
 ## Internal Behavior
 
-**Chunk cache:** `usr/cache/chunks/<key>/<split>/` — keyed on MD5 of (source contents + `segment_sec` + overlap + `fixed_delay` + aug config + compression recipe contents). Shared across configs with matching dataset and params. `.manifest.json` written after each successful run.
+**Chunk cache:** `usr/cache/chunks/<key>/<split>/` — keyed on MD5 of (source contents + `segment_sec` + overlap + `fixed_delay` + aug config + compression recipe contents). Shared across configs with matching dataset and params. `.manifest.json` written after each successful run. File digests are reused from `usr/cache/md5_index.json` while a file's path, size and mtime are unchanged. After the val clips are locked, the val dataloader reads only those clips (`PairedAudioDataModule.set_val_subset`).
 
 **Source conversion:** Non-WAV sources converted to 32-bit float WAV via FFmpeg in parallel threads. `align_data` integer offset baked in via `atrim`. Already-WAV files are never re-converted.
 

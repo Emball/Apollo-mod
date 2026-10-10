@@ -202,7 +202,7 @@ def _ensure_wav(file_path: str, target_sr: int = _SR) -> str:
     if os.path.splitext(file_path)[1].lower() == ".wav":
         return file_path
     import hashlib, tempfile
-    h = hashlib.md5()
+    h = hashlib.md5(usedforsecurity=False)
     with open(file_path, "rb") as _f:
         for _block in iter(lambda: _f.read(1 << 20), b""):
             h.update(_block)
