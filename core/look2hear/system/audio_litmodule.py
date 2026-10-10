@@ -168,6 +168,10 @@ def _visqol_score(est: "torch.Tensor", ref: "torch.Tensor", sr: int = 44100) -> 
         if sr != 48000:
             mono_est = librosa.resample(mono_est, orig_sr=sr, target_sr=48000)
             mono_ref = librosa.resample(mono_ref, orig_sr=sr, target_sr=48000)
+        # ViSQOL guidelines: ~0.5s silence at start and end of each clip
+        pad = np.zeros(int(0.5 * 48000), dtype=np.float64)
+        mono_est = np.concatenate([pad, mono_est, pad])
+        mono_ref = np.concatenate([pad, mono_ref, pad])
         result = api.measure_from_arrays(mono_ref, mono_est, 48000)
         return float(result.moslqo)
     except Exception as e:
@@ -528,7 +532,7 @@ class AudioLightningModule(pl.LightningModule):
 
     def _compute_val_metrics(self):
         """
-        Run model inference on each locked 30-second val chunk.
+        Run model inference on each locked 10-second val clip.
         Computes val_sdr / val_sfr / val_visqol. Saves LQ/HQ/Restored audio to disk.
         """
         if not self._val_song_refs:
@@ -655,7 +659,7 @@ class AudioLightningModule(pl.LightningModule):
                     seen_keys.add(key)
                     all_songs.append(key)
             self._lock_val_songs(by_song)
-            print(f"[val] {len(self._val_song_refs)} songs locked for 30s clip metric evaluation.")
+            print(f"[val] {len(self._val_song_refs)} clips locked for 10s metric evaluation.")
 
         # --- Check if it's time to rotate the song window ---
         rotate_steps = getattr(self, "_val_rotate_steps", None)
