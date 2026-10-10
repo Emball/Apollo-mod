@@ -230,7 +230,14 @@ def xcorr_find_offset(
         return lq_cursor, 0.0, 0.0
 
     corr = correlate(lq_search, hq_chunk, mode="valid")
-    corr_abs = np.abs(corr)
+    # Normalize by the local LQ energy under each candidate position so a loud passage
+    # next to the true match cannot win on amplitude alone. The floor keeps near-silent
+    # positions from being amplified into false peaks.
+    cs = np.concatenate(([0.0], np.cumsum(lq_search.astype(np.float64) ** 2)))
+    win_energy = cs[chunk_len:] - cs[:-chunk_len]
+    floor = 1e-4 * (float(win_energy.max()) + 1e-12)
+    norm = np.sqrt(np.maximum(win_energy, floor)) * (float(np.linalg.norm(hq_chunk)) + 1e-12)
+    corr_abs = np.abs(corr) / norm
 
     expected_pos = lq_cursor - search_start
     lo = max(0, expected_pos - max_shift)
