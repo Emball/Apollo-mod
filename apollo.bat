@@ -46,7 +46,16 @@ if exist "%VENV_DIR%\Scripts\python.exe" (
     if %errorlevel% neq 0 ( echo [apollo] ERROR: venv creation failed. & pause & exit /b 1 )
 )
 
-:: 3. Install / sync dependencies
+:: 3. Install / sync dependencies (skipped when requirements.txt is unchanged since last install)
+set "STAMP=%VENV_DIR%\.requirements.installed"
+if exist "%STAMP%" (
+    fc /b "%SCRIPT_DIR%\requirements.txt" "%STAMP%" >nul 2>&1
+    if !errorlevel! equ 0 (
+        echo [apollo] Dependencies up to date
+        goto :deps_done
+    )
+    del "%STAMP%" >nul 2>&1
+)
 echo [apollo] Installing PyTorch (CUDA 12.1^)...
 "%UV_BIN%" pip install ^
     --python "%VENV_DIR%\Scripts\python.exe" ^
@@ -62,6 +71,8 @@ echo [apollo] Syncing remaining dependencies...
     -r "%SCRIPT_DIR%\requirements.txt"
 if %errorlevel% neq 0 ( echo [apollo] ERROR: Dependency install failed. & pause & exit /b 1 )
 echo [apollo] Dependencies up to date
+copy /y "%SCRIPT_DIR%\requirements.txt" "%STAMP%" >nul
+:deps_done
 
 :: 4. Strip --dev flag and set env var if present
 set "APOLLO_DEV="
@@ -81,9 +92,9 @@ if defined _RAW_ARGS (
 :: 5. If arguments given, treat first as the script name and run it
 if not "!FILTERED_ARGS!"=="" (
     for /f "tokens=1,* delims= " %%a in ("!FILTERED_ARGS!") do set "CMD=%%a" & set "REST=%%b"
-    if /i "!CMD!"=="train"     set "SCRIPT=train.py"
-    if /i "!CMD!"=="inference" set "SCRIPT=inference.py"
-    if /i "!CMD!"=="test"      set "SCRIPT=test.py"
+    if /i "!CMD!"=="train"     set "SCRIPT=core\train.py"
+    if /i "!CMD!"=="inference" set "SCRIPT=core\inference.py"
+    if /i "!CMD!"=="evaluate"  set "SCRIPT=core\evaluate.py"
     if defined SCRIPT (
         "%VENV_DIR%\Scripts\python.exe" "%SCRIPT_DIR%\!SCRIPT!" !REST!
     ) else if /i "!CMD!"=="python" (

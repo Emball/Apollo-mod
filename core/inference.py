@@ -70,11 +70,9 @@ def _spectral_merge(original: "torch.Tensor", enhanced: "torch.Tensor",
         [2, T] float32 merged tensor.
 
     Phase always comes from the enhanced output. Only magnitude is blended.
-    STFT window size 4096 gives ~0.09 Hz/bin resolution at 44100 Hz.
+    STFT window size 4096 gives ~10.8 Hz/bin resolution at 44100 Hz.
     Bins not covered by any band default to enhanced-only.
     """
-    import numpy as np
-
     n_fft    = 4096
     hop      = n_fft // 4
     window   = torch.hann_window(n_fft)
@@ -318,6 +316,34 @@ def load_model(weights, sr, win, feature_dim, layer):
     return model
 
 
+class _CrossfadeWriter:
+    """Streams consecutive overlapping chunks to a sound file. Each chunk's first
+    `overlap` samples are crossfaded with the held-back tail of the previous chunk;
+    the last chunk is flushed in full, so exactly T samples are written in total."""
+
+    def __init__(self, f, overlap: int):
+        self.f       = f
+        self.overlap = max(0, int(overlap))
+        self.pending = None
+
+    def push(self, chunk, last: bool) -> None:
+        import numpy as np
+        chunk = np.asarray(chunk, dtype=np.float32)
+        n = chunk.shape[-1]
+        if self.pending is not None:
+            ov = min(self.pending.shape[-1], n)
+            if ov > 0:
+                fade_in = np.linspace(0.0, 1.0, ov, dtype=np.float32)
+                chunk = chunk.copy()
+                chunk[..., :ov] = self.pending[..., :ov] * (1.0 - fade_in) + chunk[..., :ov] * fade_in
+        if last or self.overlap == 0 or n <= self.overlap:
+            self.f.write(chunk.T)
+            self.pending = None
+        else:
+            self.f.write(chunk[..., :n - self.overlap].T)
+            self.pending = chunk[..., n - self.overlap:]
+
+
 def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path,
                  bands=None, aux_model=None, aux_bands=None):
     """Process audio in chunks and write each chunk to disk immediately.
@@ -334,7 +360,6 @@ def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path,
     Returns None (output already on disk).
     """
     import soundfile as sf
-    import numpy as np
 
     # Keep a copy of the un-normalized original for spectral merge.
     original = audio.squeeze(0).clone()  # [2, T]
@@ -368,14 +393,14 @@ def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path,
             f"overlap_samples={overlap_samples}, hop={hop_samples}"
         )
 
-    T         = audio.shape[-1]
-    prev_tail = None  # holds the overlap region from the previous chunk
+    T = audio.shape[-1]
 
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
 
     # 32-bit float WAV: no integer ceiling, no clipping at +/-1.0.
     with sf.SoundFile(out_path, mode="w", samplerate=sr, channels=2,
                       subtype="FLOAT") as f:
+        writer    = _CrossfadeWriter(f, overlap_samples)
         start     = 0
         chunk_idx = 0
         while start < T:
@@ -401,47 +426,13 @@ def _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path,
                 if _aux_bands:
                     enhanced = _spectral_merge(aux_out, enhanced, sr, _aux_bands)
 
-            chunk_len = enhanced.shape[-1]
-
-            if prev_tail is not None and overlap_samples > 0:
-                fade_len = min(overlap_samples, chunk_len, prev_tail.shape[-1])
-                fade_in  = torch.linspace(0.0, 1.0, fade_len)
-                fade_out = 1.0 - fade_in
-
-                # crossfade zone -- blend previous tail with current head
-                blended = prev_tail[..., :fade_len] * fade_out \
-                        + enhanced[..., :fade_len]  * fade_in
-
-                # write blended overlap
-                f.write(blended.T.numpy())
-                # write remainder of this chunk (excluding the next overlap tail)
-                write_end = chunk_len - overlap_samples
-                if write_end > fade_len:
-                    f.write(enhanced[..., fade_len:write_end].T.numpy())
-            else:
-                # first chunk -- write everything except the tail we'll crossfade next time
-                write_end = chunk_len - overlap_samples if (T - end) > 0 else chunk_len
-                write_end = max(write_end, 0)
-                if write_end > 0:
-                    f.write(enhanced[..., :write_end].T.numpy())
-
-            # keep tail for next chunk's crossfade (or flush if last chunk)
-            if end < T:
-                tail_start = max(0, chunk_len - overlap_samples)
-                prev_tail  = enhanced[..., tail_start:]
-            else:
-                # last chunk -- flush any remaining tail
-                if prev_tail is not None and overlap_samples > 0:
-                    tail_start = max(0, chunk_len - overlap_samples)
-                    f.write(enhanced[..., tail_start:].T.numpy())
-                elif prev_tail is None:
-                    # single chunk, no overlap
-                    pass
-                prev_tail = None
+            writer.push(enhanced.numpy(), last=end >= T)
 
             chunk_idx += 1
             print(f"[inference] Chunk {chunk_idx} done  "
                   f"({start/sr:.1f}s - {end/sr:.1f}s)  -> {out_path}")
+            if end >= T:
+                break
             start += hop_samples
 
     return None  # output already written

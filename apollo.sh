@@ -50,34 +50,41 @@ fi
 #            no bitsandbytes (unsupported on macOS)
 # Windows → handled by apollo.bat (CUDA PyTorch + bitsandbytes)
 # ---------------------------------------------------------------------------
-OS="$(uname -s)"
-case "$OS" in
-    Linux*)
-        info "Detected Linux — installing CUDA PyTorch 2.1.2..."
-        "$UV_BIN" pip install \
-            --python "$VENV_DIR/bin/python" \
-            --index-url https://download.pytorch.org/whl/cu121 \
-            torch==2.1.2+cu121 torchaudio==2.1.2+cu121
-        ok "PyTorch installed"
-        ;;
-    Darwin*)
-        info "Detected macOS — installing PyTorch 2.1.2 (MPS/CPU)..."
-        "$UV_BIN" pip install \
-            --python "$VENV_DIR/bin/python" \
-            torch==2.1.2 torchaudio==2.1.2
-        ok "PyTorch installed"
-        ;;
-    *)
-        die "Unsupported OS: $OS (only Linux, macOS, and Windows are supported)"
-        ;;
-esac
+STAMP="$VENV_DIR/.requirements.installed"
+if [ -f "$STAMP" ] && cmp -s "$SCRIPT_DIR/requirements.txt" "$STAMP"; then
+    ok "dependencies up to date"
+else
+    rm -f "$STAMP"
+    OS="$(uname -s)"
+    case "$OS" in
+        Linux*)
+            info "Detected Linux — installing CUDA PyTorch 2.1.2..."
+            "$UV_BIN" pip install \
+                --python "$VENV_DIR/bin/python" \
+                --index-url https://download.pytorch.org/whl/cu121 \
+                torch==2.1.2+cu121 torchaudio==2.1.2+cu121
+            ok "PyTorch installed"
+            ;;
+        Darwin*)
+            info "Detected macOS — installing PyTorch 2.1.2 (MPS/CPU)..."
+            "$UV_BIN" pip install \
+                --python "$VENV_DIR/bin/python" \
+                torch==2.1.2 torchaudio==2.1.2
+            ok "PyTorch installed"
+            ;;
+        *)
+            die "Unsupported OS: $OS (only Linux, macOS, and Windows are supported)"
+            ;;
+    esac
 
-info "Syncing remaining dependencies..."
-"$UV_BIN" pip install \
-    --python "$VENV_DIR/bin/python" \
-    "setuptools<71" pyyaml \
-    -r "$SCRIPT_DIR/requirements.txt"
-ok "dependencies up to date"
+    info "Syncing remaining dependencies..."
+    "$UV_BIN" pip install \
+        --python "$VENV_DIR/bin/python" \
+        "setuptools<71" pyyaml \
+        -r "$SCRIPT_DIR/requirements.txt"
+    ok "dependencies up to date"
+    cp "$SCRIPT_DIR/requirements.txt" "$STAMP"
+fi
 
 # 4. If arguments given, treat first as the script name and run it
 if [ $# -gt 0 ]; then
@@ -85,7 +92,7 @@ if [ $# -gt 0 ]; then
     case "$CMD" in
         train)     SCRIPT="core/train.py" ;;
         inference) SCRIPT="core/inference.py" ;;
-        test)      SCRIPT="test.py" ;;
+        evaluate)  SCRIPT="core/evaluate.py" ;;
         python)    exec "$VENV_DIR/bin/python" "$@" ;;
         *)         exec "$VENV_DIR/bin/python" "$CMD" "$@" ;;
     esac

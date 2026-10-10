@@ -222,6 +222,7 @@ class AudioLightningModule(pl.LightningModule):
 
         self._val_window_idx: int  = 0    # which rotation window we're on
         self._val_next_rotate: int = -1   # global_step at which to rotate next (-1 = never)
+        self._val_rotate_steps = self._resolve_rotate_steps()
         self._val_window_best: dict = {}  # best metrics seen in the current window
 
         # Pending preview tensors from _compute_val_metrics, consumed by _save_val_audio
@@ -432,6 +433,15 @@ class AudioLightningModule(pl.LightningModule):
     # Full-song val ref locking + rotation
     # ------------------------------------------------------------------
 
+    def _resolve_rotate_steps(self):
+        rotate_steps = self.val_rotate_every
+        if rotate_steps == "auto" or rotate_steps is None:
+            return None
+        try:
+            return int(rotate_steps)
+        except (ValueError, TypeError):
+            return None
+
     def _lock_val_songs(self, by_song: dict) -> None:
         """Discover all available val songs and set the initial window."""
         dataset = self.trainer.datamodule.data_val
@@ -440,16 +450,7 @@ class AudioLightningModule(pl.LightningModule):
             lq_path, hq_path = dataset.pairs[indices[0]]
             self._val_all_songs.append((song_key, lq_path, hq_path, indices))
 
-        rotate_steps = self.val_rotate_every
-        if rotate_steps == "auto" or rotate_steps is None:
-            rotate_steps = None
-        else:
-            try:
-                rotate_steps = int(rotate_steps)
-            except (ValueError, TypeError):
-                rotate_steps = None
-
-        self._val_rotate_steps = rotate_steps
+        self._val_rotate_steps = self._resolve_rotate_steps()
         self._val_window_idx   = 0
         self._val_window_best  = {}
         self._apply_val_window(announce=True)
@@ -663,11 +664,11 @@ class AudioLightningModule(pl.LightningModule):
         _visqol = self._last_val_visqol
 
 
-        # Update window-best tracking
+        # Window-best: hfnr is recorded from the same run as the best visqol
         if _visqol is not None and _visqol > self._val_window_best.get("visqol", float("-inf")):
             self._val_window_best["visqol"] = float(_visqol)
-        if _hfnr   is not None and _hfnr   > self._val_window_best.get("hfnr",   float("-inf")):
-            self._val_window_best["hfnr"]   = float(_hfnr)
+            if _hfnr is not None:
+                self._val_window_best["hfnr"] = float(_hfnr)
 
         self.log("hfnr",   float(_hfnr)   if _hfnr   is not None else 0.0, prog_bar=False, logger=True)
         self.log("visqol", float(_visqol) if _visqol is not None else -1.0, prog_bar=False, logger=True)

@@ -1172,7 +1172,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # Apply hardware / compiler optimisations declared in cfg.optimizations
     apply_optimizations(cfg)
 
-    if cfg.get("seed"):
+    if cfg.get("seed") is not None:
         pl.seed_everything(cfg.seed, workers=True)
 
     # Auto-preprocess raw data and bootstrap eval if needed
@@ -1219,9 +1219,14 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         if not os.path.isfile(_explicit_ckpt):
             raise FileNotFoundError(f"[resume] resume_checkpoint not found: {_explicit_ckpt}")
         ckpt_path = _explicit_ckpt
-        # Infer run dir from checkpoint path (runs/<name>/<run_id>/checkpoints/<file>)
-        _run_dir = os.path.dirname(os.path.dirname(ckpt_path))
-        _run_id  = os.path.basename(_run_dir)
+        _ckpt_parent = os.path.dirname(ckpt_path)
+        if os.path.basename(_ckpt_parent) == "checkpoints":
+            _run_dir = os.path.dirname(_ckpt_parent)
+            _run_id  = os.path.basename(_run_dir)
+        else:
+            _run_id  = _dt.now().strftime("%Y%m%d_%H%M%S")
+            _run_dir = os.path.join(_base_dir, _run_id)
+            print_only(f"[resume] Checkpoint is outside a run folder -- new run dir: {_run_id}")
         print_only(f"[resume] Explicit checkpoint: {os.path.basename(ckpt_path)}")
         print_only("[resume] Skipping pretrain weight loading -- checkpoint takes precedence.")
     elif cfg.get("resume", False):
@@ -1772,7 +1777,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             try:
                 import psutil as _ps
                 _vm = _ps.virtual_memory()
-                _headroom = (_vm.total * opt.get("ram_limit_fraction", 0.95)) - _vm.used
+                _headroom = (_vm.total * cfg.get("optimizations", {}).get("ram_limit_fraction", 0.95)) - _vm.used
                 if _headroom < 1.5 * (1024 ** 3):
                     print_only(f"[baseline] Skipped -- only {_headroom/(1024**3):.1f} GB RAM headroom.")
                     _baseline_ok = False
