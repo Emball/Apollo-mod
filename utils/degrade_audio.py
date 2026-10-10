@@ -39,7 +39,7 @@ import compression as cmp
 
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".aac", ".m4a", ".aiff", ".aif"}
 
-FHG_CODEC_NAME = "Fraunhofer IIS MPEG Layer-3 Codec (professional)"
+FHG_CODEC_NAME = cmp.FHG_CODEC_NAME
 
 
 class DegradeError(RuntimeError):
@@ -255,7 +255,7 @@ def _segment_worker(job: dict) -> dict:
         hq, _ = sf.read(job["src"], start=job["rd_start"], stop=job["rd_stop"], always_2d=True, dtype="float64")
         lq_core, info = cmp.degrade_window(
             hq, job["pad_start"], job["core_len"], sr, job["chain"], job["tools"]["ffmpeg"], tmpdir,
-            max_lag=job["max_lag"], min_corr=job["min_corr"], silence_dbfs=job["silence_dbfs"])
+            max_lag=job["max_lag"], min_corr=job["min_corr"], silence_dbfs=job["silence_dbfs"], acmenc=job.get("acmenc"))
         for k in ("lag", "corr"):
             if k in info:
                 res[k] = info[k]
@@ -292,8 +292,9 @@ def run_randomized(config: dict, input_path: str | Path, output_dir: str | Path,
     if not rc:
         raise DegradeError("Config has no 'random' block.")
     tools = config["tools"]
+    acmenc = config.get("external_codecs", {}).get("acmenc")
     try:
-        cmp.check_encoders(tools["ffmpeg"], rc)
+        cmp.check_encoders(tools["ffmpeg"], rc, acmenc)
     except cmp.CompressionError as ex:
         raise DegradeError(str(ex))
     input_path, output_dir = Path(input_path), Path(output_dir)
@@ -341,7 +342,7 @@ def run_randomized(config: dict, input_path: str | Path, output_dir: str | Path,
                 "rd_start": rd_start, "rd_stop": rd_stop,
                 "pad_start": s - rd_start, "core_len": e - s,
                 "chain": cmp.sample_chain(rc, random.Random(f"{seed}:{name}")),
-                "tools": tools, "tmp_root": str(tmp_root),
+                "tools": tools, "acmenc": acmenc, "tmp_root": str(tmp_root),
                 "max_lag": int(rc.get("max_lag", 8192)),
                 "min_corr": float(rc.get("min_corr", 0.5)),
                 "silence_dbfs": float(rc.get("silence_dbfs", -60)),

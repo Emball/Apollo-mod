@@ -412,9 +412,9 @@ class _CompressionAug:
     chain drawn from a recipe, is re-aligned to the source, and replaces the LQ chunk."""
 
     def __init__(self, rc, ffmpeg, sr, fraction, seed, pad_sec, workers, exclude, tmp_root,
-                 max_lag, min_corr, silence_dbfs):
+                 max_lag, min_corr, silence_dbfs, acmenc=None):
         import threading
-        self.rc, self.ffmpeg, self.sr = rc, ffmpeg, sr
+        self.rc, self.ffmpeg, self.sr, self.acmenc = rc, ffmpeg, sr, acmenc
         self.fraction, self.seed, self.pad = fraction, seed, int(pad_sec * sr)
         self.workers, self.exclude, self.tmp_root = workers, [e.lower() for e in exclude], tmp_root
         self.max_lag, self.min_corr, self.silence_dbfs = max_lag, min_corr, silence_dbfs
@@ -454,7 +454,8 @@ class _CompressionAug:
         core, info = cmp.degrade_window(
             window, start - rd_start, length, self.sr, chain, self.ffmpeg,
             Path(self.tmp_root) / uuid.uuid4().hex,
-            max_lag=self.max_lag, min_corr=self.min_corr, silence_dbfs=self.silence_dbfs)
+            max_lag=self.max_lag, min_corr=self.min_corr, silence_dbfs=self.silence_dbfs,
+            acmenc=self.acmenc)
         if core is None:
             self._count(info["status"].split(":")[0] + ": " + info["status"].split(": ", 1)[-1][:40])
             return lq_chunk
@@ -492,6 +493,7 @@ def _compression_digest(cfg: "DictConfig") -> str:
     if blk is None:
         return ""
     data, _ = _load_recipe(blk)
+    data = {k: v for k, v in data.items() if k != "external_codecs"}
     return hashlib.md5(_json.dumps(data, sort_keys=True).encode()).hexdigest()[:12]
 
 
@@ -507,7 +509,9 @@ def _build_compression(cfg: "DictConfig"):
     data, path = _load_recipe(blk)
     rc = data["random"]
     ffmpeg = str(blk.get("ffmpeg", data.get("tools", {}).get("ffmpeg", "ffmpeg")))
-    cmp.check_encoders(ffmpeg, rc)
+    acmenc = blk.get("acmenc", None) or data.get("external_codecs", {}).get("acmenc")
+    acmenc = str(acmenc) if acmenc else None
+    cmp.check_encoders(ffmpeg, rc, acmenc)
     workers = int(blk.get("workers", 0)) or max(1, (os.cpu_count() or 2) - 1)
     exclude = [str(e) for e in (blk.get("exclude", None) or [])]
     obj = _CompressionAug(
@@ -516,9 +520,9 @@ def _build_compression(cfg: "DictConfig"):
         pad_sec=float(blk.get("pad_sec", rc.get("pad_sec", 1.0))), workers=workers, exclude=exclude,
         tmp_root=tempfile.mkdtemp(prefix="apollo_comp_"),
         max_lag=int(rc.get("max_lag", 16384)), min_corr=float(rc.get("min_corr", 0.5)),
-        silence_dbfs=float(rc.get("silence_dbfs", -60)))
+        silence_dbfs=float(rc.get("silence_dbfs", -60)), acmenc=acmenc)
     print_only(f"[compression] recipe={os.path.basename(path)}  fraction={obj.fraction}  workers={workers}  "
-               f"exclude={exclude or 'none'}")
+               f"exclude={exclude or 'none'}  acmenc={acmenc or 'off'}")
     return obj
 
 

@@ -248,7 +248,7 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 
 #### compression
 
-Set under `augmentation.cached.compression`. Each chunk is encoded through a chain sampled from the recipe (MP3 and WMA, plus AAC, Vorbis, Opus, and MP2 when the recipe enables them; order, pass count, and CBR/VBR are drawn per chunk), then re-aligned to the source by measured delay. Requires `ffmpeg` with the encoders the recipe uses.
+Set under `augmentation.cached.compression`. Each chunk is encoded through a chain sampled from the recipe (MP3 and WMA, plus AAC, Vorbis, Opus, and MP2 when the recipe enables them; order, pass count, and CBR/VBR are drawn per chunk), then re-aligned to the source by measured delay. Requires `ffmpeg` with the encoders the recipe uses. A recipe can also mix Fraunhofer (`acmenc`) and LAME MP3 passes within one chain; set `external_codecs.acmenc` in the recipe to your `acmenc` executable.
 
 | Key | Description |
 |---|---|
@@ -258,6 +258,7 @@ Set under `augmentation.cached.compression`. Each chunk is encoded through a cha
 | `seed` | Seed for chain sampling. Each chunk is seeded from the seed, file name, and chunk index. |
 | `pad_sec` | Seconds of surrounding audio encoded with each chunk and discarded after alignment. |
 | `workers` | Threads used while chunking. `0` uses CPU count minus 1. |
+| `acmenc` | Path to a local `acmenc` executable. Only needed for recipes that draw Fraunhofer MP3 passes, e.g. `utils/degrade/compression_fhg.json`. Overrides `external_codecs.acmenc` in the recipe. |
 | `exclude` | Filename patterns (case-insensitive, `*` wildcards, plain text matches as a substring) for songs that are skipped because their LQ is already degraded. |
 
 Chunks whose chain fails the recipe's alignment or silence checks keep their original LQ. A summary of compressed, skipped, and excluded chunks is printed after chunking. The compression settings are part of the chunk cache key.

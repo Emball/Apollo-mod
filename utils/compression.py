@@ -8,6 +8,7 @@ utils/degrade/.
 Step types:
     wma_encode   {bitrate}
     mp3_lame     {quality} or {bitrate}
+    mp3_fhg      {bitrate, enc_delay}  acmenc, path from the recipe's external_codecs.acmenc
     codec        {codec: aac|vorbis|opus|mp2, bitrate}
 """
 
@@ -32,6 +33,7 @@ _CODEC_ARGS = {
     "mp2":    ("mp2",        "mp2"),
 }
 _ENCODER_FOR_TYPE = {"wma_encode": "wmav2", "mp3_lame": "libmp3lame"}
+FHG_CODEC_NAME = "Fraunhofer IIS MPEG Layer-3 Codec (professional)"
 
 
 def bitrate_arg(value) -> str:
@@ -48,7 +50,13 @@ def wpick(rng: random.Random, weights: dict) -> str:
 
 def sample_chain(rc: dict, rng: random.Random) -> list[dict]:
     """Draw one chain from the 'random' block of a recipe."""
+    fhg_prob = float(rc.get("mp3_encoder", {}).get("fhg_prob", 0.0))
+
     def mp3_pass() -> dict:
+        if fhg_prob > 0 and rng.random() < fhg_prob:
+            fhg = rc["mp3_fhg"]
+            return {"type": "mp3_fhg", "bitrate": int(wpick(rng, fhg["bitrate"])),
+                    "enc_delay": int(fhg.get("enc_delay", 672))}
         if rng.random() < rc["mp3_vbr_prob"]:
             return {"type": "mp3_lame", "quality": int(wpick(rng, rc["mp3_vbr_quality"]))}
         return {"type": "mp3_lame", "bitrate": int(wpick(rng, rc["mp3_cbr_bitrate"]))}
@@ -93,6 +101,8 @@ def describe_chain(chain: list[dict]) -> str:
             parts.append("wma" + str(s["bitrate"]).rstrip("k"))
         elif s["type"] == "codec":
             parts.append(f"{s['codec']}{str(s['bitrate']).rstrip('k')}")
+        elif s["type"] == "mp3_fhg":
+            parts.append(f"f{s['bitrate']}")
         elif "quality" in s:
             parts.append(f"q{s['quality']}")
         else:
@@ -111,8 +121,18 @@ def recipe_encoders(rc: dict) -> set[str]:
     return need
 
 
-def check_encoders(ffmpeg: str, rc: dict) -> None:
-    """Raise if ffmpeg is missing or lacks an encoder the recipe can draw."""
+def recipe_uses_fhg(rc: dict) -> bool:
+    return float(rc.get("mp3_encoder", {}).get("fhg_prob", 0.0)) > 0
+
+
+def check_encoders(ffmpeg: str, rc: dict, acmenc: str | None = None) -> None:
+    """Raise if ffmpeg is missing or lacks an encoder the recipe can draw, or if the recipe
+    can draw mp3_fhg and acmenc is not set or not found."""
+    if recipe_uses_fhg(rc):
+        if not acmenc:
+            raise CompressionError("recipe draws mp3_fhg but external_codecs.acmenc is not set")
+        if not shutil.which(acmenc) and not Path(acmenc).exists():
+            raise CompressionError(f"acmenc not found at '{acmenc}'")
     try:
         out = subprocess.run([ffmpeg, "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
     except OSError as ex:
@@ -129,7 +149,8 @@ def _run(cmd: list, log: list) -> None:
         raise CompressionError(f"{Path(str(cmd[0])).name} exit {r.returncode}")
 
 
-def _encode_step(step: dict, src: Path, tmpdir: Path, n: int, ffmpeg: str, log: list) -> Path:
+def _encode_step(step: dict, src: Path, tmpdir: Path, n: int, ffmpeg: str, log: list,
+                 acmenc: str | None = None) -> Path:
     t = step["type"]
     if t == "wma_encode":
         out = tmpdir / f"gen{n}.wma"
@@ -142,6 +163,15 @@ def _encode_step(step: dict, src: Path, tmpdir: Path, n: int, ffmpeg: str, log: 
         else:
             cmd += ["-b:a", bitrate_arg(step["bitrate"])]
         cmd.append(out)
+    elif t == "mp3_fhg":
+        if not acmenc:
+            raise CompressionError("mp3_fhg step needs external_codecs.acmenc")
+        wav = tmpdir / f"gen{n}_in.wav"
+        _run([ffmpeg, "-y", "-i", src, "-vn", "-c:a", "pcm_s16le", wav], log)
+        out = tmpdir / f"gen{n}.mp3"
+        cmd = [acmenc, "-c", step.get("codec_name", FHG_CODEC_NAME),
+               "--enc-delay", int(step.get("enc_delay", 672)),
+               "-b" + str(step["bitrate"]).rstrip("k"), wav, out]
     elif t == "codec":
         enc, ext = _CODEC_ARGS[step["codec"]]
         out = tmpdir / f"gen{n}.{ext}"
@@ -152,12 +182,13 @@ def _encode_step(step: dict, src: Path, tmpdir: Path, n: int, ffmpeg: str, log: 
     return out
 
 
-def encode_chain(chain: list[dict], src_wav: Path, tmpdir: Path, ffmpeg: str, sr: int, log: list) -> Path:
+def encode_chain(chain: list[dict], src_wav: Path, tmpdir: Path, ffmpeg: str, sr: int, log: list,
+                 acmenc: str | None = None) -> Path:
     """Run the chain on src_wav and return a WAV at sr. Each step encodes the previous
     step's decoded output."""
     current = src_wav
     for i, step in enumerate(chain, start=1):
-        current = _encode_step(step, current, tmpdir, i, ffmpeg, log)
+        current = _encode_step(step, current, tmpdir, i, ffmpeg, log, acmenc)
     out = tmpdir / "final.wav"
     _run([ffmpeg, "-y", "-i", current, "-vn", "-ar", sr, "-c:a", "pcm_s16le", out], log)
     return out
@@ -194,7 +225,7 @@ def shift_to_length(x: np.ndarray, lag: int, start: int, length: int) -> np.ndar
 
 def degrade_window(window: np.ndarray, pad_start: int, core_len: int, sr: int, chain: list[dict],
                    ffmpeg: str, tmpdir: Path, max_lag: int = 16384, min_corr: float = 0.5,
-                   silence_dbfs: float = -60.0) -> tuple[np.ndarray | None, dict]:
+                   silence_dbfs: float = -60.0, acmenc: str | None = None) -> tuple[np.ndarray | None, dict]:
     """Run chain on a padded window and return the degraded core, aligned sample-for-sample
     to window[pad_start : pad_start + core_len]. Returns (None, info) when the core is
     near-silent or the alignment is weak. info has status, lag, corr and valid, the (lo, hi)
@@ -212,7 +243,7 @@ def degrade_window(window: np.ndarray, pad_start: int, core_len: int, sr: int, c
     try:
         src = tmpdir / "seg.wav"
         sf.write(str(src), window, sr, subtype="PCM_24")
-        out = encode_chain(chain, src, tmpdir, ffmpeg, sr, log)
+        out = encode_chain(chain, src, tmpdir, ffmpeg, sr, log, acmenc)
         lq, _ = sf.read(str(out), always_2d=True, dtype="float64")
     except CompressionError as ex:
         info["status"] = f"error: {ex} {' | '.join(log[-2:])}"
