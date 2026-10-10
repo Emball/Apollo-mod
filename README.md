@@ -57,7 +57,7 @@ On first run, sources are converted to WAV and chunked into fixed-length segment
 
 ### Validation Set Guidelines
 
-On the first val run, `val_songs` songs are selected from the val set and their file paths locked permanently. Each val song is cut into two 10-second clips taken from its highest-energy sections, following ViSQOL's input guidelines, and the clips are held fixed for the entire training run. Every val run scores VISQOL, SI-SDR, and HFNR on those same clips, and writes the LQ/HQ/Restored triplets to `val_audio/` so you can listen and judge quality directly. Because the same clips are used throughout, scores are directly comparable across every checkpoint. If your val set is larger than `val_songs`, the active window rotates on `val_rotate_every` steps and the console prints a summary of the best metrics from the previous window before switching.
+On the first val run, `val_songs` songs are selected from the val set and their file paths locked until the val set changes. Each val song is cut into two 10-second clips taken from its highest-energy sections, following ViSQOL's input guidelines, and the clips are held fixed for the entire training run. Every val run scores VISQOL, SI-SDR, and HFNR on those same clips, and writes the LQ/HQ/Restored triplets to `val_audio/` so you can listen and judge quality directly. Because the same clips are used throughout, scores are directly comparable across every checkpoint. If your val set is larger than `val_songs`, the active window rotates on `val_rotate_every` steps and the console prints a summary of the best metrics from the previous window before switching.
 
 After each val run the console prints:
 

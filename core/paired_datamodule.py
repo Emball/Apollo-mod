@@ -463,8 +463,9 @@ class PairedAudioDataModule(LightningDataModule):
         self._val_subset = None
 
     def set_val_subset(self, indices) -> None:
-        """Restrict validation to these dataset indices (applies from the next val run)."""
-        self._val_subset = sorted(int(i) for i in indices)
+        """Restrict validation to these dataset indices (applies from the next val run).
+        None removes the restriction."""
+        self._val_subset = None if indices is None else sorted(int(i) for i in indices)
         if self._val_sampler is not None:
             self._val_sampler.indices = self._val_subset
 

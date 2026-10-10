@@ -153,6 +153,16 @@ def _visqol_score(est: "torch.Tensor", ref: "torch.Tensor", sr: int = 44100) -> 
         return None
 
 
+# Lightning's trainer.global_step counts every optimizer.step() call, and this module
+# steps two optimizers (G and D) per update, so it advances by 2 per update.
+_N_OPTIMIZERS = 2
+
+
+def true_step(global_step: int) -> int:
+    """Training updates completed, from Lightning's per-optimizer-call global_step."""
+    return int(global_step) // _N_OPTIMIZERS
+
+
 # Bump when val normalization / scoring changes; keys caches so old numbers are not reused.
 _VAL_PROTOCOL = 2
 
@@ -262,6 +272,7 @@ class AudioLightningModule(pl.LightningModule):
         self._last_val_hfnr    = None
         self._last_val_visqol = None
         self._last_val_visqol_gain = None
+        self._val_sig = None             # sorted val clip paths the locked state was built from
         self._val_lq_visqol: dict = {}   # song_key -> ViSQOL(LQ vs HQ); the LQ clip never changes, so scored once
 
 
@@ -474,7 +485,60 @@ class AudioLightningModule(pl.LightningModule):
         except Exception as e:
             print(f"[val] Could not restrict val dataloader to locked chunks: {e}")
 
+    @property
+    def train_step(self) -> int:
+        return true_step(self.global_step)
+
+    def _reset_val_state(self) -> None:
+        """Forget everything locked against a previous val set; it re-locks on the next val run."""
+        self._val_fixed_indices = None
+        self._val_seen_indices  = []
+        self._val_song_refs     = {}
+        self._val_all_songs     = []
+        self._val_window_idx    = 0
+        self._val_next_rotate   = -1
+        self._val_window_best   = {}
+        self._val_lq_visqol     = {}
+        try:
+            dm = self.trainer.datamodule
+            if hasattr(dm, "set_val_subset"):
+                dm.set_val_subset(None)
+        except Exception as e:
+            print(f"[val] Could not clear the val dataloader subset: {e}")
+
+    def _check_val_state(self) -> None:
+        """Locked val indices, song refs and cached LQ scores come from a checkpoint and point
+        at specific clip files. If the val set changed since (new data, new compression recipe,
+        moved repo), they point at files that no longer exist, so discard them and re-lock."""
+        try:
+            pairs = self.trainer.datamodule.data_val.pairs
+        except Exception:
+            return
+        if not pairs:
+            return
+        norm  = lambda p: os.path.normcase(os.path.abspath(p))
+        sig   = sorted(norm(lq) for lq, _ in pairs)
+        known = {norm(p) for pr in pairs for p in pr}
+
+        has_state = (self._val_fixed_indices is not None or bool(self._val_song_refs)
+                     or bool(self._val_all_songs) or bool(self._val_lq_visqol))
+        why = None
+        if has_state:
+            ref_paths = [p for refs in self._val_song_refs.values() for p in refs]
+            ref_paths += [p for song in self._val_all_songs for p in song[1:3]]
+            if self._val_sig is not None and self._val_sig != sig:
+                why = "the val clip set changed"
+            elif any(norm(p) not in known for p in ref_paths):
+                why = "locked val clips are not in the current val set"
+            elif self._val_fixed_indices and any(not 0 <= int(i) < len(pairs) for i in self._val_fixed_indices):
+                why = "locked val indices are out of range"
+        if why:
+            print(f"[val] Discarding locked val state ({why}); re-locking from the current val clips.")
+            self._reset_val_state()
+        self._val_sig = sig
+
     def on_validation_start(self):
+        self._check_val_state()
         self._apply_val_subset()
 
     def _resolve_rotate_steps(self):
@@ -544,7 +608,7 @@ class AudioLightningModule(pl.LightningModule):
 
         epoch_dir = None
         if self.val_audio_dir is not None:
-            epoch_dir = os.path.join(self.val_audio_dir, f"step_{self.global_step:06d}")
+            epoch_dir = os.path.join(self.val_audio_dir, f"step_{self.train_step:06d}")
             os.makedirs(epoch_dir, exist_ok=True)
 
         # ViSQOL is CPU-bound: score each clip on one worker thread while the GPU runs the
@@ -622,6 +686,8 @@ class AudioLightningModule(pl.LightningModule):
                  for k in restored_scores if k in self._val_lq_visqol]
         self._last_val_visqol_gain = sum(gains) / len(gains) if gains else None
 
+        if song_items and count == 0:
+            print("[val] WARNING: no val clip could be processed -- visqol/hfnr are not valid for this run")
         if count > 0:
             self._last_val_hfnr = hfnr_sum / count
         if visqol_count > 0:
@@ -676,7 +742,7 @@ class AudioLightningModule(pl.LightningModule):
         # --- Check if it's time to rotate the song window ---
         rotate_steps = getattr(self, "_val_rotate_steps", None)
         if rotate_steps and self._val_all_songs and len(self._val_all_songs) > self.val_songs:
-            step = self.trainer.global_step
+            step = true_step(self.trainer.global_step)
             if self._val_next_rotate < 0:
                 self._val_next_rotate = step + rotate_steps
             elif step >= self._val_next_rotate:
@@ -706,6 +772,9 @@ class AudioLightningModule(pl.LightningModule):
             if _hfnr is not None:
                 self._val_window_best["hfnr"] = float(_hfnr)
 
+        # ModelCheckpoint fills {step} from this metric when present, so filenames carry
+        # real updates instead of Lightning's doubled global_step. Not sent to the logger.
+        self.log("step", float(self.train_step), prog_bar=False, logger=False)
         self.log("hfnr",   float(_hfnr)   if _hfnr   is not None else 0.0, prog_bar=False, logger=True)
         self.log("visqol", float(_visqol) if _visqol is not None else -1.0, prog_bar=False, logger=True)
         if self._last_val_visqol_gain is not None:
@@ -725,6 +794,7 @@ class AudioLightningModule(pl.LightningModule):
         checkpoint["val_next_rotate"]   = self._val_next_rotate
         checkpoint["val_window_best"]   = self._val_window_best
         checkpoint["val_lq_visqol"]     = self._val_lq_visqol
+        checkpoint["val_dataset_sig"]   = self._val_sig
 
     def on_load_checkpoint(self, checkpoint: dict) -> None:
         self._val_fixed_indices = checkpoint.get("val_fixed_indices", None)
@@ -735,6 +805,7 @@ class AudioLightningModule(pl.LightningModule):
         self._val_next_rotate   = checkpoint.get("val_next_rotate",   -1)
         self._val_window_best   = checkpoint.get("val_window_best",   {})
         self._val_lq_visqol     = checkpoint.get("val_lq_visqol",     {})
+        self._val_sig           = checkpoint.get("val_dataset_sig",   None)
 
         # Strip state_dict keys from older checkpoints that no longer exist in model
         sd = checkpoint.get("state_dict", {})

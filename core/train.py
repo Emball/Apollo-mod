@@ -92,6 +92,7 @@ def _start_ram_watchdog(limit_fraction: float = 0.90) -> None:
     t.start()
 
 import look2hear.system
+from look2hear.system.audio_litmodule import true_step
 import look2hear.datas
 import look2hear.losses
 import look2hear.models
@@ -1248,7 +1249,7 @@ def prepare_data(cfg: DictConfig) -> None:
 
 def _prune_checkpoints(ckpt_dir: str, keep_best: int, keep_latest: int, protect=()) -> None:
     """Delete scored checkpoints outside the best `keep_best` (by visqol, then sisdr) and the
-    latest `keep_latest` (by step). interrupted.ckpt, last.ckpt and `protect` are never deleted."""
+    latest `keep_latest` (by modification time; step numbers saved before 2.9.0.0 are doubled). interrupted.ckpt, last.ckpt and `protect` are never deleted."""
     import re as _re
     if not ckpt_dir or not os.path.isdir(ckpt_dir):
         return
@@ -1262,10 +1263,15 @@ def _prune_checkpoints(ckpt_dir: str, keep_best: int, keep_latest: int, protect=
             continue
         m_vq = _re.search(r"visqol=(-?[\d.]+)", fname)
         m_sd = _re.search(r"sisdr=(-?[\d.]+)", fname)
-        entries.append((int(m_step.group(1)),
+        fpath = os.path.join(ckpt_dir, fname)
+        try:
+            mtime = os.path.getmtime(fpath)
+        except OSError:
+            continue
+        entries.append((mtime,
                         float(m_vq.group(1)) if m_vq else float("-inf"),
                         float(m_sd.group(1)) if m_sd else float("-inf"),
-                        os.path.join(ckpt_dir, fname)))
+                        fpath))
     keep = {e[3] for e in sorted(entries, key=lambda e: (e[1], e[2], e[0]), reverse=True)[:keep_best]}
     keep |= {e[3] for e in sorted(entries, key=lambda e: e[0], reverse=True)[:max(0, keep_latest)]}
     for _, _, _, path in entries:
@@ -1677,7 +1683,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         try:
             ckpt_dir = os.path.join(_run_dir, "checkpoints")
             os.makedirs(ckpt_dir, exist_ok=True)
-            out_path = os.path.join(ckpt_dir, f"step={trainer.global_step:06d}-interrupted.ckpt")
+            out_path = os.path.join(ckpt_dir, f"step={true_step(trainer.global_step):06d}-interrupted.ckpt")
             trainer.save_checkpoint(out_path)
             print_only(f"\n[interrupt] Saved to {out_path}")
         except Exception as e:
@@ -1732,7 +1738,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             if hfnr    is not None: val_parts.append(f"hfnr={float(hfnr):.3f}")
             val_str = "  " + "  ".join(val_parts) if val_parts else ""
             print(
-                f"\r  {pct:5.1f}%  step={trainer.global_step}  "
+                f"\r  {pct:5.1f}%  step={true_step(trainer.global_step)}  "
                 f"{done}/{total}  {its:.2f} it/s{val_str}",
                 end="", flush=True
             )
@@ -1805,7 +1811,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 if sisdr  is not None: val_parts.append(f"sisdr={float(sisdr):.3f}")
                 if hfnr    is not None: val_parts.append(f"hfnr={float(hfnr):.3f}")
                 val_str = "  " + "  ".join(val_parts) if val_parts else ""
-                step  = trainer.global_step
+                step  = true_step(trainer.global_step)
                 total = getattr(self, "_epoch_batches", 0)
                 done  = getattr(self, "_last_batch_idx", 0) + 1 if total else 0
                 pct   = 100 * done / total if total else 0.0
