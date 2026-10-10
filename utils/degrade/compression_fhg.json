@@ -81,7 +81,11 @@
       }
     },
     "mp3_encoder": {
-      "fhg_prob": 0.25
+      "mode": {
+        "lame": 57,
+        "fhg": 27,
+        "mixed": 16
+      }
     },
     "mp3_fhg": {
       "enc_delay": 672,

@@ -50,13 +50,7 @@ def wpick(rng: random.Random, weights: dict) -> str:
 
 def sample_chain(rc: dict, rng: random.Random) -> list[dict]:
     """Draw one chain from the 'random' block of a recipe."""
-    fhg_prob = float(rc.get("mp3_encoder", {}).get("fhg_prob", 0.0))
-
     def mp3_pass() -> dict:
-        if fhg_prob > 0 and rng.random() < fhg_prob:
-            fhg = rc["mp3_fhg"]
-            return {"type": "mp3_fhg", "bitrate": int(wpick(rng, fhg["bitrate"])),
-                    "enc_delay": int(fhg.get("enc_delay", 672))}
         if rng.random() < rc["mp3_vbr_prob"]:
             return {"type": "mp3_lame", "quality": int(wpick(rng, rc["mp3_vbr_quality"]))}
         return {"type": "mp3_lame", "bitrate": int(wpick(rng, rc["mp3_cbr_bitrate"]))}
@@ -91,6 +85,34 @@ def sample_chain(rc: dict, rng: random.Random) -> list[dict]:
             step = {"type": "codec", "codec": wpick(rng, oc["codec"]),
                     "bitrate": wpick(rng, oc["bitrate"])}
             chain.insert(rng.randint(0, len(chain)), step)
+    return _apply_encoder_mode(chain, rc, rng)
+
+
+def _apply_encoder_mode(chain: list[dict], rc: dict, rng: random.Random) -> list[dict]:
+    """Per chain, draw which MP3 encoder family handles its MP3 passes: all LAME, all
+    Fraunhofer (acmenc), or a random mix with at least one of each. Draws from rng only when
+    the recipe has mp3_encoder, so recipes without it keep their existing chains."""
+    modes = rc.get("mp3_encoder", {}).get("mode")
+    if not modes:
+        return chain
+    idx = [i for i, s in enumerate(chain) if s["type"] == "mp3_lame"]
+    avail = {k: w for k, w in modes.items() if k != "mixed" or len(idx) >= 2}
+    mode = wpick(rng, avail)
+    if mode == "lame":
+        return chain
+    if mode == "fhg":
+        flip = idx
+    else:
+        flags = [rng.random() < 0.5 for _ in idx]
+        if all(flags) or not any(flags):
+            flags[rng.randrange(len(flags))] ^= True
+        flip = [i for i, f in zip(idx, flags) if f]
+    fhg = rc["mp3_fhg"]
+    for i in flip:
+        kbps = str(chain[i].get("bitrate", ""))
+        if kbps not in fhg["bitrate"]:
+            kbps = wpick(rng, fhg["bitrate"])
+        chain[i] = {"type": "mp3_fhg", "bitrate": int(kbps), "enc_delay": int(fhg.get("enc_delay", 672))}
     return chain
 
 
@@ -122,7 +144,8 @@ def recipe_encoders(rc: dict) -> set[str]:
 
 
 def recipe_uses_fhg(rc: dict) -> bool:
-    return float(rc.get("mp3_encoder", {}).get("fhg_prob", 0.0)) > 0
+    modes = rc.get("mp3_encoder", {}).get("mode", {})
+    return any(w > 0 for k, w in modes.items() if k != "lame")
 
 
 def check_encoders(ffmpeg: str, rc: dict, acmenc: str | None = None) -> None:
