@@ -248,6 +248,12 @@ def _save_wav_f32(tensor, path: str, sr: int = None) -> None:
     torchaudio.save(path, tensor.float().cpu(), sr or _SR, encoding="PCM_F", bits_per_sample=32)
 
 
+def _chunk_starts(n_samples: int) -> list:
+    if n_samples < _CHUNK_SAMPLES:
+        return []
+    return list(range(0, n_samples - _CHUNK_SAMPLES + 1, _HOP_SAMPLES))
+
+
 def _slice_and_save(
     lq_wav, hq_wav, stem: str, lq_out: str, hq_out: str,
     cached_aug_fn=None,
@@ -262,7 +268,8 @@ def _slice_and_save(
         stereo alternation.
     compression: optional _CompressionAug. With generate_lq (the song has no LQ file and lq_wav
         is a copy of HQ), every chunk's LQ is encoded through its own random codec chain before
-        cached_aug_fn runs. Songs with a real LQ are never encoded.
+        cached_aug_fn runs. A chunk whose compression fails is dropped, never written with a clean
+        LQ. Songs with a real LQ are never encoded.
     progress_cb: optional callable(chunks_done, chunks_total) called after each chunk write.
     """
     import concurrent.futures as _cf
@@ -276,7 +283,7 @@ def _slice_and_save(
         lq_wav = lq_wav / song_peak
         hq_wav = hq_wav / song_peak
 
-    starts = list(range(0, max(0, min_len - _CHUNK_SAMPLES) + 1, _HOP_SAMPLES)) if min_len >= _CHUNK_SAMPLES else []
+    starts = _chunk_starts(min_len)
     total_chunks = len(starts)
     if not starts:
         print_only(f"[chunk] {stem}: shorter than one {_CHUNK_SEC:g}s chunk ({min_len / _SR:.2f}s) -- skipped")
@@ -293,6 +300,8 @@ def _slice_and_save(
         hq_c = hq_wav[:, start:start + _CHUNK_SAMPLES].clone()
         if use_comp:
             lq_c = compression.apply(lq_wav, start, _CHUNK_SAMPLES, stem, idx, lq_c)
+            if lq_c is None:
+                return None
         if cached_aug_fn is not None:
             lq_c, hq_c = cached_aug_fn(lq_c, hq_c, in_second_half=start >= half)
         fname = f"{stem}_{idx:04d}.wav"
@@ -305,12 +314,15 @@ def _slice_and_save(
     if workers > 1:
         with _cf.ThreadPoolExecutor(max_workers=workers) as pool:
             for n, fname in enumerate(pool.map(_make, enumerate(starts)), start=1):
-                saved.append(fname)
+                if fname is not None:
+                    saved.append(fname)
                 if progress_cb:
                     progress_cb(n, total_chunks)
     else:
         for n, item in enumerate(enumerate(starts), start=1):
-            saved.append(_make(item))
+            fname = _make(item)
+            if fname is not None:
+                saved.append(fname)
             if progress_cb:
                 progress_cb(n, total_chunks)
     return saved
@@ -536,7 +548,7 @@ class _CompressionAug:
             acmenc=self.acmenc)
         if core is None:
             self._count(info["status"].split(":")[0] + ": " + info["status"].split(": ", 1)[-1][:40])
-            return lq_chunk
+            return None
         self._count("compressed")
         return torch.from_numpy(np.ascontiguousarray(core.T)).float()
 
@@ -893,7 +905,9 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
                                 generate_lq=stem in generated)
         with print_lock:
             songs_done[0] += 1
-            print_only(f"[data/{split_name}]   {stem}: done ({len(saved)} chunks)  [{songs_done[0]}/{n_songs}]")
+            _lost = len(_chunk_starts(min(lq_wav.shape[-1], hq_wav.shape[-1]))) - len(saved)
+            print_only(f"[data/{split_name}]   {stem}: done ({len(saved)} chunks"
+                       + (f", {_lost} dropped: compression failed" if _lost > 0 else "") + f")  [{songs_done[0]}/{n_songs}]")
         return len(saved)
 
     with _cf.ThreadPoolExecutor(max_workers=n_workers) as pool:
@@ -1066,9 +1080,8 @@ def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 10.0, fix
 
             hq_clip = hq_wav[:, hq_start: hq_start + clip_samples]
             if generate:
-                src_clip = hq_clip.clone()
-                lq_clip  = compressor.apply(hq_wav, hq_start, clip_samples, f"{stem}_val", clip_idx, src_clip)
-                if lq_clip is src_clip:
+                lq_clip  = compressor.apply(hq_wav, hq_start, clip_samples, f"{stem}_val", clip_idx, hq_clip.clone())
+                if lq_clip is None:
                     print_only(f"[data/val]   {stem} clip{clip_idx}: compression failed -- clip dropped")
                     continue
                 if lq_clip.shape[-1] > clip_samples:
