@@ -23,6 +23,12 @@ The GitHub wiki (`Changes-and-improvements` page, repo `Emball/Apollo-mod.wiki.g
 
 ---
 
+## Project Context
+
+The target is a set of 2003 leaked tracks whose surviving files are all heavily degraded: a WMA rip passed through several MP3 encodes, the last at 192 kbps. The full chain and its history are unknown, so `utils/degrade/stfl.json` is an estimate of it. Only some songs have a later studio or HQCD release to pair against; those are aligned by hand and used as real LQ/HQ pairs. Other songs are kept HQ-only and their LQ is generated from randomized chains (see compression), which gives exact alignment and variety instead of an exact match to the unknown chain. Hand-aligned real pairs with mix differences made models worse, so real pairs are limited to ones that align cleanly.
+
+---
+
 ## Folder Structure
 
 ```
