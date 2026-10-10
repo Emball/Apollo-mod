@@ -531,6 +531,13 @@ class AudioLightningModule(pl.LightningModule):
             epoch_dir = os.path.join(self.val_audio_dir, f"step_{self.global_step:06d}")
             os.makedirs(epoch_dir, exist_ok=True)
 
+        # ViSQOL is CPU-bound: score each clip on one worker thread while the GPU runs the
+        # next clip. One worker keeps the shared ViSQOL API single-threaded. All futures are
+        # joined below, so the metric is final before validation ends and gets logged.
+        from concurrent.futures import ThreadPoolExecutor
+        visqol_pool    = ThreadPoolExecutor(max_workers=1, thread_name_prefix="visqol")
+        visqol_futures = []
+
         torch.cuda.empty_cache()
         self.audio_model.eval()
         with torch.no_grad():
@@ -555,10 +562,7 @@ class AudioLightningModule(pl.LightningModule):
                     count   += 1
 
                     if i in do_visqol:
-                        v = _visqol_score(e, r)
-                        if v is not None:
-                            visqol_sum   += v
-                            visqol_count += 1
+                        visqol_futures.append((song_key, visqol_pool.submit(_visqol_score, e, r)))
 
                     # write audio immediately and release tensors
                     if epoch_dir is not None:
@@ -575,6 +579,17 @@ class AudioLightningModule(pl.LightningModule):
                     print(f"[val] Error on {song_key}: {ex}")
 
         self.audio_model.train()
+
+        for song_key, fut in visqol_futures:
+            try:
+                v = fut.result()
+            except Exception as ex:
+                print(f"[val] ViSQOL error on {song_key}: {ex}")
+                continue
+            if v is not None:
+                visqol_sum   += v
+                visqol_count += 1
+        visqol_pool.shutdown(wait=True)
 
         if count > 0:
             self._last_val_hfnr = hfnr_sum / count
