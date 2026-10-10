@@ -160,6 +160,8 @@ checkpoint:
   mode: max
   verbose: true
   save_top_k: -1
+  keep_best: 10    # prune to best N by visqol + latest M; 0 = keep everything
+  keep_latest: 3
   save_last: false
   filename: 'step={step:06d}-sisdr={sisdr:.3f}-visqol={visqol:.3f}-hfnr={hfnr:.3f}'
 

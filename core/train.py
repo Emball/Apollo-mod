@@ -1246,6 +1246,38 @@ def prepare_data(cfg: DictConfig) -> None:
 
             print_only(f"[data/val] Bootstrapped {len(selected)} val chunks across {len(songs)} songs (copied, not moved).")
 
+def _prune_checkpoints(ckpt_dir: str, keep_best: int, keep_latest: int, protect=()) -> None:
+    """Delete scored checkpoints outside the best `keep_best` (by visqol, then sisdr) and the
+    latest `keep_latest` (by step). interrupted.ckpt, last.ckpt and `protect` are never deleted."""
+    import re as _re
+    if not ckpt_dir or not os.path.isdir(ckpt_dir):
+        return
+    protect = {os.path.abspath(p) for p in protect if p}
+    entries = []
+    for fname in os.listdir(ckpt_dir):
+        if not fname.endswith(".ckpt") or fname == "last.ckpt" or "interrupted" in fname:
+            continue
+        m_step = _re.search(r"step=(\d+)", fname)
+        if not m_step:
+            continue
+        m_vq = _re.search(r"visqol=(-?[\d.]+)", fname)
+        m_sd = _re.search(r"sisdr=(-?[\d.]+)", fname)
+        entries.append((int(m_step.group(1)),
+                        float(m_vq.group(1)) if m_vq else float("-inf"),
+                        float(m_sd.group(1)) if m_sd else float("-inf"),
+                        os.path.join(ckpt_dir, fname)))
+    keep = {e[3] for e in sorted(entries, key=lambda e: (e[1], e[2], e[0]), reverse=True)[:keep_best]}
+    keep |= {e[3] for e in sorted(entries, key=lambda e: e[0], reverse=True)[:max(0, keep_latest)]}
+    for _, _, _, path in entries:
+        if path in keep or os.path.abspath(path) in protect:
+            continue
+        try:
+            os.remove(path)
+            print_only(f"[checkpoint] Pruned {os.path.basename(path)}")
+        except OSError as e:
+            print_only(f"[checkpoint] Could not prune {os.path.basename(path)}: {e}")
+
+
 def freeze_early_layers(model, n_layers_to_freeze=4):
     """
     Freeze the band-split front-end (BN) and first N BSNet layers.
@@ -1798,7 +1830,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     checkpoint = None
     if cfg.get("checkpoint") and not val_disabled:
         print_only("Instantiating checkpoint")
-        checkpoint = hydra.utils.instantiate(cfg.checkpoint)
+        _ck_cfg = OmegaConf.to_container(cfg.checkpoint, resolve=True)
+        keep_best   = int(_ck_cfg.pop("keep_best", 0) or 0)
+        keep_latest = int(_ck_cfg.pop("keep_latest", 0) or 0)
+        checkpoint = hydra.utils.instantiate(_ck_cfg)
         checkpoint.monitor = "visqol"
         checkpoint.mode    = "max"
         checkpoint.save_top_k = -1
@@ -1814,6 +1849,18 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             "-{hfnr:.3f}"
         )
         callbacks.append(checkpoint)
+        if keep_best > 0:
+            class _CheckpointPruner(_Callback):
+                def on_validation_end(self, trainer, pl_module):
+                    if not trainer.sanity_checking:
+                        _prune_checkpoints(checkpoint.dirpath, keep_best, keep_latest,
+                                           protect=(checkpoint.best_model_path,))
+
+                def on_train_end(self, trainer, pl_module):
+                    _prune_checkpoints(checkpoint.dirpath, keep_best, keep_latest,
+                                       protect=(checkpoint.best_model_path,))
+            callbacks.append(_CheckpointPruner())
+            print_only(f"[checkpoint] Retention: best {keep_best} by visqol + latest {keep_latest}")
 
     # Instantiate logger
     print_only(f"Instantiating logger <{cfg.logger._target_}>")
@@ -1997,7 +2044,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     print_only("Training finished!")
 
     if checkpoint is not None:
-        best_k = {k: v.item() for k, v in checkpoint.best_k_models.items()}
+        best_k = {k: v.item() for k, v in checkpoint.best_k_models.items() if os.path.isfile(k)}
         with open(os.path.join(_run_dir, "best_k_models.json"), "w") as f:
             json.dump(best_k, f, indent=0)
 

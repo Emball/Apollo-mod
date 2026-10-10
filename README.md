@@ -110,7 +110,7 @@ Each run creates a timestamped folder under `runs/<name>/<timestamp>/`. Set `res
 
 ### Checkpoints
 
-All checkpoints are kept. Each is named with full stats and a rank badge:
+The best `keep_best` checkpoints by VISQOL and the latest `keep_latest` are kept; `interrupted.ckpt` is never removed. Set `keep_best: 0` to keep all. Each is named with full stats and a rank badge:
 
 ```
 [1]-step=001200-sisdr=12.470-visqol=3.940-hfnr=0.973.ckpt
