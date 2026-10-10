@@ -90,16 +90,10 @@ datas:
         sigma: 0.002
       compression:
         enabled: true
-        recipe: utils/degrade/stfl_random.json
-        fraction: 1.0
+        recipe: utils/degrade/stfl.json
         seed: 0
         pad_sec: 1.0
         workers: 0
-        exclude:
-          - "*6*in*the*morning*"
-          - "*love*you*more*"
-          - "*we*as*americans*"
-          - "*doe*rae*me*"
 
 model:
   _target_: look2hear.models.apollo.Apollo

@@ -6,8 +6,8 @@ under utils/degrade/ instead of being hardcoded, so different degradation
 recipes can be authored without editing code.
 
 Launched from tui.py as a TUI screen, or standalone:
-    python utils/degrade_audio.py --config utils/degrade/default.json --input "in.flac" --output "C:\\out"
-    python utils/degrade_audio.py --config utils/degrade/default.json --input "C:\\in_folder" --output "C:\\out" --bulk
+    python utils/degrade_audio.py --config utils/degrade/stfl.json --input "in.flac" --output "C:\\out" --randomize
+    python utils/degrade_audio.py --config utils/degrade/stfl.json --input "C:\\in_folder" --output "C:\\out" --randomize
 
 Chain step types:
     wma_encode   -- {bitrate}                          ffmpeg -c:a wmav2

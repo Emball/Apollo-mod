@@ -73,12 +73,10 @@ datas:
         sigma: 0.002
       compression:
         enabled: false
-        recipe: utils/degrade/stfl_random.json
-        fraction: 1.0
+        recipe: utils/degrade/stfl.json
         seed: 0
         pad_sec: 1.0
         workers: 0
-        exclude: []
 
 model:
   _target_: look2hear.models.apollo.Apollo

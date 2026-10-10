@@ -180,14 +180,16 @@ def _slice_and_save(
     cached_aug_fn=None,
     progress_cb=None,
     compression=None,
+    generate_lq: bool = False,
 ) -> list:
     """Slice a pair into overlapping chunks and write each one immediately, so long
     songs never sit in memory as chunk lists.
 
     cached_aug_fn: callable(lq, hq, in_second_half) -> (lq, hq) for gain, polarity and
         stereo alternation.
-    compression: optional _CompressionAug. When it applies to this song, every chunk's LQ is
-        re-encoded through its own random codec chain before cached_aug_fn runs.
+    compression: optional _CompressionAug. With generate_lq (the song has no LQ file and lq_wav
+        is a copy of HQ), every chunk's LQ is encoded through its own random codec chain before
+        cached_aug_fn runs. Songs with a real LQ are never encoded.
     progress_cb: optional callable(chunks_done, chunks_total) called after each chunk write.
     """
     import concurrent.futures as _cf
@@ -203,7 +205,7 @@ def _slice_and_save(
 
     starts = list(range(0, max(0, min_len - _CHUNK_SAMPLES) + 1, _HOP_SAMPLES)) if min_len >= _CHUNK_SAMPLES else []
     total_chunks = len(starts)
-    use_comp = compression is not None and compression.applies_to(stem)
+    use_comp = compression is not None and generate_lq
     half = min_len / 2
 
     def _make(idx_start):
@@ -408,28 +410,18 @@ def _build_cached_aug_fn(cfg: "DictConfig"):
 
 
 class _CompressionAug:
-    """Cached compression augmentation. Each chunk's LQ goes through its own random codec
-    chain drawn from a recipe, is re-aligned to the source, and replaces the LQ chunk."""
+    """Cached compression augmentation. For songs with no LQ file, each chunk's LQ is HQ run
+    through its own random codec chain drawn from a recipe, re-aligned to the source."""
 
-    def __init__(self, rc, ffmpeg, sr, fraction, seed, pad_sec, workers, exclude, tmp_root,
+    def __init__(self, rc, ffmpeg, sr, seed, pad_sec, workers, tmp_root,
                  max_lag, min_corr, silence_dbfs, acmenc=None):
         import threading
         self.rc, self.ffmpeg, self.sr, self.acmenc = rc, ffmpeg, sr, acmenc
-        self.fraction, self.seed, self.pad = fraction, seed, int(pad_sec * sr)
-        self.workers, self.exclude, self.tmp_root = workers, [e.lower() for e in exclude], tmp_root
+        self.seed, self.pad = seed, int(pad_sec * sr)
+        self.workers, self.tmp_root = workers, tmp_root
         self.max_lag, self.min_corr, self.silence_dbfs = max_lag, min_corr, silence_dbfs
         self.stats: dict = {}
         self._lock = threading.Lock()
-
-    def applies_to(self, stem: str) -> bool:
-        import fnmatch
-        name = stem.lower()
-        for pat in self.exclude:
-            if not any(c in pat for c in "*?["):
-                pat = f"*{pat}*"
-            if fnmatch.fnmatch(name, pat):
-                return False
-        return True
 
     def _count(self, key: str) -> None:
         with self._lock:
@@ -444,9 +436,6 @@ class _CompressionAug:
         import compression as cmp
 
         rng = _random.Random(f"{self.seed}:{stem}:{idx}")
-        if rng.random() >= self.fraction:
-            self._count("skipped (fraction)")
-            return lq_chunk
         chain = cmp.sample_chain(self.rc, rng)
         rd_start = max(0, start - self.pad)
         rd_stop = min(lq_wav.shape[-1], start + length + self.pad)
@@ -474,7 +463,7 @@ def _compression_cfg(cfg: "DictConfig"):
 
 def _load_recipe(blk) -> tuple:
     import json as _json
-    path = str(blk.get("recipe", "utils/degrade/stfl_random.json"))
+    path = str(blk.get("recipe", "utils/degrade/stfl.json"))
     if not os.path.isabs(path):
         path = os.path.join(_REPO_ROOT, path)
     if not os.path.isfile(path):
@@ -513,16 +502,18 @@ def _build_compression(cfg: "DictConfig"):
     acmenc = str(acmenc) if acmenc else None
     cmp.check_encoders(ffmpeg, rc, acmenc)
     workers = int(blk.get("workers", 0)) or max(1, (os.cpu_count() or 2) - 1)
-    exclude = [str(e) for e in (blk.get("exclude", None) or [])]
+    for k in ("fraction", "exclude"):
+        if k in blk:
+            print_only(f"[compression] '{k}' is no longer used and is ignored: songs with an LQ file "
+                       f"are never encoded, songs without one are always encoded")
     obj = _CompressionAug(
         rc=rc, ffmpeg=ffmpeg, sr=int(getattr(cfg.datas, "sr", _SR)),
-        fraction=float(blk.get("fraction", 1.0)), seed=int(blk.get("seed", 0)),
-        pad_sec=float(blk.get("pad_sec", rc.get("pad_sec", 1.0))), workers=workers, exclude=exclude,
+        seed=int(blk.get("seed", 0)),
+        pad_sec=float(blk.get("pad_sec", rc.get("pad_sec", 1.0))), workers=workers,
         tmp_root=tempfile.mkdtemp(prefix="apollo_comp_"),
         max_lag=int(rc.get("max_lag", 16384)), min_corr=float(rc.get("min_corr", 0.5)),
         silence_dbfs=float(rc.get("silence_dbfs", -60)), acmenc=acmenc)
-    print_only(f"[compression] recipe={os.path.basename(path)}  fraction={obj.fraction}  workers={workers}  "
-               f"exclude={exclude or 'none'}  acmenc={acmenc or 'off'}")
+    print_only(f"[compression] recipe={os.path.basename(path)}  workers={workers}  acmenc={acmenc or 'off'}")
     return obj
 
 
@@ -634,13 +625,17 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         for f in os.listdir(hq_src)
         if os.path.splitext(f)[1].lower() in _SUPPORTED_EXTS
     }
-    matched   = sorted(set(lq_files) & set(hq_files))
+    generated = (set(hq_files) - set(lq_files)) if compression is not None else set()
+    matched   = sorted((set(lq_files) & set(hq_files)) | generated)
     unmatched = (set(lq_files) | set(hq_files)) - set(matched)
     if unmatched:
         print_only(f"[data/{split_name}] WARNING: unmatched files (skipping): {sorted(unmatched)}")
     if not matched:
         print_only(f"[data/{split_name}] ERROR: no matched LQ/HQ pairs after normalization")
         return 0
+
+    if generated:
+        print_only(f"[data/{split_name}] No LQ file, LQ generated by compression: {sorted(generated)}")
 
     os.makedirs(lq_out, exist_ok=True)
     os.makedirs(hq_out, exist_ok=True)
@@ -655,6 +650,12 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     lq_offset = fixed_delay if (fixed_delay is not None and fixed_delay > 0) else 0
     hq_offset = (-fixed_delay) if (fixed_delay is not None and fixed_delay < 0) else 0
     print_lock = threading.Lock()
+
+    def _lq_path(stem):
+        return os.path.join(hq_src, hq_files[stem]) if stem in generated else os.path.join(lq_src, lq_files[stem])
+
+    def _offsets(stem):
+        return (0, 0) if stem in generated else (lq_offset, hq_offset)
 
     # --- Phase 1: WAV conversion to cache ---
     # Non-WAV files (and WAVs with an alignment trim) are decoded to
@@ -739,10 +740,9 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     # needs a cached trimmed version. WAVs with no trim are used directly.
     needs_cache = {
         s for s in matched
-        if os.path.splitext(lq_files[s])[1].lower() != ".wav"
+        if os.path.splitext(_lq_path(s))[1].lower() != ".wav"
         or os.path.splitext(hq_files[s])[1].lower() != ".wav"
-        or lq_offset > 0
-        or hq_offset > 0
+        or max(_offsets(s)) > 0
     }
 
     wav_paths: dict[str, tuple[str, str]] = {}
@@ -754,12 +754,13 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         done_conv = [0]
 
         def _cache_stem(stem):
-            lq_p = os.path.join(lq_src, lq_files[stem])
+            lq_p = _lq_path(stem)
             hq_p = os.path.join(hq_src, hq_files[stem])
+            lq_off, hq_off = _offsets(stem)
             lq_ext = os.path.splitext(lq_p)[1].lower()
             hq_ext = os.path.splitext(hq_p)[1].lower()
-            new_lq = to_wav(lq_p, lq_offset) if (lq_ext != ".wav" or lq_offset > 0) else lq_p
-            new_hq = to_wav(hq_p, hq_offset) if (hq_ext != ".wav" or hq_offset > 0) else hq_p
+            new_lq = to_wav(lq_p, lq_off) if (lq_ext != ".wav" or lq_off > 0) else lq_p
+            new_hq = to_wav(hq_p, hq_off) if (hq_ext != ".wav" or hq_off > 0) else hq_p
             with print_lock:
                 done_conv[0] += 1
                 print_only(f"[data/{split_name}]   Cached {done_conv[0]}/{len(needs_cache)}: {stem}")
@@ -772,14 +773,11 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
 
         for stem in matched:
             if stem not in wav_paths:
-                wav_paths[stem] = (
-                    os.path.join(lq_src, lq_files[stem]),
-                    os.path.join(hq_src, hq_files[stem]),
-                )
+                wav_paths[stem] = (_lq_path(stem), os.path.join(hq_src, hq_files[stem]))
         print_only(f"[data/{split_name}] Cache pass done.\n")
     else:
         wav_paths = {
-            s: (os.path.join(lq_src, lq_files[s]), os.path.join(hq_src, hq_files[s]))
+            s: (_lq_path(s), os.path.join(hq_src, hq_files[s]))
             for s in matched
         }
 
@@ -795,8 +793,9 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     _REPORT_EVERY = 50  # print a progress line every N chunks across all songs
 
     def _chunk_stem(stem):
-        lq_wav = _load_wav_stereo(wav_paths[stem][0])
-        hq_wav = _load_wav_stereo(wav_paths[stem][1])
+        lq_p, hq_p = wav_paths[stem]
+        lq_wav = _load_wav_stereo(lq_p)
+        hq_wav = lq_wav if hq_p == lq_p else _load_wav_stereo(hq_p)
 
         def _progress(done, total_c):
             with print_lock:
@@ -810,7 +809,8 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         saved = _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out,
                                 cached_aug_fn=cached_aug_fn,
                                 progress_cb=_progress,
-                                compression=compression)
+                                compression=compression,
+                                generate_lq=stem in generated)
         with print_lock:
             songs_done[0] += 1
             print_only(f"[data/{split_name}]   {stem}: done ({len(saved)} chunks)  [{songs_done[0]}/{n_songs}]")
@@ -826,9 +826,6 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         _shutil.rmtree(compression.tmp_root, ignore_errors=True)
         if compression.stats:
             print_only(f"[data/{split_name}] compression: " + ", ".join(f"{v} {k}" for k, v in sorted(compression.stats.items())))
-        excluded = sorted(m for m in matched if not compression.applies_to(m))
-        if excluded:
-            print_only(f"[data/{split_name}] compression excluded: {', '.join(excluded)}")
     import json as _json
     with open(manifest_path, "w") as _f:
         _json.dump(_manifest_params(), _f, indent=2)
