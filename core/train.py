@@ -277,6 +277,12 @@ def _slice_and_save(
 
     starts = list(range(0, max(0, min_len - _CHUNK_SAMPLES) + 1, _HOP_SAMPLES)) if min_len >= _CHUNK_SAMPLES else []
     total_chunks = len(starts)
+    if not starts:
+        print_only(f"[chunk] {stem}: shorter than one {_CHUNK_SEC:g}s chunk ({min_len / _SR:.2f}s) -- skipped")
+    else:
+        _tail = min_len - (starts[-1] + _CHUNK_SAMPLES)
+        if _tail > _SR // 2:
+            print_only(f"[chunk] {stem}: last {_tail / _SR:.1f}s does not fill a chunk and is not used")
     use_comp = compression is not None and generate_lq
     half = min_len / 2
 
@@ -1369,6 +1375,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # Skipped entirely when resuming from a checkpoint (ckpt_path is set above).
     # -----------------------------------------------------------------------
     feature_dim = cfg.model.get("feature_dim", 256)
+    _m_sr, _m_win, _m_layer = (int(cfg.model.get("sr", 44100)), int(cfg.model.get("win", 20)),
+                               int(cfg.model.get("layer", 6)))
 
     def _load_weights(path: str, feature_dim: int):
         """Load a .pth or .ckpt file and return an Apollo model with weights applied."""
@@ -1382,8 +1390,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             else:
                 model_state = raw
                 print_only("Detected bare state dict format (no prefix)")
-            m = look2hear.models.apollo.Apollo(sr=44100, win=20,
-                                               feature_dim=feature_dim, layer=6)
+            m = look2hear.models.apollo.Apollo(sr=_m_sr, win=_m_win,
+                                               feature_dim=feature_dim, layer=_m_layer)
             missing, unexpected = m.load_state_dict(model_state, strict=False)
             if missing:
                 print_only(f"Missing keys ({len(missing)}): {missing[:5]}...")
@@ -1393,7 +1401,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 print_only("All keys loaded successfully.")
         else:
             m = look2hear.models.BaseModel.from_pretrain(
-                path, sr=44100, win=20, feature_dim=feature_dim, layer=6
+                path, sr=_m_sr, win=_m_win, feature_dim=feature_dim, layer=_m_layer
             )
         return m
 
@@ -1403,7 +1411,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         # the state dict will be overwritten by trainer.fit(ckpt_path=...).
         print_only("[weights] Resume mode -- skipping pretrain load, instantiating bare model.")
         model = look2hear.models.apollo.Apollo(
-            sr=44100, win=20, feature_dim=feature_dim, layer=6
+            sr=_m_sr, win=_m_win, feature_dim=feature_dim, layer=_m_layer
         )
     else:
         local_path = cfg.get("weights_path", None)
@@ -1453,7 +1461,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             weights_path = hf_hub_download(repo_id=hf_repo, filename=hf_file)
             print_only(f"[weights] Cached at: {weights_path}")
             model = look2hear.models.BaseModel.from_pretrain(
-                weights_path, sr=44100, win=20, feature_dim=feature_dim, layer=6
+                weights_path, sr=_m_sr, win=_m_win, feature_dim=feature_dim, layer=_m_layer
             )
             print_only("[weights] Pretrained weights loaded.")
 
@@ -1478,14 +1486,17 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     #   gefen        -- Gefen (drop-in AdamW, ~8x lower optimizer memory, pip install gefen)
     #   gefen_muon   -- GefenMuon for 2D params + Gefen for rest (recommended for fine-tuning)
 
-    class _ComboOpt:
-        """Thin wrapper combining two optimizers into one interface for StepLR + Lightning."""
+    class _ComboOpt(torch.optim.Optimizer):
+        """Two optimizers behind one Optimizer interface. Subclasses torch.optim.Optimizer
+        because LR schedulers and Lightning reject anything else. The inner optimizers own
+        all state; param_groups are the inner groups, so scheduler LR changes reach them."""
         def __init__(self, opt_2d, opt_rest):
+            # super().__init__ is skipped on purpose: it would re-register the params
             self.opt_2d   = opt_2d
             self.opt_rest = opt_rest
-            # expose param_groups and defaults so StepLR doesn't choke
             self.param_groups = opt_2d.param_groups + opt_rest.param_groups
             self.defaults = opt_2d.defaults
+            self.state = {}
 
         def step(self, closure=None):
             self.opt_2d.step(closure)
@@ -1501,7 +1512,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         def load_state_dict(self, sd):
             self.opt_2d.load_state_dict(sd["opt_2d"])
             self.opt_rest.load_state_dict(sd["opt_rest"])
-            self.param_groups = self.opt_2d.param_groups + self.opt_rest.param_groups
+            self.param_groups[:] = self.opt_2d.param_groups + self.opt_rest.param_groups
 
     def _make_optimizer(params, lr, weight_decay, betas):
         opt_type = opt_cfg.get("type", "adamw").lower()
@@ -1846,8 +1857,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if ckpt_path is None and not val_disabled:
         import hashlib as _hashlib, json as _json
 
-        def _baseline_cache_key(weights_path: str, val_clip_key: str) -> str:
+        def _baseline_cache_key(weights_path: str, val_clip_key: str, val_params: str) -> str:
             h = _hashlib.md5(usedforsecurity=False)
+            h.update(val_params.encode())
             if weights_path and os.path.isfile(weights_path):
                 h.update(_md5_file(weights_path).encode())
             h.update(val_clip_key.encode())
@@ -1857,6 +1869,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         _baseline_cache_key_ = _baseline_cache_key(
             local_path or "",
             val_clip_key,
+            f"{cfg.get('training', {}).get('val_songs')}:{cfg.system.get('visqol_fraction', 1.0)}:{_m_sr}:{_m_win}:{_m_layer}:{feature_dim}",
         )
         _baseline_cache_file = os.path.join(_baseline_cache_dir, f"{_baseline_cache_key_}.json")
 

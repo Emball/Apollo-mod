@@ -385,8 +385,7 @@ def run_evaluation(
     """
     Core evaluation routine. Returns ranked results list.
     print_fn: callable for output (allows TUI to redirect).
-    limit: total chunks to use across all songs; defaults to val_metric_samples
-           from config (or 15 if absent). Equal distribution across songs.
+    limit: total chunks to use across all songs, equally distributed; None = all val clips.
     """
     cfg         = OmegaConf.load(conf_dir)
     exp_dir     = cfg.exp.dir
@@ -396,9 +395,7 @@ def run_evaluation(
     win         = int(cfg.model.win)
     layer       = int(cfg.model.layer)
 
-    # Default limit to val_metric_samples from config so evaluate matches training
-    if limit is None:
-        limit = int(cfg.training.get("val_metric_samples", 15))
+    # limit=None evaluates every val clip, which is what training validates on
 
     # Auto-detect checkpoint dir
     if ckpt_dir is None:
@@ -417,12 +414,15 @@ def run_evaluation(
     if not os.path.isdir(ckpt_dir):
         raise RuntimeError(f"Checkpoint dir not found: {ckpt_dir}")
 
-    # Val chunk dir
-    chunk_root = os.path.join("chunks", exp_name, "val")
-    if not os.path.isdir(chunk_root):
+    # Val clip dir: same cache key train.py uses, so evaluate scores the clips training validated on
+    import train as _train
+    _data_val = os.path.join(_REPO_ROOT, "data", exp_name, "val")
+    _key = _train._val_clip_key(cfg, _data_val, _train._fixed_delay_from_cfg(cfg))
+    chunk_root = os.path.join(_train._CHUNK_CACHE_DIR, _key, "val")
+    if not os.path.isdir(os.path.join(chunk_root, "LQ")):
         raise RuntimeError(
-            f"Val chunk dir not found: {chunk_root}\n"
-            "Run train.py once to generate chunks."
+            f"Val clip dir not found: {chunk_root}\n"
+            "Run train.py once with this config to generate the val clips."
         )
 
     print_fn(f"[eval] Loading val chunks from: {chunk_root}")
@@ -626,7 +626,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Retroactively evaluate Apollo checkpoints")
     parser.add_argument("--conf_dir",  required=True, help="Path to yaml config")
     parser.add_argument("--ckpt_dir",  default=None,  help="Checkpoint folder (auto-detected if omitted)")
-    parser.add_argument("--limit",     type=int, default=None, help="Total val chunks across songs (default: val_metric_samples from config)")
+    parser.add_argument("--limit",     type=int, default=None, help="Total val chunks across songs (default: all val clips)")
     parser.add_argument("--visqol",    action="store_true",   help="Run VISQOL (requires visqol-python)")
     parser.add_argument("--pattern",   default=None,          help="Only evaluate checkpoints matching this substring")
     args = parser.parse_args()
