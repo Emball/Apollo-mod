@@ -84,8 +84,9 @@ def _migrate_checkpoint_name(path: Path) -> Path:
         # Target already exists — stale duplicate from partial migration; delete the old file
         try:
             path.unlink()
-        except Exception:
-            pass
+            console.print(f"[dim]Removed {path.name} (renamed target already exists)[/]")
+        except Exception as exc:
+            console.print(f"[yellow]Could not remove {path.name}: {exc}[/]")
         return new_path
     try:
         path.rename(new_path)
@@ -127,8 +128,8 @@ def _save_state(state: dict) -> None:
     try:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
         STATE_FILE.write_text(json.dumps(state, indent=2))
-    except Exception:
-        pass
+    except Exception as exc:
+        console.print(f"[yellow]Could not save TUI state: {exc}[/]")
 
 
 # ---------------------------------------------------------------------------
@@ -578,8 +579,8 @@ def _run_subprocess(cmd: list[str], label: str, pause_dir: Path | None = None,
                                 break
                 finally:
                     _termios.tcsetattr(fd, _termios.TCSADRAIN, old)
-        except Exception:
-            pass
+        except Exception as exc:
+            console.print(f"[yellow]Ctrl+I watcher stopped: {exc}[/]")
 
     try:
         env = os.environ.copy()
@@ -634,7 +635,7 @@ def _run_subprocess(cmd: list[str], label: str, pause_dir: Path | None = None,
             else:
                 proc.send_signal(signal.SIGINT)
             try:
-                proc.wait(timeout=30)
+                proc.wait(timeout=300)
             except subprocess.TimeoutExpired:
                 proc.kill()
         console.print("[dim]Returning to menu...[/]")

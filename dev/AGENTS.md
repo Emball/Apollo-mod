@@ -110,7 +110,7 @@ input/ output/           -- inference I/O staging dirs
 
 **Dev mode:** `apollo.bat --dev` sets `APOLLO_DEV=1`. `tui.py` includes `dev/*.yaml` in the config picker.
 
-**Pretrained checkpoint loading:** `BaseModel.from_pretrain()` allow-lists OmegaConf types via `add_safe_globals` before `torch.load(..., weights_only=True)`.
+**Checkpoint IO:** all checkpoint loads go through `look2hear.utils.ckpt_io.load_checkpoint` (`weights_only=True` first, full unpickle fallback with a warning). Downloads stream to `<dest>.part` and are moved into place only when complete (`download_file`). The resume patch rewrites the checkpoint atomically. Ctrl+C sets a flag; `train.py` saves `step=NNNNNN-interrupted.ckpt` at the next batch end and stops (second Ctrl+C force-quits). The TUI pause (`PAUSED`) is acknowledged by `PAUSED.ack`.
 
 **Gefen optimizer:** `type: gefen` in the optimizer config. Drop-in AdamW replacement with ~8x lower optimizer-state memory and faster optimizer steps. Requires `pip install gefen`; builds CUDA kernels via JIT on first run (needs `nvcc` in PATH). Falls back to AdamW32bit with a warning if not installed. Recommended over `adamw_8bit` for new runs.
 

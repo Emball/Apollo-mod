@@ -186,13 +186,8 @@ def ensure_model(shortname: str) -> tuple:
     dest = os.path.join(_MODELS_DIR, filename)
     if not os.path.exists(dest):
         print(f"[inference] Downloading {shortname} -> models/{filename}")
-        import urllib.request
-        def _progress(count, block, total):
-            if total > 0:
-                pct = min(100, count * block * 100 // total)
-                print(f"\r[inference] {pct:3d}%", end="", flush=True)
-        urllib.request.urlretrieve(url, dest, reporthook=_progress)
-        print()
+        from look2hear.utils.ckpt_io import download_file
+        download_file(url, dest, label="inference")
         print(f"[inference] Saved -> {dest}")
     else:
         print(f"[inference] Found cached model: models/{filename}")
@@ -270,7 +265,8 @@ def save_audio(file_path: str, audio: torch.Tensor, sr: int = _SR) -> None:
 
 
 def _load_ckpt(path: str, feature_dim: int, sr: int, win: int, layer: int):
-    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    from look2hear.utils.ckpt_io import load_checkpoint
+    ckpt = load_checkpoint(path)
     raw = ckpt["state_dict"]
     if any(k.startswith("audio_model.") for k in raw):
         state = {k.replace("audio_model.", ""): v

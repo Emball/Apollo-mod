@@ -94,8 +94,9 @@ def _migrate_legacy_ckpt_names_eval(ckpt_dir: str) -> None:
         if os.path.exists(dst):
             try:
                 os.unlink(src)
-            except Exception:
-                pass
+                print(f"[migrate] removed {fname} (renamed target already exists)")
+            except Exception as exc:
+                print(f"[migrate] could not remove {fname}: {exc}")
             continue
         try:
             os.rename(src, dst)
@@ -126,7 +127,8 @@ def _compute_visqol(ref: torch.Tensor, deg: torch.Tensor, sr: int = _SR) -> Opti
 # ---------------------------------------------------------------------------
 
 def _load_model(ckpt_path: str, feature_dim: int, sr: int, win: int, layer: int):
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    from look2hear.utils.ckpt_io import load_checkpoint
+    ckpt = load_checkpoint(ckpt_path)
     if not isinstance(ckpt, dict):
         raise ValueError(f"Checkpoint must be a dict: {ckpt_path}")
     state = ckpt.get("state_dict", ckpt)

@@ -364,8 +364,8 @@ class AudioLightningModule(pl.LightningModule):
                 optimizer_g.step()
                 self.log("train_loss_d", float(self._accum_loss_d), on_step=False, prog_bar=False, logger=True)
                 self.log("train_loss_g", float(self._accum_loss_g), on_step=False, prog_bar=False, logger=True)
-            except AssertionError:
-                pass
+            except AssertionError as e:
+                print(f"[train] Epoch-end optimizer flush skipped: {e}")
             self._accum_loss_g = None
             self._accum_loss_d = None
         self._accum_step = 0

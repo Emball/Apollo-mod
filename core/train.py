@@ -73,7 +73,7 @@ def _start_ram_watchdog(limit_fraction: float = 0.90) -> None:
     total = psutil.virtual_memory().total
     threshold = total * limit_fraction
     threshold_gb = threshold / (1024 ** 3)
-    print_only(f"[watchdog] RAM watchdog active -- will exit cleanly above "
+    print_only(f"[watchdog] RAM watchdog active -- will exit immediately above "
                f"{threshold_gb:.1f} GB ({limit_fraction*100:.0f}% of total)")
 
     def _watch():
@@ -84,7 +84,7 @@ def _start_ram_watchdog(limit_fraction: float = 0.90) -> None:
             if used >= threshold:
                 used_gb = used / (1024 ** 3)
                 print_only(f"\n[watchdog] SYSTEM RAM CRITICAL: {used_gb:.1f} GB used "
-                            f"(threshold {threshold_gb:.1f} GB) -- exiting cleanly to protect OS")
+                            f"(threshold {threshold_gb:.1f} GB) -- exiting immediately (no checkpoint saved) to protect OS")
                 os._exit(1)
             time.sleep(2)
 
@@ -97,8 +97,10 @@ import look2hear.losses
 import look2hear.models
 import look2hear.models.apollo
 from look2hear.utils import print_only
+from look2hear.utils.ckpt_io import load_checkpoint, atomic_torch_save, download_file
 import warnings
-warnings.filterwarnings("ignore")
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 def _migrate_legacy_ckpt_names(base_dir: str) -> None:
     """Rename legacy-formatted checkpoint files to the current naming scheme."""
@@ -124,8 +126,9 @@ def _migrate_legacy_ckpt_names(base_dir: str) -> None:
                 # stale duplicate — delete old file
                 try:
                     os.unlink(src)
-                except Exception:
-                    pass
+                    print_only(f"[migrate] removed {fname} (renamed target already exists)")
+                except Exception as _e:
+                    print_only(f"[migrate] could not remove {fname}: {_e}")
                 continue
             try:
                 os.rename(src, dst)
@@ -1281,11 +1284,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     def _load_weights(path: str, feature_dim: int):
         """Load a .pth or .ckpt file and return an Apollo model with weights applied."""
         if path.endswith(".ckpt"):
-            try:
-                ckpt = torch.load(path, map_location="cpu", weights_only=True)
-            except Exception:
-                print_only("[weights] weights_only=True failed (legacy checkpoint format) -- retrying with weights_only=False")
-                ckpt = torch.load(path, map_location="cpu", weights_only=False)
+            ckpt = load_checkpoint(path)
             raw = ckpt["state_dict"]
             if any(k.startswith("audio_model.") for k in raw.keys()):
                 model_state = {k.replace("audio_model.", ""): v
@@ -1339,8 +1338,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 url = _PRETRAINED_MODELS.get(fname)
                 if url is not None:
                     print_only(f"[weights] Downloading {fname} from configured URL...")
-                    import urllib.request
-                    urllib.request.urlretrieve(url, candidate)
+                    download_file(url, candidate, label="weights")
                     print_only(f"[weights] Saved to {candidate}")
                     local_path = candidate
                     break
@@ -1541,6 +1539,26 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     import time as _time
     from pytorch_lightning.callbacks import Callback as _Callback
 
+    _interrupt = {"requested": False, "count": 0, "saved": False}
+
+    def _interrupt_check(trainer) -> None:
+        """Called from batch-end hooks: save at a consistent point, then stop."""
+        if not _interrupt["requested"] or _interrupt["saved"]:
+            return
+        if getattr(trainer.state, "fn", None) != "fit":
+            print_only("\n[interrupt] Stopping (no training state to save).")
+            os._exit(0)
+        try:
+            ckpt_dir = os.path.join(_run_dir, "checkpoints")
+            os.makedirs(ckpt_dir, exist_ok=True)
+            out_path = os.path.join(ckpt_dir, f"step={trainer.global_step:06d}-interrupted.ckpt")
+            trainer.save_checkpoint(out_path)
+            print_only(f"\n[interrupt] Saved to {out_path}")
+        except Exception as e:
+            print_only(f"\n[interrupt] Save failed: {e}")
+        _interrupt["saved"] = True
+        trainer.should_stop = True
+
     class StepPrinter(_Callback):
         """
         Replaces TQDM with a clean line-per-step console output.
@@ -1593,6 +1611,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 end="", flush=True
             )
             self.on_train_batch_end_pause_check()
+            _interrupt_check(trainer)
+
+        def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
+            _interrupt_check(trainer)
 
         def on_train_batch_end_pause_check(self):
             """Poll for PAUSED sentinel file and block until removed.
@@ -1719,29 +1741,12 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     )
 
     def _save_and_exit(sig=None, frame=None):
-        print_only("\n[interrupt] Ctrl+C caught -- saving checkpoint...")
-        try:
-            ckpt_dir = os.path.join(_run_dir, "checkpoints")
-            os.makedirs(ckpt_dir, exist_ok=True)
-            step = trainer.global_step
-            try:
-                m = trainer.callback_metrics
-                vl     = m.get("sisdr",   None)
-                visqol = m.get("visqol", None)
-                hfnr    = m.get("hfnr",    None)
-                parts = [f"{step:06d}"]
-                if vl     is not None: parts.append(f"sisdr={float(vl):.3f}")
-                if visqol is not None: parts.append(f"visqol={float(visqol):.3f}")
-                if hfnr    is not None: parts.append(f"hfnr={float(hfnr):.3f}")
-                fname = "-".join(parts) + ".ckpt"
-            except Exception:
-                fname = f"{step:06d}.ckpt"
-            out_path = os.path.join(ckpt_dir, fname)
-            trainer.save_checkpoint(out_path)
-            print_only(f"[interrupt] Saved to {out_path}")
-        except Exception as e:
-            print_only(f"[interrupt] Save failed: {e}")
-        os._exit(0)
+        _interrupt["count"] += 1
+        if _interrupt["count"] >= 2:
+            print_only("\n[interrupt] Second Ctrl+C -- forcing exit without saving.")
+            os._exit(1)
+        _interrupt["requested"] = True
+        print_only("\n[interrupt] Ctrl+C caught -- will save at the next safe point and stop. Press again to force quit.")
 
     import signal as _signal
     _signal.signal(_signal.SIGINT, _save_and_exit)
@@ -1797,8 +1802,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 if _headroom < 1.5 * (1024 ** 3):
                     print_only(f"[baseline] Skipped -- only {_headroom/(1024**3):.1f} GB RAM headroom.")
                     _baseline_ok = False
-            except Exception:
-                pass
+            except Exception as _e:
+                print_only(f"[baseline] RAM headroom check failed ({_e}) -- continuing.")
             if _baseline_ok:
                 try:
                     datamodule.setup("fit")
@@ -1821,7 +1826,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                     print_only(f"[baseline] Skipped: {e}")
 
     if ckpt_path is not None:
-        _ckpt_data = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        _ckpt_data = load_checkpoint(ckpt_path)
         _patched = False
 
         if "pytorch-lightning_version" not in _ckpt_data:
@@ -1874,7 +1879,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             _patched = True
 
         if _patched:
-            torch.save(_ckpt_data, ckpt_path)
+            atomic_torch_save(_ckpt_data, ckpt_path)
             print_only("[resume] Checkpoint patched and saved.")
         del _ckpt_data
 
@@ -1889,6 +1894,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         print_only(f"\n[OOM] System RAM exhausted -- exiting cleanly.")
         print_only(f"[OOM] {e}")
         os._exit(1)
+    if _interrupt["saved"]:
+        print_only("[interrupt] Training stopped.")
+        return {}, {}
     print_only("Training finished!")
 
     if checkpoint is not None:
@@ -1898,10 +1906,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     best_path = getattr(checkpoint, "best_model_path", "") or "" if checkpoint is not None else ""
     if best_path and os.path.isfile(best_path):
-        try:
-            state_dict = torch.load(best_path, map_location="cpu", weights_only=True)
-        except Exception:
-            state_dict = torch.load(best_path, map_location="cpu", weights_only=False)
+        state_dict = load_checkpoint(best_path)
         system.load_state_dict(state_dict=state_dict["state_dict"])
         system.cpu()
         to_save = system.audio_model.serialize()
