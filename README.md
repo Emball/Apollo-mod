@@ -248,7 +248,7 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 
 #### compression
 
-Set under `augmentation.cached.compression`. Each chunk is encoded through a chain sampled from the recipe (WMA, MP3, AAC, Vorbis, Opus, MP2; order, pass count, and CBR/VBR are drawn per chunk), then re-aligned to the source by measured delay. Requires `ffmpeg` with the encoders the recipe uses.
+Set under `augmentation.cached.compression`. Each chunk is encoded through a chain sampled from the recipe (MP3 and WMA, plus AAC, Vorbis, Opus, and MP2 when the recipe enables them; order, pass count, and CBR/VBR are drawn per chunk), then re-aligned to the source by measured delay. Requires `ffmpeg` with the encoders the recipe uses.
 
 | Key | Description |
 |---|---|

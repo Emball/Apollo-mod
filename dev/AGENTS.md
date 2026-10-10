@@ -67,14 +67,14 @@ input/ output/           -- inference I/O staging dirs
 | `utils/tui.py` | Keyboard-navigated TUI. Latest/Best checkpoint options in inference picker. Ctrl+C during training saves checkpoint. Ensemble picker after output path selection. "Update Apollo" in Utilities runs `git pull --ff-only`. `--dev` flag adds `dev/*.yaml` to config picker. |
 | `core/evaluate.py` | Offline checkpoint evaluator. Reads metrics from filenames; runs inference only for missing ones. VISQOL via `visqol-python`. Scores cached in `<ckpt_dir>/.eval_cache.json`. |
 | `utils/align_audio.py` | LQ/HQ temporal alignment. Global sinc resample for speed drift, chunked cross-correlation micro-alignment. |
-| `utils/degrade_audio.py` | Synthetic degradation pipeline via JSON configs. Fixed-chain mode (`chain`) or `--randomize` mode (`random` block). Randomized mode cuts each file into `--segment_sec` segments (down to 3 s), gives each its own chain, writes one LQ/HQ pair per segment plus `_chains.jsonl`. TUI flow lives in `_screen_randomized`. |
-| `utils/compression.py` | Shared codec-chain module used by `degrade_audio.py` and the cached `compression` augmentation: chain sampling from a `random` recipe, ffmpeg encoders, per-window delay measurement and alignment (`degrade_window`). Padding is encoded with each window and cropped after alignment so codec edge artifacts never reach the pair. |
+| `utils/degrade_audio.py` | Synthetic degradation pipeline via JSON configs. Fixed-chain mode (`chain`, own encoders, supports `mp3_fhg` and filters, no `codec` steps) or `--randomize` mode (`random` block, all encoding via `compression.py`). Randomized mode cuts each file into `--segment_sec` segments (down to 3 s), gives each its own chain, writes one LQ/HQ pair per segment plus `_chains.jsonl`. TUI flow lives in `_screen_randomized`. |
+| `utils/compression.py` | Shared codec-chain module used by `degrade_audio.py --randomize` and the cached `compression` augmentation: chain sampling from a `random` recipe (`sample_chain`), ffmpeg encoders (`wma_encode`, `mp3_lame`, and `codec` steps for aac/vorbis/opus/mp2), encoder availability check, per-window delay measurement and alignment (`degrade_window`). Padding is encoded with each window and cropped after alignment so codec edge artifacts never reach the pair. Recipes: `stfl_random.json` (MP3/WMA only), `compression_mixed.json` (adds `other_codecs`). |
 
 ---
 
 ## Internal Behavior
 
-**Chunk cache:** `usr/cache/chunks/<key>/<split>/` — keyed on MD5 of (source contents + `segment_sec` + overlap + `fixed_delay` + aug config). Shared across configs with matching dataset and params. `.manifest.json` written after each successful run.
+**Chunk cache:** `usr/cache/chunks/<key>/<split>/` — keyed on MD5 of (source contents + `segment_sec` + overlap + `fixed_delay` + aug config + compression recipe contents). Shared across configs with matching dataset and params. `.manifest.json` written after each successful run.
 
 **Source conversion:** Non-WAV sources converted to 32-bit float WAV via FFmpeg in parallel threads. `align_data` integer offset baked in via `atrim`. Already-WAV files are never re-converted.
 
