@@ -1,6 +1,5 @@
 import argparse
 import sys
-import os
 import numpy as np
 import soundfile as sf
 from scipy.signal import resample_poly, correlate
@@ -152,7 +151,6 @@ def find_global_ratio(
     lq_proxy = lq_mono[::PROXY_FACTOR].copy()
 
     anchor_proxy = max(128, int(anchor_ms * PROXY_SR / 1000))
-    max_shift_proxy = int(search_ppm / 1_000_000 * len(lq_proxy)) + anchor_proxy
 
     print(f"  Proxy: {PROXY_SR}Hz  ({len(lq_proxy)} samples, anchor={anchor_ms:.0f}ms)")
 
@@ -529,8 +527,6 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 
 def screen_align_audio(state: dict, console, _pick, _run_with_live_output, ROOT) -> None:
-    from pathlib import Path
-    import subprocess, sys
 
     INPUT_DIR  = ROOT / "input"
     OUTPUT_DIR = ROOT / "output"

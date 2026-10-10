@@ -156,7 +156,6 @@ def _load_val_chunks(val_chunk_dir: str, limit: Optional[int] = None) -> list:
     floor(limit/n_songs) chunks, with the remainder going to whichever songs
     have the most chunks available. Matches the litmodule _pick_chunks logic.
     """
-    import math
     from collections import defaultdict
 
     lq_dir = os.path.join(val_chunk_dir, "LQ")
@@ -556,8 +555,6 @@ def print_results_table(results: list[tuple], print_fn=print) -> None:
 
 def screen_evaluate(state: dict, console, _pick, _run_with_live_output, ROOT: Path) -> None:
     """Entry point called from tui.py."""
-    from pathlib import Path as _Path
-    import yaml
 
     configs_dir = ROOT / "configs"
     configs = sorted(configs_dir.glob("*.yaml")) if configs_dir.exists() else []

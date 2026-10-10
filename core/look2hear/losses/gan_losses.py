@@ -13,7 +13,6 @@
 ###
 
 import torch
-import math
 from torch.nn.modules.loss import _Loss
 
 
@@ -52,35 +51,6 @@ def _trapezoid_weight(n_bins: int, lo_bin: int, hi_bin: int,
     return weight.view(1, n_bins, 1)
 
 
-def hf_band_mae(est: torch.Tensor, ref: torch.Tensor,
-                sr: int = 44100,
-                lo_hz: float = 13000.0,
-                hi_hz: float = 19000.0) -> float:
-    """
-    Mean absolute log-magnitude error in the transition band (default 13-19 kHz).
-    Lower = better restoration of the MP3 rolloff zone.
-    Exposed for use in val metrics logging.
-    """
-    n_fft = 2048
-    hop   = 512
-    win   = torch.hann_window(n_fft, device=est.device)
-    hz_per_bin = sr / n_fft
-    bin_lo = int(lo_hz / hz_per_bin)
-    bin_hi = min(int(hi_hz / hz_per_bin), n_fft // 2)
-    eps = 1e-7
-
-    def _log_mag(x):
-        return torch.stft(
-            x.reshape(-1, x.shape[-1]),
-            n_fft=n_fft, hop_length=hop, win_length=n_fft,
-            window=win, return_complex=True
-        ).abs().clamp(min=eps).log()
-
-    e_log = _log_mag(est)[:, bin_lo:bin_hi, :]
-    r_log = _log_mag(ref)[:, bin_lo:bin_hi, :]
-    return (e_log - r_log).abs().mean().item()
-
-
 class MultiFrequencyDisLoss(_Loss):
     def __init__(self, eps=1e-8):
         super(MultiFrequencyDisLoss, self).__init__()
@@ -108,9 +78,6 @@ class MultiFrequencyGenLoss(_Loss):
                  band_weight_hi_hz=18500.0,  # high edge of boosted band
                  band_weight_ramp_hz=1500.0, # width of the soft ramp at each edge
                  sr=44100,
-                 # Legacy flat-boost params kept for config back-compat but ignored
-                 hf_boost=1.0,
-                 hf_threshold_ratio=0.5,
                  ):
         super(MultiFrequencyGenLoss, self).__init__()
         self.eps = eps

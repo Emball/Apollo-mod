@@ -80,7 +80,6 @@ else
     info "Syncing remaining dependencies..."
     "$UV_BIN" pip install \
         --python "$VENV_DIR/bin/python" \
-        "setuptools<71" pyyaml \
         -r "$SCRIPT_DIR/requirements.txt"
     ok "dependencies up to date"
     cp "$SCRIPT_DIR/requirements.txt" "$STAMP"

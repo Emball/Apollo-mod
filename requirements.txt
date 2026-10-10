@@ -8,6 +8,7 @@ pytorch-lightning==2.1.4
 # Config / hydra
 hydra-core==1.3.2
 omegaconf==2.3.0
+pyyaml
 
 # HuggingFace
 huggingface-hub==0.20.3
@@ -16,35 +17,20 @@ huggingface-hub==0.20.3
 librosa==0.10.1
 soundfile==0.12.1
 scipy>=1.11.0
-auraloss==0.4.0
-
-# Data
-h5py==3.10.0
 numpy==1.26.4
+ffmpeg-python
 
 # Logging / display
 tensorboard==2.15.2
 rich==13.7.0
-tqdm==4.66.1
-
-# Torch extras
-torch-complex==0.4.3
-torch-optimizer==0.3.0
-torch-mir-eval==0.4
 
 # Metrics
-fast-bss-eval==0.1.4
 visqol-python[all]==3.8.0
 
 # Misc
 psutil
 sympy==1.12
 packaging==23.2
-setuptools>=68.0.0
-packaging>=21.0
+setuptools>=68.0.0,<71
 bitsandbytes>=0.43.0; sys_platform != 'darwin'
 gefen
-
-# Augmentation
-ffmpeg-python
-

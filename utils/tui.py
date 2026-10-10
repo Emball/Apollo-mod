@@ -26,7 +26,6 @@ from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
 from rich.rule import Rule
-from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
@@ -355,7 +354,6 @@ def _config_summary(cfg_path: Path) -> str:
         if not runs_path.exists():
             return "no runs yet"
         best_score = None
-        best_stem  = None
         best_step  = None
         for run_dir in sorted(runs_path.iterdir()):
             ckpt_dir = run_dir / "checkpoints"
@@ -369,7 +367,6 @@ def _config_summary(cfg_path: Path) -> str:
                 step = int(s.group(1)) if s else 0
                 if best_score is None or score > best_score:
                     best_score = score
-                    best_stem  = ckpt.stem
                     best_step  = step
         if best_score is not None:
             visqol, sisdr, neg_hfnr = best_score
@@ -451,7 +448,6 @@ def _find_model_for_config(cfg_path: Path) -> Path | None:
 
 def _run_mid_training_inference(state: dict, cfg_path: Path, pause_file: Path) -> None:
     """Mini inference flow triggered by Ctrl+I during training."""
-    import re as _re
     console.clear()
     console.print(_banner_panel())
     console.print(Panel(
@@ -685,7 +681,6 @@ def screen_train(state: dict) -> None:
 
     while True:
         # build display items with summary
-        display = [f"{items[i]}  [dim]{summaries[i]}[/dim]" for i in range(len(items))]
         # Rich doesn't render markup in Text directly in menu, so strip for plain display
         plain = [f"{items[i]}   {summaries[i]}" for i in range(len(items))]
         idx = _pick("Train -- select config", plain, hint="Enter=start  Esc=back", start=start)

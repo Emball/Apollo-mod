@@ -20,13 +20,11 @@
 import os
 import threading
 import torchaudio
-from omegaconf import OmegaConf
 import torch
 import torch.utils.checkpoint as torch_checkpoint
 import pytorch_lightning as pl
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from collections.abc import MutableMapping
-from omegaconf import ListConfig
 
 def flatten_dict(d, parent_key="", sep="_"):
     items = []
@@ -42,28 +40,6 @@ def flatten_dict(d, parent_key="", sep="_"):
 # ---------------------------------------------------------------------------
 # Perceptual metric helpers
 # ---------------------------------------------------------------------------
-
-def _ms_log_stft_loss(est: "torch.Tensor", ref: "torch.Tensor") -> float:
-    """
-    Multi-scale log-magnitude STFT loss. Lower = better match to HQ.
-    Not used in live training as of 0.5.1.0 (superseded by VISQOL) -- kept
-    for evaluate.py's offline legacy-checkpoint scoring.
-    """
-    windows = [512, 1024, 2048]
-    total = 0.0
-    for n_fft in windows:
-        hop = n_fft // 4
-        win = torch.hann_window(n_fft, device=est.device)
-        def _mag(x):
-            return torch.stft(x.reshape(-1, x.shape[-1]),
-                              n_fft=n_fft, hop_length=hop, win_length=n_fft,
-                              window=win, return_complex=True).abs()
-        e_mag = _mag(est)
-        r_mag = _mag(ref)
-        eps = 1e-7
-        total += torch.mean(torch.abs(torch.log(e_mag + eps) - torch.log(r_mag + eps))).item()
-    return total / len(windows)
-
 
 def _hf_band_mae_cpu(est: "torch.Tensor", ref: "torch.Tensor",
                      sr: int = 44100,
@@ -225,8 +201,6 @@ class AudioLightningModule(pl.LightningModule):
         self._val_rotate_steps = self._resolve_rotate_steps()
         self._val_window_best: dict = {}  # best metrics seen in the current window
 
-        # Pending preview tensors from _compute_val_metrics, consumed by _save_val_audio
-        self._pending_preview_data: list  = []
 
         # Gradient accumulation state
         self.grad_accum_steps = max(1, grad_accum_steps)
@@ -476,9 +450,9 @@ class AudioLightningModule(pl.LightningModule):
         self._val_rotate_steps = self._resolve_rotate_steps()
         self._val_window_idx   = 0
         self._val_window_best  = {}
-        self._apply_val_window(announce=True)
+        self._apply_val_window()
 
-    def _apply_val_window(self, announce: bool = False) -> None:
+    def _apply_val_window(self) -> None:
         """Slice _val_all_songs into the active window and update _val_song_refs."""
         n     = len(self._val_all_songs)
         k     = min(self.val_songs, n)
@@ -488,8 +462,6 @@ class AudioLightningModule(pl.LightningModule):
             self._val_all_songs[i][0]: (self._val_all_songs[i][1], self._val_all_songs[i][2])
             for i in idxs
         }
-        if announce:
-            pass  # no console noise; val results print after each run
 
 
     # ------------------------------------------------------------------
@@ -535,11 +507,6 @@ class AudioLightningModule(pl.LightningModule):
     # Val audio saving (no-op: written inline in _compute_val_metrics)
     # ------------------------------------------------------------------
 
-    def _save_val_audio(self):
-        # no-op: audio is written inline during _compute_val_metrics to avoid
-        # holding all song tensors in memory simultaneously.
-        pass
-
     def _compute_val_metrics(self):
         """
         Run model inference on each locked 10-second val clip.
@@ -548,7 +515,6 @@ class AudioLightningModule(pl.LightningModule):
         if not self._val_song_refs:
             return
 
-        import look2hear.losses as _ll
 
         hfnr_sum = visqol_sum = 0.0
         count = visqol_count = 0
@@ -678,11 +644,10 @@ class AudioLightningModule(pl.LightningModule):
                 self._val_window_best  = {}
 
                 self._val_next_rotate  = step + rotate_steps
-                self._apply_val_window(announce=True)
+                self._apply_val_window()
 
-        # Full-song metrics pass (also populates _pending_preview_data), then save files
+        # Full-song metrics pass (writes val audio inline)
         self._compute_val_metrics()
-        self._save_val_audio()
 
         _hfnr   = self._last_val_hfnr
         _visqol = self._last_val_visqol

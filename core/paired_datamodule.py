@@ -29,13 +29,11 @@ All augmentation behaviour is controlled by the `augmentation` block in
 your config yaml. See configs/README.txt for full documentation.
 """
 
-import io
 import os
 import random
 from dataclasses import dataclass, field
 from typing import Optional, Tuple, List
 
-import numpy as np
 import torch
 import torchaudio
 from torch.utils.data import Dataset, DataLoader
@@ -161,21 +159,6 @@ def _parse_aug_cfg(raw) -> AugmentationCfg:
     )
 
 # Individual augmentation implementations
-
-def _pitch_shift_tensor(wav: torch.Tensor, semitones: float, sr: int) -> torch.Tensor:
-    """Pitch shift via resampling. No external deps, exact same shape guaranteed."""
-    original_length = wav.shape[-1]
-    shift_factor = 2 ** (semitones / 12)
-    virtual_sr = int(round(sr * shift_factor))
-    wav = torchaudio.functional.resample(wav, sr, virtual_sr)
-    wav = torchaudio.functional.resample(wav, virtual_sr, sr)
-    if wav.shape[-1] >= original_length:
-        wav = wav[:, :original_length]
-    else:
-        wav = torch.nn.functional.pad(wav, (0, original_length - wav.shape[-1]))
-    return wav.float()
-
-
 
 def _silence_dip_envelope(n_samples: int, sr: int, cfg: "SilenceDipAugCfg") -> "torch.Tensor":
     """Build a [1, n_samples] amplitude envelope that dips to zero somewhere inside
@@ -430,40 +413,6 @@ class ChunkedPairDataset(Dataset):
         return hq, lq
 
 # Validation dataset -- full-length files sliced at runtime
-
-class FullLengthPairDataset(Dataset):
-    def __init__(self, eval_dir: str, sr: int = SR, segment_sec: float = 2.0):
-        lq_dir = os.path.join(eval_dir, "LQ")
-        hq_dir = os.path.join(eval_dir, "HQ")
-        self.pairs           = get_matched_pairs(lq_dir, hq_dir)
-        self.sr              = sr
-        self.segment_samples = int(segment_sec * sr)
-
-        self.index = []
-        for pair_idx, (lq_path, hq_path) in enumerate(self.pairs):
-            lq_info = torchaudio.info(lq_path)
-            hq_info = torchaudio.info(hq_path)
-            min_len = min(lq_info.num_frames, hq_info.num_frames)
-            start = 0
-            while start + self.segment_samples <= min_len:
-                self.index.append((pair_idx, start))
-                start += self.segment_samples
-
-        print(f"Validation dataset: {len(self.pairs)} files -> {len(self.index)} segments")
-
-    def __len__(self) -> int:
-        return len(self.index)
-
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, int, str]:
-        pair_idx, start = self.index[idx]
-        lq_path, hq_path = self.pairs[pair_idx]
-        lq, _ = torchaudio.load(lq_path, frame_offset=start, num_frames=self.segment_samples)
-        hq, _ = torchaudio.load(hq_path, frame_offset=start, num_frames=self.segment_samples)
-        if lq.shape[0] == 1: lq = lq.repeat(2, 1)
-        if hq.shape[0] == 1: hq = hq.repeat(2, 1)
-        lq_chunk, hq_chunk = normalize_pair(lq, hq)
-        song_key = os.path.splitext(os.path.basename(lq_path))[0]
-        return hq_chunk, lq_chunk, idx, song_key
 
 # DataModule
 

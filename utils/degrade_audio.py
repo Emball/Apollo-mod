@@ -168,7 +168,7 @@ def run_chain(config: dict, input_path: str | Path, output_dir: str | Path, prin
     tmpdir = output_dir / f"tmp_{basename}"
     tmpdir.mkdir(parents=True, exist_ok=True)
 
-    print_fn(f"Degradation pipeline starting")
+    print_fn("Degradation pipeline starting")
     print_fn(f"  Input:  {input_path}")
     print_fn(f"  Output: {output_dir}")
     print_fn(f"  Config: {config.get('name', '(unnamed)')}  ({len(chain)} steps)")

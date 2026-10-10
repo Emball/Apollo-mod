@@ -565,7 +565,7 @@ def main(
 
     if chunked and audio.shape[-1] > int(chunk_sec * sr):
         print(f"[inference] Chunked inference ({chunk_sec}s chunks, {overlap_sec}s overlap)")
-        print(f"[inference] Writing sequentially -- you can preview in Audacity now")
+        print("[inference] Writing sequentially -- you can preview in Audacity now")
         _run_chunked(model, audio, device, sr, chunk_sec, overlap_sec, out_path=output_wav,
                      bands=ensemble, aux_model=aux_model, aux_bands=aux_ensemble)
         print(f"[inference] Done -> {output_wav}")
