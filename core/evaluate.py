@@ -42,6 +42,7 @@ sys.path.insert(0, _CORE_DIR)
 from look2hear.system.audio_litmodule import (
     _hf_noise_ratio, _hf_band_mae_cpu,
     _get_visqol_api, _visqol_score,
+    _normalize_val_pair, infer_clip_ola, _VAL_PROTOCOL,
 )
 import look2hear.models.apollo
 import look2hear.losses
@@ -53,7 +54,7 @@ _SR = 44100
 # ---------------------------------------------------------------------------
 _EVAL_WEIGHTS = {
     "visqol": 0.60,
-    "hfnr":    0.25,
+    "hfnr":    0.25,   # scored as |hfnr - 1|: 1.0 means HF flatness matches HQ
     "sisdr":  0.15,
     "hfmae":  0.00,  # kept for display; excluded from composite (use target_band_loss in config)
 }
@@ -195,14 +196,6 @@ def _load_val_chunks(val_chunk_dir: str, limit: Optional[int] = None) -> list:
     return chunks
 
 
-def _normalize_pair(lq: torch.Tensor, hq: torch.Tensor):
-    peak = max(lq.abs().amax().item(), hq.abs().amax().item())
-    if peak > 0:
-        lq = lq / peak
-        hq = hq / peak
-    return lq, hq
-
-
 # ---------------------------------------------------------------------------
 # Parse metrics from filename
 # ---------------------------------------------------------------------------
@@ -231,6 +224,7 @@ def _eval_checkpoint(
     device: torch.device,
     run_visqol: bool,
     known_metrics: dict,
+    chunk_sec: float = 3.0,
 ) -> dict:
     """
     Compute metrics for one checkpoint. Skips metrics already in known_metrics.
@@ -255,19 +249,14 @@ def _eval_checkpoint(
             try:
                 lq, _ = torchaudio.load(lq_path)
                 hq, _ = torchaudio.load(hq_path)
-                lq, hq = _normalize_pair(lq, hq)
-                if lq.shape[0] == 2:
-                    lq = lq[0:1]
-                    hq = hq[0:1]
+                if lq.shape[0] == 1: lq = lq.repeat(2, 1)
+                if hq.shape[0] == 1: hq = hq.repeat(2, 1)
+                lq, hq = _normalize_val_pair(lq, hq)
 
                 if need_inference or run_visqol:
-                    lq_in  = lq.unsqueeze(0).to(device)
-                    hq_ref = hq.unsqueeze(0).to(device)
-                    out    = model(lq_in)
-                    e_gpu  = out.squeeze(0)
-                    r_gpu  = hq_ref.squeeze(0)
-                    e_cpu  = e_gpu.float().cpu()
-                    r_cpu  = r_gpu.float().cpu()
+                    # same stereo clip inference as training validation
+                    e_cpu = infer_clip_ola(model, lq, device, chunk_sec)
+                    r_cpu = hq.float().cpu()
 
                 if need_inference:
                     if "hfnr" not in known_metrics:
@@ -311,7 +300,7 @@ def _rank_results(results: list[tuple]) -> list[tuple]:
     """
     results: list of (fname, ckpt_path, metrics_dict)
     Returns same list sorted best-first with 'rank' and 'composite' added to metrics.
-    Weights: visqol=0.60, hfnr=0.25, sisdr=0.15
+    Weights: visqol=0.60, hfnr=0.25 (distance from 1.0, lower is better), sisdr=0.15
     Falls back gracefully when VISQOL is absent (renormalizes weights).
     """
     keys = list(_EVAL_WEIGHTS.keys())
@@ -319,9 +308,12 @@ def _rank_results(results: list[tuple]) -> list[tuple]:
     # Collect per-metric value ranges for min-max normalization
     ranges = {}
     for key in keys:
-        present = [m[key] for _, _, m in results if key in m]
+        present = [abs(m[key] - 1.0) if key == "hfnr" else m[key] for _, _, m in results if key in m]
         if present:
             ranges[key] = (min(present), max(present))
+
+    def value(key: str, m: dict) -> float:
+        return abs(m[key] - 1.0) if key == "hfnr" else m[key]
 
     def composite(m: dict) -> float:
         score = 0.0
@@ -331,7 +323,7 @@ def _rank_results(results: list[tuple]) -> list[tuple]:
                 continue
             lo, hi = ranges[key]
             span = hi - lo
-            n = 0.0 if span == 0 else (m[key] - lo) / span
+            n = 0.0 if span == 0 else (value(key, m) - lo) / span
             if key in _HIGHER_IS_BETTER:
                 n = 1.0 - n  # invert: higher = better -> lower normalized = better
             score   += weight * n
@@ -357,14 +349,19 @@ def _rank_results(results: list[tuple]) -> list[tuple]:
 def _load_cache(ckpt_dir: str) -> dict:
     path = os.path.join(ckpt_dir, ".eval_cache.json")
     try:
-        return json.loads(Path(path).read_text())
+        cache = json.loads(Path(path).read_text())
     except Exception:
-        return {}
+        return {"_protocol": _VAL_PROTOCOL}
+    if cache.get("_protocol") != _VAL_PROTOCOL:
+        print("  [eval] Cached scores come from an older val protocol -- discarding.")
+        return {"_protocol": _VAL_PROTOCOL}
+    return cache
 
 
 def _save_cache(ckpt_dir: str, cache: dict) -> None:
     path = os.path.join(ckpt_dir, ".eval_cache.json")
     try:
+        cache["_protocol"] = _VAL_PROTOCOL
         Path(path).write_text(json.dumps(cache, indent=2))
     except Exception as ex:
         print(f"  [warn] cache write failed: {ex}")
@@ -381,11 +378,14 @@ def run_evaluation(
     run_visqol: bool = False,
     pattern: Optional[str] = None,
     print_fn=print,
+    recompute: bool = False,
 ) -> list[tuple]:
     """
     Core evaluation routine. Returns ranked results list.
     print_fn: callable for output (allows TUI to redirect).
     limit: total chunks to use across all songs, equally distributed; None = all val clips.
+    recompute: ignore metrics encoded in checkpoint filenames and cached scores; score every
+           checkpoint under the current protocol (needed for checkpoints trained before it).
     """
     cfg         = OmegaConf.load(conf_dir)
     exp_dir     = cfg.exp.dir
@@ -394,6 +394,7 @@ def run_evaluation(
     sr          = int(cfg.model.sr)
     win         = int(cfg.model.win)
     layer       = int(cfg.model.layer)
+    chunk_sec   = float(cfg.datas.get("segment_sec", 3))
 
     # limit=None evaluates every val clip, which is what training validates on
 
@@ -458,11 +459,11 @@ def run_evaluation(
         ckpt_path = os.path.join(ckpt_dir, fname)
 
         # Parse what's already in the filename
-        known = _parse_filename_metrics(fname)
+        known = {} if recompute else _parse_filename_metrics(fname)
 
         # Pull VISQOL from cache if available
         cache_key = fname
-        if cache_key in cache and "visqol" in cache[cache_key]:
+        if not recompute and cache_key in cache and "visqol" in cache[cache_key]:
             known["visqol"] = cache[cache_key]["visqol"]
 
         needs_model = (
@@ -480,7 +481,7 @@ def run_evaluation(
             print_fn(f"  Evaluating: {fname} ...", end=" ", flush=True)
             try:
                 model   = _load_model(ckpt_path, feature_dim, sr, win, layer)
-                metrics = _eval_checkpoint(model, chunks, device, run_visqol, known)
+                metrics = _eval_checkpoint(model, chunks, device, run_visqol, known, chunk_sec)
                 del model
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -629,6 +630,7 @@ def main() -> None:
     parser.add_argument("--limit",     type=int, default=None, help="Total val chunks across songs (default: all val clips)")
     parser.add_argument("--visqol",    action="store_true",   help="Run VISQOL (requires visqol-python)")
     parser.add_argument("--pattern",   default=None,          help="Only evaluate checkpoints matching this substring")
+    parser.add_argument("--recompute", action="store_true",   help="Ignore filename and cached metrics; score every checkpoint under the current protocol")
     args = parser.parse_args()
 
     try:
@@ -638,6 +640,7 @@ def main() -> None:
             limit      = args.limit,
             run_visqol = args.visqol,
             pattern    = args.pattern,
+            recompute  = args.recompute,
         )
         if results:
             print_results_table(results)

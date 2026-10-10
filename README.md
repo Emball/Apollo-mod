@@ -117,7 +117,7 @@ The best `keep_best` checkpoints by VISQOL and the latest `keep_latest` are kept
 [2]-step=001100-sisdr=12.398-visqol=3.891-hfnr=0.975.ckpt
 ```
 
-`[1]` = best by VISQOL, with SI-SDR and then HFNR (lower is better) as tiebreakers. Checkpoints saved under older names are renamed to this format on launch. The rank badges are updated after every new checkpoint save. Offline `evaluate.py` re-ranks the full set and can add additional metrics.
+`[1]` = best by VISQOL, with SI-SDR and then HFNR (closest to 1.0) as tiebreakers. Checkpoints saved under older names are renamed to this format on launch. The rank badges are updated after every new checkpoint save. Offline `evaluate.py` re-ranks the full set and can add additional metrics.
 
 ---
 

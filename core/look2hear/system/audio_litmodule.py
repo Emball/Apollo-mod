@@ -153,6 +153,51 @@ def _visqol_score(est: "torch.Tensor", ref: "torch.Tensor", sr: int = 44100) -> 
         return None
 
 
+# Bump when val normalization / scoring changes; keys caches so old numbers are not reused.
+_VAL_PROTOCOL = 2
+
+
+def _normalize_val_pair(lq: "torch.Tensor", hq: "torch.Tensor"):
+    """Scale both by their joint peak, only when it exceeds 1.0 (same rule as training data)."""
+    peak = max(lq.abs().max().item(), hq.abs().max().item())
+    if peak > 1.0:
+        lq = lq / peak
+        hq = hq / peak
+    return lq, hq
+
+
+def infer_clip_ola(model, lq_norm: "torch.Tensor", device, chunk_sec: float = 3.0,
+                   sr: int = 44100) -> "torch.Tensor":
+    """Chunked overlap-add inference on a [2, T] clip. Shared by training val and evaluate.py
+    so both score the same way. Returns [2, T] float32 on CPU."""
+    chunk_samples   = max(1, int(round(chunk_sec * sr)))
+    overlap_samples = max(0, int(round(min(0.5, chunk_sec * 0.25) * sr)))
+    hop_samples     = max(1, chunk_samples - overlap_samples)
+
+    T       = lq_norm.shape[-1]
+    out_buf = torch.zeros(2, T)
+    wt_buf  = torch.zeros(T)
+
+    start = 0
+    while start < T:
+        end = min(start + chunk_samples, T)
+        n   = end - start
+        inp = lq_norm[..., start:end].unsqueeze(0).to(device)
+        with torch.no_grad():
+            out = model(inp)
+        if out.ndim == 3:
+            out = out[0]
+        out = out.float().cpu()[..., :n]
+        w = torch.hann_window(n, periodic=False) if n >= 2 else torch.ones(n)
+        out_buf[..., start:end] += out * w
+        wt_buf[start:end]       += w
+        if end >= T:
+            break
+        start += hop_samples
+
+    return (out_buf / wt_buf.clamp(min=1e-8)).clamp(-1.0, 1.0)
+
+
 # ---------------------------------------------------------------------------
 # Main module
 # ---------------------------------------------------------------------------
@@ -216,6 +261,8 @@ class AudioLightningModule(pl.LightningModule):
         self._last_val_sisdr  = None
         self._last_val_hfnr    = None
         self._last_val_visqol = None
+        self._last_val_visqol_gain = None
+        self._val_lq_visqol: dict = {}   # song_key -> ViSQOL(LQ vs HQ); the LQ clip never changes, so scored once
 
 
         # VISQOL alternation: compute every other val run, carry forward on skipped runs
@@ -469,43 +516,12 @@ class AudioLightningModule(pl.LightningModule):
     # ------------------------------------------------------------------
 
     def _infer_clip(self, lq_norm: torch.Tensor) -> torch.Tensor:
-        """
-        Run chunked OLA inference on a pre-loaded, pre-normalized [2, T] clip tensor.
-        Returns restored [2, T] float32 CPU tensor.
-        """
+        """Chunked OLA inference on a pre-normalized [2, T] clip. Returns [2, T] float32 CPU."""
         try:
             chunk_sec = float(self.trainer.datamodule.segment_sec)
         except Exception:
             chunk_sec = 3.0
-
-        chunk_samples   = max(1, int(round(chunk_sec * 44100)))
-        overlap_samples = max(0, int(round(min(0.5, chunk_sec * 0.25) * 44100)))
-        hop_samples     = max(1, chunk_samples - overlap_samples)
-
-        T       = lq_norm.shape[-1]
-        out_buf = torch.zeros(2, T)
-        wt_buf  = torch.zeros(T)
-
-        start = 0
-        while start < T:
-            end = min(start + chunk_samples, T)
-            n   = end - start
-            inp = lq_norm[..., start:end].unsqueeze(0).to(self.device)
-            with torch.no_grad():
-                out = self.audio_model(inp)
-            if out.ndim == 3:
-                out = out[0]
-            out = out.float().cpu()[..., :n]
-            w = torch.hann_window(n, periodic=False) if n >= 2 else torch.ones(n)
-            out_buf[..., start:end] += out * w
-            wt_buf[start:end]       += w
-            start += hop_samples
-
-        return (out_buf / wt_buf.clamp(min=1e-8)).clamp(-1.0, 1.0)
-
-    # ------------------------------------------------------------------
-    # Val audio saving (no-op: written inline in _compute_val_metrics)
-    # ------------------------------------------------------------------
+        return infer_clip_ola(self.audio_model, lq_norm, self.device, chunk_sec)
 
     def _compute_val_metrics(self):
         """
@@ -537,6 +553,8 @@ class AudioLightningModule(pl.LightningModule):
         from concurrent.futures import ThreadPoolExecutor
         visqol_pool    = ThreadPoolExecutor(max_workers=1, thread_name_prefix="visqol")
         visqol_futures = []
+        lq_futures     = []
+        restored_scores = {}
 
         torch.cuda.empty_cache()
         self.audio_model.eval()
@@ -548,21 +566,21 @@ class AudioLightningModule(pl.LightningModule):
                     if lq_clip.shape[0] == 1: lq_clip = lq_clip.repeat(2, 1)
                     if hq_clip.shape[0] == 1: hq_clip = hq_clip.repeat(2, 1)
 
-                    peak    = lq_clip.abs().max().clamp(min=1e-8)
-                    lq_norm = (lq_clip / peak).clamp(-1.0, 1.0)
-                    hq_norm = (hq_clip / peak).clamp(-1.0, 1.0)
+                    lq_norm, hq_norm = _normalize_val_pair(lq_clip, hq_clip)
                     del lq_clip, hq_clip
 
                     restored = self._infer_clip(lq_norm)
 
-                    e = restored[0:1]
-                    r = hq_norm[0:1]
+                    e = restored
+                    r = hq_norm
 
                     hfnr_sum += _hf_noise_ratio(e, r)
                     count   += 1
 
                     if i in do_visqol:
                         visqol_futures.append((song_key, visqol_pool.submit(_visqol_score, e, r)))
+                        if song_key not in self._val_lq_visqol:
+                            lq_futures.append((song_key, visqol_pool.submit(_visqol_score, lq_norm, r)))
 
                     # write audio immediately and release tensors
                     if epoch_dir is not None:
@@ -589,7 +607,20 @@ class AudioLightningModule(pl.LightningModule):
             if v is not None:
                 visqol_sum   += v
                 visqol_count += 1
+                restored_scores[song_key] = v
+        for song_key, fut in lq_futures:
+            try:
+                v = fut.result()
+            except Exception as ex:
+                print(f"[val] ViSQOL (LQ baseline) error on {song_key}: {ex}")
+                continue
+            if v is not None:
+                self._val_lq_visqol[song_key] = float(v)
         visqol_pool.shutdown(wait=True)
+
+        gains = [restored_scores[k] - self._val_lq_visqol[k]
+                 for k in restored_scores if k in self._val_lq_visqol]
+        self._last_val_visqol_gain = sum(gains) / len(gains) if gains else None
 
         if count > 0:
             self._last_val_hfnr = hfnr_sum / count
@@ -604,6 +635,7 @@ class AudioLightningModule(pl.LightningModule):
         self._last_val_sisdr  = None
         self._last_val_hfnr    = None
         self._last_val_visqol = None
+        self._last_val_visqol_gain = None
 
 
         if self._val_loss_count > 0:
@@ -676,6 +708,9 @@ class AudioLightningModule(pl.LightningModule):
 
         self.log("hfnr",   float(_hfnr)   if _hfnr   is not None else 0.0, prog_bar=False, logger=True)
         self.log("visqol", float(_visqol) if _visqol is not None else -1.0, prog_bar=False, logger=True)
+        if self._last_val_visqol_gain is not None:
+            # ViSQOL(restored) - ViSQOL(LQ) over the same clips: comparable across rotating val windows
+            self.log("visqol_gain", float(self._last_val_visqol_gain), prog_bar=False, logger=True)
 
     # ------------------------------------------------------------------
     # Checkpoint persistence
@@ -689,6 +724,7 @@ class AudioLightningModule(pl.LightningModule):
         checkpoint["val_window_idx"]    = self._val_window_idx
         checkpoint["val_next_rotate"]   = self._val_next_rotate
         checkpoint["val_window_best"]   = self._val_window_best
+        checkpoint["val_lq_visqol"]     = self._val_lq_visqol
 
     def on_load_checkpoint(self, checkpoint: dict) -> None:
         self._val_fixed_indices = checkpoint.get("val_fixed_indices", None)
@@ -698,6 +734,7 @@ class AudioLightningModule(pl.LightningModule):
         self._val_window_idx    = checkpoint.get("val_window_idx",    0)
         self._val_next_rotate   = checkpoint.get("val_next_rotate",   -1)
         self._val_window_best   = checkpoint.get("val_window_best",   {})
+        self._val_lq_visqol     = checkpoint.get("val_lq_visqol",     {})
 
         # Strip state_dict keys from older checkpoints that no longer exist in model
         sd = checkpoint.get("state_dict", {})

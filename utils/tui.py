@@ -299,7 +299,7 @@ def _ckpt_score(stem: str) -> tuple:
     """
     Composite score tuple for checkpoint ranking.
     Primary: visqol (higher better).
-    Tiebreakers in order: sisdr, hfnr (lower = less noise).
+    Tiebreakers in order: sisdr, hfnr (closest to 1.0).
     Returns a tuple suitable for max() comparison; missing metrics use worst-case values.
     """
     import re as _re
@@ -313,7 +313,7 @@ def _ckpt_score(stem: str) -> tuple:
 
     visqol = _get(r"visqol=(-?[\d.]+)", -999.0)
     sisdr  = _get(r"sisdr=(-?[\d.]+)",   -999.0)
-    hfnr    = _get(r"hfnr=(-?[\d.]+)",     999.0)   # lower hfnr is better → negate
+    hfnr    = _get(r"hfnr=(-?[\d.]+)",     999.0)   # closer to 1.0 (HQ flatness) is better
 
     # Existing checkpoints on disk have negated sisdr (legacy loss value); normalise
     # so that higher magnitude always wins regardless of which convention was used.
@@ -322,7 +322,7 @@ def _ckpt_score(stem: str) -> tuple:
 
     if visqol < 0:
         return None  # no visqol = unscored
-    return (visqol, sisdr, -hfnr)
+    return (visqol, sisdr, -abs(hfnr - 1.0))
 
 
 def _dedup_ckpts(ckpts):

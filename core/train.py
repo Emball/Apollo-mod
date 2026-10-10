@@ -1916,7 +1916,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         _baseline_cache_key_ = _baseline_cache_key(
             local_path or "",
             val_clip_key,
-            f"{cfg.get('training', {}).get('val_songs')}:{cfg.system.get('visqol_fraction', 1.0)}:{_m_sr}:{_m_win}:{_m_layer}:{feature_dim}",
+            f"p{look2hear.system.audio_litmodule._VAL_PROTOCOL}:{cfg.get('training', {}).get('val_songs')}:{cfg.system.get('visqol_fraction', 1.0)}:{_m_sr}:{_m_win}:{_m_layer}:{feature_dim}",
         )
         _baseline_cache_file = os.path.join(_baseline_cache_dir, f"{_baseline_cache_key_}.json")
 
