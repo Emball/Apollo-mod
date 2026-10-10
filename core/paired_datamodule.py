@@ -263,10 +263,16 @@ def augment_pair(
     # stereo_alternation: deterministic by song half. Skipped if mid/side fired.
     # First half gets L channel, second half gets R channel, giving the model
     # both stereo perspectives of every repeated musical idea.
-    if cfg.stereo_alternation.enabled and not _mid_side_fired:
-        ch = 1 if in_second_half else 0
-        lq = lq[ch:ch+1]
-        hq = hq[ch:ch+1]
+    if cfg.stereo_alternation.enabled:
+        if _mid_side_fired:
+            # both channels are identical after mid/side; keep a single channel so
+            # every chunk in a batch has the same shape as the alternated ones
+            lq = lq[0:1]
+            hq = hq[0:1]
+        else:
+            ch = 1 if in_second_half else 0
+            lq = lq[ch:ch+1]
+            hq = hq[ch:ch+1]
 
     # Gain: per-chunk random draw (realistic intra-song amplitude variance).
     if cfg.gain.enabled and random.random() < cfg.gain.prob:

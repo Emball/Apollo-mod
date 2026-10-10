@@ -1607,9 +1607,25 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             if pause_file is None:
                 return
             print("\n[paused] Inference in progress -- training suspended.", flush=True)
+            ack_file = pause_file + ".ack"
+            try:
+                open(ack_file, "w").close()
+            except OSError as _e:
+                print_only(f"[paused] Could not write ack file ({_e})")
             pause_start = _time.monotonic()
             while os.path.isfile(pause_file):
+                if _time.monotonic() - pause_start > 7200:
+                    print_only("[paused] PAUSED file is over 2 hours old -- treating as stale and resuming.")
+                    try:
+                        os.remove(pause_file)
+                    except OSError:
+                        pass
+                    break
                 _time.sleep(0.5)
+            try:
+                os.remove(ack_file)
+            except OSError:
+                pass
             paused_dur = _time.monotonic() - pause_start
             if hasattr(self, "_val_elapsed"):
                 self._val_elapsed += paused_dur

@@ -461,6 +461,15 @@ def _run_mid_training_inference(state: dict, cfg_path: Path, pause_file: Path) -
 
     cfg_stem = cfg_path.stem
 
+    ack_file = Path(str(pause_file) + ".ack")
+    import time as _tw
+    console.print("[dim]Waiting for training to reach a safe point...[/]")
+    _t_end = _tw.monotonic() + 600
+    while not ack_file.exists() and _tw.monotonic() < _t_end:
+        _tw.sleep(0.5)
+    if not ack_file.exists():
+        console.print("[yellow]Training did not acknowledge the pause within 10 minutes -- continuing anyway.[/]")
+
     # Pick input
     input_path = _pick_input_file(state, cfg_stem)
     if not input_path or input_path == _PROCESS_ALL_SENTINEL:
@@ -534,6 +543,9 @@ def _run_subprocess(cmd: list[str], label: str, pause_dir: Path | None = None,
     proc = None
     interrupted = False
     pause_file = (pause_dir / "PAUSED") if pause_dir else None
+    if pause_file:
+        pause_file.unlink(missing_ok=True)
+        Path(str(pause_file) + ".ack").unlink(missing_ok=True)
     _pausing = threading.Event()
 
     def _watch_for_ctrl_i():
@@ -555,12 +567,12 @@ def _run_subprocess(cmd: list[str], label: str, pause_dir: Path | None = None,
                 fd = sys.stdin.fileno()
                 old = _termios.tcgetattr(fd)
                 try:
-                    _tty.setraw(fd)
+                    _tty.setcbreak(fd)
                     while proc and proc.poll() is None:
                         import select
-                        r, _, _ = select.select([sys.stdin], [], [], 0.1)
+                        r, _, _ = select.select([fd], [], [], 0.1)
                         if r:
-                            ch = sys.stdin.read(1)
+                            ch = os.read(fd, 1).decode("utf-8", "ignore")
                             if ch == "\t":  # Ctrl+I
                                 _pausing.set()
                                 break

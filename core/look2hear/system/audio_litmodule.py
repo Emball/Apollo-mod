@@ -322,16 +322,25 @@ class AudioLightningModule(pl.LightningModule):
             optimizer_d.step()
 
         # --- Generator update ---
-        # Fresh discriminator forward on real audio for targets_feature_maps --
-        # separate pass, live gradients, not reused from D step.
-        est_outputs, est_feature_maps = self.discriminator(output, sample_rate=44100)
-        _, targets_feature_maps = self.discriminator(ori_data, sample_rate=44100)
-        loss_g = self.loss_func["g"](
-            est_outputs, est_feature_maps, targets_feature_maps, output, ori_data
-        ) / self.grad_accum_steps
+        # D params are frozen so loss_g gradients never land in D's .grad (matters
+        # when grad_accum_steps > 1). Gradients still flow through D to the generator.
+        # Real-side feature maps are targets only (the loss detaches them), so no grad.
+        d_params = list(self.discriminator.parameters())
+        for p_ in d_params:
+            p_.requires_grad_(False)
+        try:
+            est_outputs, est_feature_maps = self.discriminator(output, sample_rate=44100)
+            with torch.no_grad():
+                _, targets_feature_maps = self.discriminator(ori_data, sample_rate=44100)
+            loss_g = self.loss_func["g"](
+                est_outputs, est_feature_maps, targets_feature_maps, output, ori_data
+            ) / self.grad_accum_steps
 
-        self._accum_loss_g = (self._accum_loss_g or 0.0) + loss_g.detach()
-        self.manual_backward(loss_g)
+            self._accum_loss_g = (self._accum_loss_g or 0.0) + loss_g.detach()
+            self.manual_backward(loss_g)
+        finally:
+            for p_ in d_params:
+                p_.requires_grad_(True)
 
         if is_last_accum:
             self.clip_gradients(optimizer_g, gradient_clip_val=5, gradient_clip_algorithm="norm")
