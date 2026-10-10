@@ -100,6 +100,39 @@ from look2hear.utils import print_only
 import warnings
 warnings.filterwarnings("ignore")
 
+def _migrate_legacy_ckpt_names(base_dir: str) -> None:
+    """Rename legacy-formatted checkpoint files to the current naming scheme."""
+    import re as _re
+    _SKIP = {"last.ckpt", "interrupted.ckpt"}
+    for root, _, files in os.walk(base_dir):
+        for fname in files:
+            if not fname.endswith(".ckpt") or fname in _SKIP:
+                continue
+            stem = fname[:-5]
+            new  = stem
+            new  = new.replace("val_loss=",   "sisdr=")
+            new  = new.replace("val_visqol=", "visqol=")
+            new  = new.replace("val_sfr=",    "hfnr=")
+            new  = new.replace("val_hfnr=",   "hfnr=")
+            new  = _re.sub(r"-val_sdr=[\d.]+", "", new)
+            new  = _re.sub(r"-(?<!si)sdr=[\d.]+", "", new)
+            if new == stem:
+                continue
+            src = os.path.join(root, fname)
+            dst = os.path.join(root, new + ".ckpt")
+            if os.path.exists(dst):
+                # stale duplicate — delete old file
+                try:
+                    os.unlink(src)
+                except Exception:
+                    pass
+                continue
+            try:
+                os.rename(src, dst)
+            except Exception as exc:
+                print_only(f"[migrate] could not rename {fname}: {exc}")
+
+
 # Constants -- chunk size is read from cfg.datas.segment_sec at runtime in prepare_data()
 _SR      = 44100
 _OVERLAP = 0.5
@@ -1195,6 +1228,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         # Find the most recently modified run folder that has checkpoints
         _run_dir = None
         if os.path.isdir(_base_dir):
+            _migrate_legacy_ckpt_names(_base_dir)
             _subdirs = [
                 os.path.join(_base_dir, d)
                 for d in os.listdir(_base_dir)
@@ -1470,7 +1504,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         "model", "discriminator", "loss_func", "metrics", "optimizer", "scheduler",
         "val_audio_dir", "val_songs", "val_preview_samples", "val_metric_songs", "val_rotate_every",
         "gradient_checkpointing", "grad_accum_steps", "visqol_fraction",
-        "target_band_loss_enabled", "target_band_loss_lo_hz", "target_band_loss_hi_hz",
         "val_songs", "val_audio_pairs",
     }
     from omegaconf import OmegaConf
@@ -1490,9 +1523,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         gradient_checkpointing=cfg.system.get("gradient_checkpointing", False),
         grad_accum_steps=cfg.training.get("grad_accum_steps", 1),
         visqol_fraction=cfg.system.get("visqol_fraction", 1.0),
-        target_band_loss_enabled=cfg.system.get("target_band_loss_enabled", False),
-        target_band_loss_lo_hz=cfg.system.get("target_band_loss_lo_hz", 13000.0),
-        target_band_loss_hi_hz=cfg.system.get("target_band_loss_hi_hz", 19000.0),
     )
 
     # Callbacks
@@ -1516,6 +1546,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         def on_train_epoch_start(self, trainer, pl_module):
             self._epoch_batches    = trainer.num_training_batches
             self._last_global_step = trainer.global_step
+            self._last_batch_idx   = 0
             self._val_t0           = None
             self._session_t0       = None   # set on first optimizer step
             self._session_done     = 0      # optimizer steps this session
@@ -1541,18 +1572,15 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             done  = batch_idx + 1
             total = self._epoch_batches
             pct   = 100 * done / total
+            self._last_batch_idx = batch_idx
             # Show last val metrics inline if available
             visqol = getattr(pl_module, "_last_val_visqol", None)
-            sdr    = getattr(pl_module, "_last_val_sdr",    None)
-            sfr    = getattr(pl_module, "_last_val_sfr",    None)
+            hfnr    = getattr(pl_module, "_last_val_hfnr",    None)
             sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
-            tbl    = getattr(pl_module, "_last_val_tbl",    None)
             val_parts = []
             if visqol is not None: val_parts.append(f"visqol={float(visqol):.3f}")
-            if sdr    is not None: val_parts.append(f"sdr={float(sdr):.3f}")
-            if sfr    is not None: val_parts.append(f"sfr={float(sfr):.3f}")
-            if sisdr  is not None: val_parts.append(f"sisdr={-float(sisdr):.3f}")
-            if tbl    is not None: val_parts.append(f"tbl={float(tbl):.4f}")
+            if sisdr  is not None: val_parts.append(f"sisdr={float(sisdr):.3f}")
+            if hfnr    is not None: val_parts.append(f"hfnr={float(hfnr):.3f}")
             val_str = "  " + "  ".join(val_parts) if val_parts else ""
             print(
                 f"\r  {pct:5.1f}%  step={trainer.global_step}  "
@@ -1588,70 +1616,60 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         def on_validation_epoch_start(self, trainer, pl_module):
             self._val_t0     = _time.monotonic()
             self._val_sanity = trainer.sanity_checking
+            if not self._val_sanity:
+                print("\r  Validating...                                                  ", end="", flush=True)
 
         def on_validation_epoch_end(self, trainer, pl_module):
-            # Do NOT stop the timer here -- AudioLightningModule.on_validation_epoch_end
-            # fires AFTER this callback hook and runs _save_val_audio() + metrics.
-            # Timer stops in on_validation_end which fires after all module hooks.
             pass
 
         def on_validation_end(self, trainer, pl_module):
-            # Timer stops here -- after all val hooks including audio saves/metrics.
             val_dur = _time.monotonic() - self._val_t0 if self._val_t0 else 0.0
             if hasattr(self, '_val_elapsed'):
                 self._val_elapsed += val_dur
             if not getattr(self, '_val_sanity', True):
+                # Reprint the progress bar line in place with updated val metrics
                 visqol = getattr(pl_module, "_last_val_visqol", None)
-                sdr    = getattr(pl_module, "_last_val_sdr",    None)
-                sfr    = getattr(pl_module, "_last_val_sfr",    None)
+                hfnr    = getattr(pl_module, "_last_val_hfnr",    None)
                 sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
-                tbl    = getattr(pl_module, "_last_val_tbl",    None)
-                parts = []
-                if visqol is not None: parts.append(f"visqol={float(visqol):.3f}")
-                if sdr    is not None: parts.append(f"sdr={float(sdr):.3f}")
-                if sfr    is not None:
-                    flag = " noise^" if float(sfr) > 1.05 else ""
-                    parts.append(f"sfr={float(sfr):.3f}{flag}")
-                if sisdr  is not None: parts.append(f"sisdr={-float(sisdr):.3f}")
-                if tbl    is not None: parts.append(f"tbl={float(tbl):.4f}")
-                if parts:
-                    print(f"\n  [val] {' '.join(parts)}  ({val_dur:.1f}s)", flush=True)
+                val_parts = []
+                if visqol is not None: val_parts.append(f"visqol={float(visqol):.3f}")
+                if sisdr  is not None: val_parts.append(f"sisdr={float(sisdr):.3f}")
+                if hfnr    is not None: val_parts.append(f"hfnr={float(hfnr):.3f}")
+                val_str = "  " + "  ".join(val_parts) if val_parts else ""
+                step  = trainer.global_step
+                epoch = trainer.current_epoch
+                total = getattr(self, "_epoch_batches", 0)
+                done  = getattr(self, "_last_batch_idx", 0) + 1 if total else 0
+                pct   = 100 * done / total if total else 0.0
+                print(
+                    f"\r  {pct:5.1f}%  step={step}  {done}/{total}  --{val_str}",
+                    end="", flush=True
+                )
 
     callbacks: List[Callback] = [StepPrinter()]
 
     _lvb = cfg.trainer.get("limit_val_batches", 1.0)
     val_disabled = (isinstance(_lvb, (int, float)) and float(_lvb) == 0.0)
     if val_disabled:
-        print_only("[train] limit_val_batches=0 -- skipping early_stopping and checkpoint callbacks")
+        print_only("[train] limit_val_batches=0 -- skipping checkpoint callback")
 
     checkpoint = None
-    if cfg.get("early_stopping") and not val_disabled:
-        print_only(f"Instantiating early_stopping")
-        es = hydra.utils.instantiate(cfg.early_stopping)
-        # Monitor sfr directly -- it's the metric that actually flags GAN
-        # collapse (discriminator-satisfying noise instead of real signal).
-        # Lower = better; the "noise^" flag in the printout fires above 1.05.
-        es.monitor = "val_sfr"
-        es.mode    = "min"
-        callbacks.append(es)
     if cfg.get("checkpoint") and not val_disabled:
         print_only(f"Instantiating checkpoint")
         checkpoint = hydra.utils.instantiate(cfg.checkpoint)
-        # Monitor sfr, not a composite -- see note above.
-        checkpoint.monitor = "val_sfr"
-        checkpoint.mode    = "min"
+        checkpoint.monitor = "visqol"
+        checkpoint.mode    = "max"
         checkpoint.save_top_k = -1
         # Full stats in filename; all metrics are logged via self.log() so
         # Lightning can interpolate them here.
         # Lightning interpolates {metric:fmt} as metric=VALUE automatically.
         # Don't add extra label= text before {metric} tokens or they double up.
-        # Result: step=000200-val_loss=-20.892-val_visqol=3.821-val_sdr=10.234-val_sfr=0.968
+        # Result: step=000200-sisdr=-20.892-visqol=3.821-hfnr=0.968
         checkpoint.filename = (
             "{step:06d}"
-            "-{val_loss:.3f}"
-            "-{val_visqol:.3f}"
-            "-{val_sdr:.3f}"
-            "-{val_sfr:.3f}"
+            "-{sisdr:.3f}"
+            "-{visqol:.3f}"
+            "-{hfnr:.3f}"
         )
         callbacks.append(checkpoint)
 
@@ -1687,15 +1705,13 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             step = trainer.global_step
             try:
                 m = trainer.callback_metrics
-                vl     = m.get("val_loss",   None)
-                visqol = m.get("val_visqol", None)
-                sdr    = m.get("val_sdr",    None)
-                sfr    = m.get("val_sfr",    None)
+                vl     = m.get("sisdr",   None)
+                visqol = m.get("visqol", None)
+                hfnr    = m.get("hfnr",    None)
                 parts = [f"{step:06d}"]
-                if vl     is not None: parts.append(f"val_loss={float(vl):.3f}")
-                if visqol is not None: parts.append(f"val_visqol={float(visqol):.3f}")
-                if sdr    is not None: parts.append(f"val_sdr={float(sdr):.3f}")
-                if sfr    is not None: parts.append(f"val_sfr={float(sfr):.3f}")
+                if vl     is not None: parts.append(f"sisdr={float(vl):.3f}")
+                if visqol is not None: parts.append(f"visqol={float(visqol):.3f}")
+                if hfnr    is not None: parts.append(f"hfnr={float(hfnr):.3f}")
                 fname = "-".join(parts) + ".ckpt"
             except Exception:
                 fname = f"{step:06d}.ckpt"
@@ -1734,26 +1750,31 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         )
         _baseline_cache_file = os.path.join(_baseline_cache_dir, f"{_baseline_cache_key_}.json")
 
+        def _apply_baseline_to_system(bl_dict: dict) -> None:
+            """Populate system._last_val_* from a baseline results dict so the
+            progress bar shows baseline values before the first training step."""
+            system._last_val_sisdr  = bl_dict.get("sisdr")
+            system._last_val_hfnr    = bl_dict.get("hfnr")
+            system._last_val_visqol = bl_dict.get("visqol")
+
         if os.path.isfile(_baseline_cache_file):
             try:
                 with open(_baseline_cache_file) as _bcf:
                     _cached_bl = _json.load(_bcf)
-                _parts = "  ".join(f"{k}={v:.3f}" for k, v in _cached_bl.items())
-                print_only(f"\n[baseline] Cache hit ({_baseline_cache_key_[:8]}...) -- skipping val pass.")
-                print_only(f"[baseline] {_parts}  (pretrained, before any training)")
+                print_only(f"[baseline] Cached ({_baseline_cache_key_[:8]}...)")
+                _apply_baseline_to_system(_cached_bl)
             except Exception as _e:
                 print_only(f"[baseline] Cache read failed ({_e}) -- will re-run.")
                 os.remove(_baseline_cache_file)
         else:
-            print_only("\n[baseline] Evaluating pretrained weights before training...")
+            print_only("[baseline] Evaluating pretrained weights...")
             _baseline_ok = True
             try:
                 import psutil as _ps
                 _vm = _ps.virtual_memory()
                 _headroom = (_vm.total * opt.get("ram_limit_fraction", 0.95)) - _vm.used
                 if _headroom < 1.5 * (1024 ** 3):
-                    print_only(f"[baseline] Skipped -- only {_headroom/(1024**3):.1f} GB RAM headroom "
-                               f"(system RAM already near threshold). First val run after training starts will serve as baseline.")
+                    print_only(f"[baseline] Skipped -- only {_headroom/(1024**3):.1f} GB RAM headroom.")
                     _baseline_ok = False
             except Exception:
                 pass
@@ -1774,10 +1795,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                         os.makedirs(_baseline_cache_dir, exist_ok=True)
                         with open(_baseline_cache_file, "w") as _bcf:
                             _json.dump(_to_cache, _bcf, indent=2)
-                        print_only(f"[baseline] Cached to {_baseline_cache_key_[:8]}...")
-                        bl_sisdr = bl.get("val_loss", None)
-                        if bl_sisdr is not None:
-                            print_only(f"[baseline] sisdr={-float(bl_sisdr):.3f}  (pretrained, before any training)")
+                        _apply_baseline_to_system(_to_cache)
                 except Exception as e:
                     print_only(f"[baseline] Skipped: {e}")
 

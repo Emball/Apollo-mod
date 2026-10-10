@@ -9,7 +9,7 @@ Usage:
 
     # Explicit checkpoint
     python inference.py --in_wav input.wav --out_wav output.wav \\
-        --weights runs/apollo_stfl/20260819/checkpoints/step=001200-val_loss=-28.10.ckpt \\
+        --weights runs/apollo_stfl/20260819/checkpoints/step=001200-sisdr=28.10-visqol=3.940-hfnr=0.973.ckpt \\
         --conf_dir configs/apollo_stfl.yaml
 
     # Pretrained shortnames (no conf_dir needed)
@@ -469,14 +469,19 @@ def _find_best_checkpoint(conf_dir: str) -> str:
     if not candidates:
         raise FileNotFoundError(f"No checkpoints found under {run_dir!r}")
 
-    def _parse_loss(path):
-        name = os.path.basename(path)
-        try:
-            return float(name.split("val_loss=")[1].replace(".ckpt", ""))
-        except (IndexError, ValueError):
-            return float("inf")
+    import re
 
-    best = min(candidates, key=_parse_loss)
+    def _score(path):
+        stem = re.sub(r"^\[\d+\]-", "", os.path.basename(path))
+        def _get(key, default):
+            m = re.search(key + r"=(-?[\d.]+?)(?:-|\.ckpt|$)", stem)
+            return float(m.group(1)) if m else default
+        visqol = _get("visqol", -999.0)
+        sisdr  = abs(_get("sisdr", -999.0))
+        hfnr   = _get("hfnr", 999.0)
+        return (visqol, sisdr, -hfnr)
+
+    best = max(candidates, key=_score)
     print(f"[inference] Auto-selected checkpoint: {os.path.relpath(best)}")
     return best
 

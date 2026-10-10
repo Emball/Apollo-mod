@@ -1,5 +1,5 @@
 # @claude last-modified: 2026-08-25T00:00:00Z
-# @claude last-commit: 0.5.1.0 -- replace msstft/hfmae with VISQOL live; add configurable target_band_loss (off by default)
+# @claude last-commit: 0.5.1.0 -- replace msstft/hfmae with VISQOL live
 ###
 # Modified from original Apollo audio_litmodule.py
 # Changes:
@@ -71,13 +71,12 @@ def _hf_band_mae_cpu(est: "torch.Tensor", ref: "torch.Tensor",
                      hi_hz: float = 19000.0) -> float:
     """
     Mean absolute log-magnitude error in the 13-19 kHz transition band.
-    Not used in live training as of 0.5.1.0 (superseded by configurable
-    target_band_loss) -- kept for evaluate.py's offline legacy-checkpoint scoring.
+    Not used in live training -- kept for evaluate.py's offline legacy-checkpoint scoring.
     """
-    return _target_band_mae(est, ref, sr=sr, lo_hz=lo_hz, hi_hz=hi_hz)
+    return float(_target_band_mae(est, ref, sr=sr, lo_hz=lo_hz, hi_hz=hi_hz).item())
 
 
-def _spectral_flatness_ratio(est: "torch.Tensor", ref: "torch.Tensor", sr: int = 44100) -> float:
+def _hf_noise_ratio(est: "torch.Tensor", ref: "torch.Tensor", sr: int = 44100) -> float:
     """
     Spectral flatness ratio in the 8-22 kHz band: est_flatness / ref_flatness.
     > 1.0 means the restored signal is noisier than HQ in the high band.
@@ -105,11 +104,8 @@ def _spectral_flatness_ratio(est: "torch.Tensor", ref: "torch.Tensor", sr: int =
 def _target_band_mae(est: "torch.Tensor", ref: "torch.Tensor",
                      sr: int = 44100,
                      lo_hz: float = 13000.0,
-                     hi_hz: float = 19000.0) -> float:
-    """
-    Mean absolute log-magnitude error in a configurable frequency band.
-    Lower = better. Disabled by default; enabled via cfg.metrics.target_band_loss.
-    """
+                     hi_hz: float = 19000.0) -> "torch.Tensor":
+    """Differentiable version for use in training_step loss."""
     n_fft = 2048
     hop   = n_fft // 4
     win   = torch.hann_window(n_fft, device=est.device)
@@ -124,7 +120,9 @@ def _target_band_mae(est: "torch.Tensor", ref: "torch.Tensor",
     eps = 1e-7
     e_mag = _mag(est)[:, bin_lo:bin_hi, :]
     r_mag = _mag(ref)[:, bin_lo:bin_hi, :]
-    return torch.mean(torch.abs(torch.log(e_mag + eps) - torch.log(r_mag + eps))).item()
+    return torch.mean(torch.abs(torch.log(e_mag + eps) - torch.log(r_mag + eps)))
+
+
 
 
 # VISQOL loader -- lazy, cached, gracefully absent
@@ -198,10 +196,6 @@ class AudioLightningModule(pl.LightningModule):
         val_rotate_every="auto",    # "auto" or int steps between preview-clip position rotations
         gradient_checkpointing=False,
         grad_accum_steps=1,
-        # Configurable target band loss (off by default)
-        target_band_loss_enabled=False,
-        target_band_loss_lo_hz=13000.0,
-        target_band_loss_hi_hz=19000.0,
         # VISQOL: fraction of val audio pairs to score (0.0 = off, 1.0 = all)
         visqol_fraction=1.0,
     ):
@@ -216,9 +210,6 @@ class AudioLightningModule(pl.LightningModule):
         self.val_audio_dir        = val_audio_dir
         self.val_songs            = val_songs
         self.val_rotate_every     = val_rotate_every
-        self.target_band_loss_enabled = target_band_loss_enabled
-        self.target_band_loss_lo_hz   = target_band_loss_lo_hz
-        self.target_band_loss_hi_hz   = target_band_loss_hi_hz
         self.visqol_fraction          = max(0.0, min(1.0, float(visqol_fraction)))
 
         # Val fixed-index lock (for val_loss / SI-SDR computation in validation_step)
@@ -248,10 +239,11 @@ class AudioLightningModule(pl.LightningModule):
 
         # Last val metric values (read by StepPrinter in train.py)
         self._last_val_sisdr  = None
-        self._last_val_sdr    = None
-        self._last_val_sfr    = None
+        self._last_val_hfnr    = None
         self._last_val_visqol = None
-        self._last_val_tbl    = None   # target_band_loss (None when disabled)
+
+
+        # VISQOL alternation: compute every other val run, carry forward on skipped runs
 
         # Background write thread tracking
         self._write_thread: threading.Thread | None = None
@@ -259,7 +251,7 @@ class AudioLightningModule(pl.LightningModule):
         if gradient_checkpointing:
             self._enable_gradient_checkpointing()
 
-        self.default_monitor     = "val_loss"
+        self.default_monitor     = "sisdr"
         self.validation_step_outputs = []
         self.test_step_outputs   = []
         self.automatic_optimization = False
@@ -384,7 +376,7 @@ class AudioLightningModule(pl.LightningModule):
         if self.trainer.sanity_checking:
             est_sources = self(codec_data)
             loss = self.metrics(est_sources, ori_data)
-            return {"val_loss": loss}
+            return {"sisdr": loss}
 
         # First run: collect all seen indices for locking later
         if self._val_fixed_indices is None:
@@ -392,7 +384,7 @@ class AudioLightningModule(pl.LightningModule):
 
         # Once locked, skip chunks not in the fixed set
         if self._val_fixed_indices is not None and ds_idx not in self._val_fixed_indices:
-            return {"val_loss": None}
+            return {"sisdr": None}
 
         est_sources = self(codec_data)
         loss = self.metrics(est_sources, ori_data)
@@ -401,7 +393,7 @@ class AudioLightningModule(pl.LightningModule):
         self._val_loss_count += 1
         self.validation_step_outputs.append(float(loss))
 
-        return {"val_loss": loss}
+        return {"sisdr": loss}
 
     # ------------------------------------------------------------------
     # Val index locking
@@ -435,7 +427,6 @@ class AudioLightningModule(pl.LightningModule):
             fixed.update(random.sample(indices, k))
 
         self._val_fixed_indices = fixed
-        print(f"[val] Locked {len(fixed)} fixed indices -- {per_song} per song across {num_songs} songs.")
 
     # ------------------------------------------------------------------
     # Full-song val ref locking + rotation
@@ -474,12 +465,7 @@ class AudioLightningModule(pl.LightningModule):
             for i in idxs
         }
         if announce:
-            songs_str = ", ".join(self._val_song_refs.keys())
-            n_total   = len(self._val_all_songs)
-            if getattr(self, "_val_rotate_steps", None):
-                print(f"[val] Window {self._val_window_idx + 1}: {k}/{n_total} songs -- {songs_str}  (rotate every {self._val_rotate_steps} steps)")
-            else:
-                print(f"[val] Locked {k}/{n_total} songs -- {songs_str}")
+            pass  # no console noise; val results print after each run
 
 
     # ------------------------------------------------------------------
@@ -533,17 +519,16 @@ class AudioLightningModule(pl.LightningModule):
     def _compute_val_metrics(self):
         """
         Run model inference on each locked 10-second val clip.
-        Computes val_sdr / val_sfr / val_visqol. Saves LQ/HQ/Restored audio to disk.
+        Computes hfnr / visqol. Saves LQ/HQ/Restored audio to disk.
         """
         if not self._val_song_refs:
             return
 
         import look2hear.losses as _ll
 
-        _sdr_fn = _ll.MultiSrcNegSDR("snr", zero_mean=True)
+        hfnr_sum = visqol_sum = 0.0
+        count = visqol_count = 0
 
-        sfr_sum = sdr_sum = visqol_sum = tbl_sum = 0.0
-        count = visqol_count = tbl_count = 0
 
         song_items = list(self._val_song_refs.items())
         if self.visqol_fraction >= 1.0:
@@ -576,8 +561,7 @@ class AudioLightningModule(pl.LightningModule):
                     e = restored[0:1]
                     r = hq_norm[0:1]
 
-                    sfr_sum += _spectral_flatness_ratio(e, r)
-                    sdr_sum += -float(_sdr_fn(e.unsqueeze(0), r.unsqueeze(0)).mean())
+                    hfnr_sum += _hf_noise_ratio(e, r)
                     count   += 1
 
                     if i in do_visqol:
@@ -585,12 +569,6 @@ class AudioLightningModule(pl.LightningModule):
                         if v is not None:
                             visqol_sum   += v
                             visqol_count += 1
-
-                    if self.target_band_loss_enabled:
-                        tbl_sum   += _target_band_mae(e, r,
-                                                      lo_hz=self.target_band_loss_lo_hz,
-                                                      hi_hz=self.target_band_loss_hi_hz)
-                        tbl_count += 1
 
                     # write audio immediately and release tensors
                     if epoch_dir is not None:
@@ -609,12 +587,9 @@ class AudioLightningModule(pl.LightningModule):
         self.audio_model.train()
 
         if count > 0:
-            self._last_val_sdr = sdr_sum / count
-            self._last_val_sfr = sfr_sum / count
+            self._last_val_hfnr = hfnr_sum / count
         if visqol_count > 0:
             self._last_val_visqol = visqol_sum / visqol_count
-        if tbl_count > 0:
-            self._last_val_tbl = tbl_sum / tbl_count
 
     # ------------------------------------------------------------------
     # Validation epoch end
@@ -622,15 +597,15 @@ class AudioLightningModule(pl.LightningModule):
 
     def on_validation_epoch_end(self):
         self._last_val_sisdr  = None
-        self._last_val_sdr    = None
-        self._last_val_sfr    = None
+        self._last_val_hfnr    = None
         self._last_val_visqol = None
-        self._last_val_tbl    = None
+
 
         if self._val_loss_count > 0:
             avg_val_loss = self._val_loss_sum / self._val_loss_count
-            self.log("val_loss", avg_val_loss, prog_bar=True, logger=True)
-            self._last_val_sisdr = avg_val_loss
+            sisdr_val = -float(avg_val_loss)   # loss is negated SI-SDR; flip to real value
+            self.log("sisdr", sisdr_val, prog_bar=True, logger=True)
+            self._last_val_sisdr = sisdr_val
         self._val_loss_sum   = 0.0
         self._val_loss_count = 0
         self.log("lr", self.optimizer[0].param_groups[0]["lr"], prog_bar=True)
@@ -659,7 +634,6 @@ class AudioLightningModule(pl.LightningModule):
                     seen_keys.add(key)
                     all_songs.append(key)
             self._lock_val_songs(by_song)
-            print(f"[val] {len(self._val_song_refs)} clips locked for 10s metric evaluation.")
 
         # --- Check if it's time to rotate the song window ---
         rotate_steps = getattr(self, "_val_rotate_steps", None)
@@ -672,9 +646,8 @@ class AudioLightningModule(pl.LightningModule):
                 best = self._val_window_best
                 if best:
                     parts = []
-                    if "sdr"    in best: parts.append(f"sdr={best['sdr']:.3f}")
                     if "visqol" in best: parts.append(f"visqol={best['visqol']:.3f}")
-                    if "sfr"    in best: parts.append(f"sfr={best['sfr']:.3f}")
+                    if "hfnr"    in best: parts.append(f"hfnr={best['hfnr']:.3f}")
                     print(f"[val] Window {self._val_window_idx + 1} best: {' '.join(parts)}  -- rotating songs")
                 self._val_window_idx  += 1
                 self._val_window_best  = {}
@@ -686,24 +659,18 @@ class AudioLightningModule(pl.LightningModule):
         self._compute_val_metrics()
         self._save_val_audio()
 
-        _sfr    = self._last_val_sfr
-        _sdr    = self._last_val_sdr
+        _hfnr   = self._last_val_hfnr
         _visqol = self._last_val_visqol
-        _tbl    = self._last_val_tbl
+
 
         # Update window-best tracking
-        if _sdr    is not None and _sdr    > self._val_window_best.get("sdr",    float("-inf")):
-            self._val_window_best["sdr"]    = float(_sdr)
         if _visqol is not None and _visqol > self._val_window_best.get("visqol", float("-inf")):
             self._val_window_best["visqol"] = float(_visqol)
-        if _sfr    is not None and _sfr    > self._val_window_best.get("sfr",    float("-inf")):
-            self._val_window_best["sfr"]    = float(_sfr)
+        if _hfnr   is not None and _hfnr   > self._val_window_best.get("hfnr",   float("-inf")):
+            self._val_window_best["hfnr"]   = float(_hfnr)
 
-        self.log("val_sfr",    float(_sfr)    if _sfr    is not None else 0.0, prog_bar=False, logger=True)
-        self.log("val_sdr",    float(_sdr)    if _sdr    is not None else 0.0, prog_bar=False, logger=True)
-        self.log("val_visqol", float(_visqol) if _visqol is not None else -1.0, prog_bar=False, logger=True)
-        if self.target_band_loss_enabled:
-            self.log("val_tbl", float(_tbl) if _tbl is not None else 0.0, prog_bar=False, logger=True)
+        self.log("hfnr",   float(_hfnr)   if _hfnr   is not None else 0.0, prog_bar=False, logger=True)
+        self.log("visqol", float(_visqol) if _visqol is not None else -1.0, prog_bar=False, logger=True)
 
     # ------------------------------------------------------------------
     # Checkpoint persistence

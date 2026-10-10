@@ -57,20 +57,18 @@ On first run, sources are converted to WAV and chunked into fixed-length segment
 
 ### Validation Set Guidelines
 
-On the first val run, `val_songs` songs are selected from the val set and their file paths locked permanently. Each val song is cut into two 10-second clips taken from its highest-energy sections, following ViSQOL's input guidelines, and the clips are held fixed for the entire training run. Every val run scores SDR, SFR, and VISQOL on those same clips, and writes the LQ/HQ/Restored triplets to `val_audio/` so you can listen and judge quality directly. Because the same clips are used throughout, scores are directly comparable across every checkpoint. If your val set is larger than `val_songs`, the active window rotates on `val_rotate_every` steps and the console prints a summary of the best metrics from the previous window before switching.
+On the first val run, `val_songs` songs are selected from the val set and their file paths locked permanently. Each val song is cut into two 10-second clips taken from its highest-energy sections, following ViSQOL's input guidelines, and the clips are held fixed for the entire training run. Every val run scores VISQOL, SI-SDR, and HFNR on those same clips, and writes the LQ/HQ/Restored triplets to `val_audio/` so you can listen and judge quality directly. Because the same clips are used throughout, scores are directly comparable across every checkpoint. If your val set is larger than `val_songs`, the active window rotates on `val_rotate_every` steps and the console prints a summary of the best metrics from the previous window before switching.
 
 After each val run the console prints:
 
 ```
-  [val] visqol=3.821  sdr=10.234  sfr=0.968  sisdr=12.458  (18.8s)
+  [val] visqol=3.821  sisdr=12.458  hfnr=0.968  (18.8s)
 ```
 
-- **visqol** — perceptual quality score (0-5). Correlates with human listening judgement. Higher is better. Requires `visqol-python` (`uv pip install "visqol-python[all]"`); silently skipped and reported as 0.0 if not installed.
-- **sdr** — Signal-to-Distortion Ratio. Primary checkpoint monitor. Higher is better.
-- **sfr** — spectral flatness ratio in the 8-22kHz band. Rising is expected for MP3 restoration (the model is reconstructing frequencies the codec removed). Watch for abrupt changes, not absolute values.
-- **sisdr** — waveform fidelity, noisy. Logged for reference.
-
-All four are logged to TensorBoard.
+- **visqol** — perceptual quality score (0-5). Correlates with human listening judgement. Higher is better. Requires `visqol-python` (`uv pip install "visqol-python[all]"`); silently skipped and logged as -1 if not installed.
+- **sisdr** — waveform fidelity. Higher is better. Noisy for restoration, so use it as a tiebreaker.
+- **hfnr** — high-frequency noise ratio, the spectral flatness ratio in the 8-22kHz band. Rising is expected for MP3 restoration (the model is reconstructing frequencies the codec removed). Watch for abrupt changes, not absolute values.
+All three are logged to TensorBoard.
 
 **What to put in your val set:**
 
@@ -99,7 +97,7 @@ Before training begins, a baseline val pass runs on the pretrained weights so yo
 Training lines show speed and the most recent val metrics:
 
 ```
-  24.9%  step=400  400/1604  1.38 it/s  visqol=3.821  sdr=10.234  sfr=0.968  sisdr=12.458
+  24.9%  step=400  400/1604  1.38 it/s  visqol=3.821  sisdr=12.458  hfnr=0.968
 ```
 
 To run directly from the command line:
@@ -115,11 +113,11 @@ Each run creates a timestamped folder under `runs/<name>/<timestamp>/`. Set `res
 All checkpoints are kept. Each is named with full stats and a rank badge:
 
 ```
-[1]-step=001200-val_loss=-12.470-val_visqol=3.940-val_sdr=10.143-val_sfr=0.973.ckpt
-[2]-step=001100-val_loss=-12.398-val_visqol=3.891-val_sdr=10.120-val_sfr=0.975.ckpt
+[1]-step=001200-sisdr=12.470-visqol=3.940-hfnr=0.973.ckpt
+[2]-step=001100-sisdr=12.398-visqol=3.891-hfnr=0.975.ckpt
 ```
 
-`[1]` = best by `val_sdr`. The rank badges are updated after every new checkpoint save. Offline `evaluate.py` re-ranks the full set and can add additional metrics.
+`[1]` = best by VISQOL, with SI-SDR and then HFNR (lower is better) as tiebreakers. Checkpoints saved under older names are renamed to this format on launch. The rank badges are updated after every new checkpoint save. Offline `evaluate.py` re-ranks the full set and can add additional metrics.
 
 ---
 
@@ -188,8 +186,8 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 **General:**
 - Start with `band_weight_gain: 0` for a baseline run, then enable at 1.0-1.5 after you have a reference point
 - Use `val_songs` to match your validation set size
-- SI-SDR is noisy — use VISQOL as the primary signal; SFR as a canary
-- SFR climbing is not always a problem — it often means the model is synthesizing HF content. Watch for trend changes, not a hard threshold.
+- SI-SDR is noisy — use VISQOL as the primary signal; HFNR as a canary
+- HFNR climbing is not always a problem — it often means the model is synthesizing HF content. Watch for trend changes, not a hard threshold.
 
 ### exp
 
@@ -215,7 +213,7 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 | Key | Description |
 |---|---|
 | `n_layers_to_freeze` | Freeze the first N BSNet layers. Apollo has 6 total. `4` is recommended for synthetic/noisy degradation; `0` for clean/consistent degradation like real iTunes encodes. |
-| `val_songs` | Number of val clips evaluated per val run. Each val song produces two 10-second clips, so use twice the number of val songs to score all of them. Locked on the first val run and held fixed for the entire run. LQ/HQ/Restored triplets saved to `val_audio/` after each run. |
+| `val_songs` | Number of val clips evaluated per val run. Each val song produces two 10-second clips, so with 3 val songs the pool has 6 clips and `val_songs: 6` uses all of them. Locked on the first val run and held fixed for the entire run. LQ/HQ/Restored triplets saved to `val_audio/` after each run. |
 | `val_rotate_every` | Steps between val song window rotation. Only meaningful when the val set is larger than `val_songs`. When the window rotates, the next clips are scored. Integer step count or omit to disable. |
 | `grad_accum_steps` | Accumulate gradients over N steps to simulate a larger batch without extra VRAM. |
 
@@ -265,16 +263,15 @@ Songs without an LQ file need the `LQ/` and `HQ/` folder layout, with the song i
 
 | Key | Description |
 |---|---|
-| `band_weight_shape` | `gaussian`, `trapezoid`, or `piecewise`. |
+| `band_weight_shape` | `gaussian` or `trapezoid`. |
 | `band_weight_center_hz` | Gaussian only. Center frequency of the penalty bump in Hz. Default `15000`. |
 | `band_weight_sigma_hz` | Gaussian only. Width of the bump (1-sigma) in Hz. Default `3000`. |
 | `band_weight_lo_hz` | Trapezoid only. Low edge of the boosted band in Hz. Default `4500`. |
 | `band_weight_hi_hz` | Trapezoid only. High edge of the boosted band in Hz. Default `18500`. |
 | `band_weight_ramp_hz` | Trapezoid only. Width of the soft ramp at each edge in Hz. Default `1500`. |
-| `band_weight_breakpoints` | Piecewise only. List of `[hz, weight]` pairs defining the curve; linearly interpolated between points. Weight range is 0–1. |
 | `band_weight_gain` | Peak gain above baseline. `0` = flat loss regardless of shape. |
 
-`gaussian` adds a bump centered on one frequency — good for a targeted HF push. `trapezoid` targets a flat band with soft edges — useful for a known codec rolloff zone. `piecewise` takes arbitrary `[hz, weight]` breakpoints and interpolates linearly — use this when you have actual null-test data showing where the codec does damage and want to match the weighting to that curve exactly. Start with `gain: 0` for a baseline run.
+`gaussian` adds a bump centered on one frequency — good for a targeted HF push. `trapezoid` targets a flat band with soft edges — useful for a known codec rolloff zone. Start with `gain: 0` for a baseline run.
 
 ### discriminator
 
@@ -305,20 +302,16 @@ Songs without an LQ file need the `LQ/` and `HQ/` folder layout, with the song i
 | Key | Description |
 |---|---|
 | `gradient_checkpointing` | Recomputes activations during backward. Saves 30-40% VRAM at ~30% compute cost. |
-| `visqol_fraction` | Fraction of val songs to score with VISQOL per val run. `1.0` = all. Requires `visqol-python` (`uv pip install "visqol-python[all]"`); silently skipped and reported as 0.0 if not installed. Default `1.0`. |
-| `target_band_loss_enabled` | Adds a configurable-range band loss to live val metrics. Off by default. When enabled, appears as `tbl=` in console and checkpoint filenames. |
-| `target_band_loss_lo_hz` | Low edge of the target band in Hz. Default `13000`. |
-| `target_band_loss_hi_hz` | High edge of the target band in Hz. Default `19000`. |
+| `visqol_fraction` | Fraction of val songs to score with VISQOL per val run. `1.0` = all. Requires `visqol-python` (`uv pip install "visqol-python[all]"`); silently skipped and logged as -1 if not installed. Default `1.0`. |
 
 ### checkpoint and trainer
 
 | Key | Description |
 |---|---|
 | `val_check_interval` | Validate every N training steps. |
-| `limit_val_batches` | Cap on the fixed chunk batch used for `val_loss` (sisdr) computation. `100` is typical. |
-| `max_epochs` | Hard epoch cap. Early stopping usually triggers before this. |
+| `limit_val_batches` | Cap on the fixed chunk batch used for the sisdr computation. `1.0` uses all of it. |
+| `max_epochs` | Hard epoch cap. |
 | `precision` | `16-mixed` for fp16 mixed precision. |
-| `patience` | Early stopping patience in val runs. `100` is reasonable; set higher or disable for exploratory runs. |
 
 ---
 
@@ -329,8 +322,8 @@ Songs without an LQ file need the `LQ/` and `HQ/` folder layout, with the song i
 - **Batch size** — smaller (`1`) stabilizes training on noisy degradation; larger (`2-4`) works for clean degradation.
 - **TF32** — disable for GAN training on spectral data; precision loss matters.
 - **Training step order** — discriminator first, fresh feature maps for generator loss. Do not reuse feature maps.
-- **SI-SDR** — noisy and misleading for restoration tasks. Use VISQOL and SDR as primary signals; SFR as a canary.
-- **SFR** — watch for trend changes, not absolute threshold. Rising SFR with stable VISQOL is fine.
+- **SI-SDR** — noisy and misleading for restoration tasks. Use VISQOL as the primary signal; HFNR as a canary.
+- **HFNR** — watch for trend changes, not absolute threshold. Rising HFNR with stable VISQOL is fine.
 - **Encoder fingerprint** — real encoder output beats synthetic approximation. Match the encoder version exactly.
 
 ---
