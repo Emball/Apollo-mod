@@ -44,6 +44,21 @@ def check_stereo_swap(hq: np.ndarray, lq: np.ndarray) -> np.ndarray:
     return lq
 
 
+def fix_polarity(hq: np.ndarray, lq: np.ndarray) -> np.ndarray:
+    """Flip LQ if it is inverted against HQ. Run after alignment: the offset search ignores
+    the sign of the correlation, so an inverted file aligns fine but keeps its polarity."""
+    n = min(hq.shape[0], lq.shape[0])
+    a, b = to_mono(hq)[:n], to_mono(lq)[:n]
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denom < 1e-9:
+        return lq
+    r = float(np.vdot(a, b)) / denom
+    if r < -0.1:
+        print(f"  !!! Inverted polarity detected on LQ (correlation {r:.3f}). Flipping.")
+        return -lq
+    return lq
+
+
 def match_rms(hq: np.ndarray, lq: np.ndarray) -> np.ndarray:
     rms_hq = np.sqrt(np.mean(np.square(hq)))
     rms_lq = np.sqrt(np.mean(np.square(lq)))
@@ -513,6 +528,8 @@ def main():
         )
     else:
         lq_aligned = lq
+
+    lq_aligned = fix_polarity(hq, lq_aligned)
 
     print("\n[4/4] Saving output with Peak Normalization …")
     lq_aligned = normalize_to_dbfs(lq_aligned, args.normalize_db)
