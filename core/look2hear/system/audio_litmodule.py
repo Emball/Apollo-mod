@@ -41,17 +41,6 @@ def flatten_dict(d, parent_key="", sep="_"):
 # Perceptual metric helpers
 # ---------------------------------------------------------------------------
 
-def _hf_band_mae_cpu(est: "torch.Tensor", ref: "torch.Tensor",
-                     sr: int = 44100,
-                     lo_hz: float = 13000.0,
-                     hi_hz: float = 19000.0) -> float:
-    """
-    Mean absolute log-magnitude error in the 13-19 kHz transition band.
-    Not used in live training -- kept for evaluate.py's offline legacy-checkpoint scoring.
-    """
-    return float(_target_band_mae(est, ref, sr=sr, lo_hz=lo_hz, hi_hz=hi_hz).item())
-
-
 def _hf_noise_ratio(est: "torch.Tensor", ref: "torch.Tensor", sr: int = 44100) -> float:
     """
     Spectral flatness ratio in the 8-22 kHz band: est_flatness / ref_flatness.
@@ -75,30 +64,6 @@ def _hf_noise_ratio(est: "torch.Tensor", ref: "torch.Tensor", sr: int = 44100) -
 
     eps = 1e-8
     return (_flatness(est) + eps) / (_flatness(ref) + eps)
-
-
-def _target_band_mae(est: "torch.Tensor", ref: "torch.Tensor",
-                     sr: int = 44100,
-                     lo_hz: float = 13000.0,
-                     hi_hz: float = 19000.0) -> "torch.Tensor":
-    """Differentiable version for use in training_step loss."""
-    n_fft = 2048
-    hop   = n_fft // 4
-    win   = torch.hann_window(n_fft, device=est.device)
-    bin_lo = int(lo_hz / (sr / n_fft))
-    bin_hi = min(int(hi_hz / (sr / n_fft)), n_fft // 2)
-
-    def _mag(x):
-        return torch.stft(x.reshape(-1, x.shape[-1]),
-                          n_fft=n_fft, hop_length=hop, win_length=n_fft,
-                          window=win, return_complex=True).abs()
-
-    eps = 1e-7
-    e_mag = _mag(est)[:, bin_lo:bin_hi, :]
-    r_mag = _mag(ref)[:, bin_lo:bin_hi, :]
-    return torch.mean(torch.abs(torch.log(e_mag + eps) - torch.log(r_mag + eps)))
-
-
 
 
 # VISQOL loader -- lazy, cached, gracefully absent

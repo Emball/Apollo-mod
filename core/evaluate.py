@@ -8,7 +8,6 @@ Metrics computed per checkpoint:
     visqol  -- ViSQOL perceptual score (primary; requires: uv pip install "visqol-python[all]")
     hfnr     -- Spectral flatness ratio (HF noise canary)
     sisdr   -- SI-SDR (scale-invariant waveform quality)
-    hfmae   -- HF band MAE (configurable; computed here for legacy checkpoints)
 
 Ranking weights (evaluate.py only -- offline, VISQOL-anchored):
     visqol=0.60, hfnr=0.25, sisdr=0.15
@@ -18,8 +17,8 @@ only missing metrics trigger inference. This means subsequent evaluate runs
 on the same checkpoint set are fast (VISQOL only).
 
 VISQOL scores are cached in <ckpt_dir>/.eval_cache.json so they survive
-across sessions. hfmae, hfnr are always re-read from the filename
-or recomputed fresh.
+across sessions. sisdr and hfnr are read from the filename when present
+and computed otherwise.
 """
 
 from __future__ import annotations
@@ -40,7 +39,7 @@ _CORE_DIR  = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.dirname(_CORE_DIR)
 sys.path.insert(0, _CORE_DIR)
 from look2hear.system.audio_litmodule import (
-    _hf_noise_ratio, _hf_band_mae_cpu,
+    _hf_noise_ratio,
     _get_visqol_api, _visqol_score,
     _normalize_val_pair, infer_clip_ola, _VAL_PROTOCOL,
 )
@@ -56,7 +55,6 @@ _EVAL_WEIGHTS = {
     "visqol": 0.60,
     "hfnr":    0.25,   # scored as |hfnr - 1|: 1.0 means HF flatness matches HQ
     "sisdr":  0.15,
-    "hfmae":  0.00,  # kept for display; excluded from composite (use target_band_loss in config)
 }
 
 # Metrics where higher = better (will be inverted during normalization)
@@ -66,7 +64,6 @@ _HIGHER_IS_BETTER = {"visqol", "sisdr"}
 _FILENAME_PATS = {
     "sisdr":  re.compile(r"sisdr=(-?[\d.]+)"),
     "hfnr":    re.compile(r"hfnr=(-?[\d.]+)"),
-    "hfmae":  re.compile(r"hfmae=(-?[\d.]+)"),
 }
 
 
@@ -230,7 +227,7 @@ def _eval_checkpoint(
     Compute metrics for one checkpoint. Skips metrics already in known_metrics.
     Returns a dict of all metrics (known + newly computed).
     """
-    need_inference = not all(k in known_metrics for k in ("hfnr", "hfmae"))
+    need_inference = not all(k in known_metrics for k in ("hfnr", "sisdr"))
 
     metrics = dict(known_metrics)
 
@@ -238,11 +235,11 @@ def _eval_checkpoint(
         return metrics
 
     hfnr_sum    = 0.0
-    hfmae_sum  = 0.0
     sisdr_sum  = 0.0
     visqol_sum = 0.0
     visqol_n   = 0
     n          = 0
+    _sisdr_fn  = look2hear.losses.MultiSrcNegSDR("sisdr", zero_mean=True)
 
     with torch.no_grad():
         for lq_path, hq_path, fname in chunks:
@@ -261,10 +258,7 @@ def _eval_checkpoint(
                 if need_inference:
                     if "hfnr" not in known_metrics:
                         hfnr_sum    += _hf_noise_ratio(e_cpu, r_cpu)
-                    if "hfmae" not in known_metrics:
-                        hfmae_sum  += _hf_band_mae_cpu(e_cpu, r_cpu)
                     if "sisdr" not in known_metrics:
-                        _sisdr_fn = look2hear.losses.MultiSrcNegSDR("sisdr", zero_mean=True)
                         sisdr_sum  += -float(_sisdr_fn(e_cpu.unsqueeze(0), r_cpu.unsqueeze(0)).mean())
 
                 if run_visqol:
@@ -282,7 +276,6 @@ def _eval_checkpoint(
 
     if need_inference:
         if "hfnr"    not in known_metrics: metrics["hfnr"]    = hfnr_sum    / n
-        if "hfmae"  not in known_metrics: metrics["hfmae"]  = hfmae_sum  / n
         if "sisdr"  not in known_metrics: metrics["sisdr"]  = sisdr_sum  / n
 
     if run_visqol and visqol_n > 0:
@@ -467,12 +460,12 @@ def run_evaluation(
             known["visqol"] = cache[cache_key]["visqol"]
 
         needs_model = (
-            not all(k in known for k in ("hfnr", "hfmae"))
+            not all(k in known for k in ("hfnr", "sisdr"))
             or (run_visqol and "visqol" not in known)
         )
 
         parts = []
-        for k in ("hfnr", "hfmae", "sisdr"):
+        for k in ("hfnr", "sisdr"):
             if k in known:
                 parts.append(f"{k}={known[k]:.4f}")
         cached_str = "  ".join(parts) if parts else ""
@@ -492,7 +485,7 @@ def run_evaluation(
                     _save_cache(ckpt_dir, cache)
 
                 new_parts = []
-                for k in ("hfnr", "hfmae", "sisdr", "visqol"):
+                for k in ("hfnr", "sisdr", "visqol"):
                     if k in metrics and k not in known:
                         new_parts.append(f"{k}={metrics[k]:.4f}")
                 print_fn("  ".join(new_parts) if new_parts else "ok")
@@ -516,7 +509,7 @@ def run_evaluation(
 def print_results_table(results: list[tuple], print_fn=print) -> None:
     has_visqol = any("visqol" in m for _, _, m in results)
     cols = ["visqol"] if has_visqol else []
-    cols += ["hfmae", "hfnr", "sisdr"]
+    cols += ["hfnr", "sisdr"]
 
     header = f"{'Rank':<5}"
     for c in cols:
@@ -544,7 +537,7 @@ def print_results_table(results: list[tuple], print_fn=print) -> None:
         best_fname, _, best_m = results[0]
         print_fn(f"\nBest: {best_fname}")
         summary = "  ".join(
-            f"{k}={best_m[k]:.4f}" for k in ("visqol", "hfmae", "hfnr", "sisdr")
+            f"{k}={best_m[k]:.4f}" for k in ("visqol", "hfnr", "sisdr")
             if k in best_m
         )
         print_fn(f"  {summary}")
@@ -582,17 +575,19 @@ def screen_evaluate(state: dict, console, _pick, _run_with_live_output, ROOT: Pa
     mode_items = [
         "Fast  (read filename metrics + SDR only)",
         visqol_label,
+        "Recompute all  (rescore every checkpoint under the current protocol, slow)",
     ]
     midx = _pick("Evaluate -- mode", mode_items, hint="Enter=select  Esc=back")
     if midx is None:
         return
-    run_visqol = (midx == 1 and has_visqol)
+    recompute  = (midx == 2)
+    run_visqol = (midx in (1, 2) and has_visqol)
 
     console.clear()
     from rich.panel import Panel
     console.print(Panel(
         f"[bold cyan]Evaluating: {cfg_path.stem}[/]\n"
-        f"[dim]{'VISQOL enabled' if run_visqol else 'Fast mode (filename + SDR)'}[/]",
+        f"[dim]{'Recompute, ' if recompute else ''}{'VISQOL enabled' if run_visqol else 'Fast mode (filename + SDR)'}[/]",
         border_style="cyan",
         padding=(0, 2),
     ))
@@ -608,6 +603,7 @@ def screen_evaluate(state: dict, console, _pick, _run_with_live_output, ROOT: Pa
             conf_dir   = str(cfg_path),
             run_visqol = run_visqol,
             print_fn   = _print,
+            recompute  = recompute,
         )
         if results:
             print_results_table(results, print_fn=_print)
