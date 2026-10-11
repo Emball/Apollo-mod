@@ -53,7 +53,13 @@ data/apollo_stfl/
 
 On first run, sources are converted to WAV and chunked into fixed-length segments under `usr/cache/chunks/`. The cache is keyed on source file contents and chunk parameters, so changing either automatically triggers a rebuild. The same cache is shared across configs that use the same dataset and parameters.
 
-16-bit WAV and FLAC are fully supported. MP3 is supported but not recommended as it requires manual delay compensation in your config, which can be difficult to realiably calculate. You can utilize the compression augmentation feature for delay-controlled degradation instead, as the utilty supports very complex encoding configurations.
+16-bit WAV and FLAC are fully supported. MP3 is supported but not recommended as it requires manual delay compensation in your config, which can be difficult to reliably calculate. For delay-controlled degradation, you can have the LQ side generated from your HQ files instead (see below); the generator supports very complex encoding configurations.
+
+### Generating LQ From HQ Only
+
+Pairing every song by hand is optional. A song placed in `HQ/` with no matching file in `LQ/` gets its LQ generated: each chunk is encoded through a random codec chain drawn from a recipe (MP3 and WMA, plus AAC, Vorbis, Opus, and MP2 when the recipe enables them; order, pass count, and CBR/VBR are drawn per chunk), then re-aligned to the source by measured delay, so no `align_data` offset is needed. Songs that already have an LQ file are used as they are and are never encoded, so real pairs and generated ones can share a folder. The same applies to `val/`, where each HQ-only song gets its two clips encoded the same way.
+
+This only helps when the degradation you are restoring can be reproduced by a codec chain. For anything else, supply your own LQ files. It needs the `LQ/` and `HQ/` folder layout and is turned on with the [compression](#compression) block in your config.
 
 ### Validation Guidelines
 
@@ -179,6 +185,20 @@ Two base configs are included: `apollo.yaml` and `apollo_uni.yaml` as well as a 
 | `pin_memory` | Reccomended to set as `false` on 16 GB or low RAM systems as it can cause instability. You can try enabling it if you have 32 GB or more. |
 | `align_data` | Fixed sample offset for encoder delay if you know the exact value that the LQ files are misaligned by. Baked into WAV at conversion time. Set `false` to disable. |
 
+### compression
+
+Generates the LQ side for songs that have no LQ file, as described in [Generating LQ From HQ Only](#generating-lq-from-hq-only). Set under `augmentation.cached.compression`; placing it under `live` is an error. Requires `ffmpeg` with the encoders the recipe uses. A recipe can also mix Fraunhofer (`acmenc`, an older MP3 encoder much more common in the early days of the internet) and LAME MP3 passes within one chain; set `external_codecs.acmenc` in the recipe to your `acmenc` executable to use it.
+
+| Key | Description |
+|---|---|
+| `enabled` | Turns LQ generation on. |
+| `recipe` | Path to a recipe JSON with a `random` block, e.g. `utils/degrade/stfl.json`. |
+| `seed` | Seed for chain sampling. Each chunk is seeded from the seed, file name, and chunk index. |
+| `pad_sec` | Seconds of surrounding audio encoded with each chunk and discarded after alignment. |
+| `workers` | Threads used while chunking. `0` uses CPU count minus 1. |
+
+Chunks whose chain fails the recipe's alignment or silence checks are dropped, never written with a clean LQ. A summary of compressed and rejected chunks is printed after chunking. The compression settings are part of the chunk cache key.
+
 ### Augmentation
 
 `live` augmentations run each epoch in the DataLoader workers. `cached` augmentations are baked into chunk files at prep time.
@@ -193,20 +213,6 @@ Two base configs are included: `apollo.yaml` and `apollo_uni.yaml` as well as a 
 | `mid_side_isolation` | Live | Collapses the pair to mid `(L+R)/2` or side `(L-R)/2`, duplicated to both channels. Applied identically to LQ and HQ. Helps the model generalize to stereo field components. This could potentially cause the model to overgeneralize inputs for non-mid-side-isolated audio. Rolls before stereo_alternation; if it fires, stereo_alternation is skipped. |
 | `noise` | Live | Matched Gaussian noise added to both LQ and HQ. **Do not use with codec degradation** as it pollutes the gradient signal. Safe for analog or other degradation types. |
 | `pitch_shift` | Cached | Can help add variety for certain data types. Disabled recommended for codec restoration. |
-
-#### compression
-
-Set under `augmentation.cached.compression`. Songs that have a file in `LQ/` are used as they are and are never encoded. Songs that exist only in `HQ/` get their LQ chunks generated: each chunk is encoded through a chain sampled from the recipe (MP3 and WMA, plus AAC, Vorbis, Opus, and MP2 when the recipe enables them; order, pass count, and CBR/VBR are drawn per chunk), then re-aligned to the source by measured delay. Requires `ffmpeg` with the encoders the recipe uses. A recipe can also mix Fraunhofer (`acmenc`) (an older MP3 encoder much more common in the early days of the internet) and LAME MP3 passes within one chain; set `external_codecs.acmenc` in the recipe to your `acmenc` executable if you'd like to use it
-
-| Key | Description |
-|---|---|
-| `enabled` | Turns the augmentation on. |
-| `recipe` | Path to a recipe JSON with a `random` block, e.g. `utils/degrade/stfl.json`. |
-| `seed` | Seed for chain sampling. Each chunk is seeded from the seed, file name, and chunk index. |
-| `pad_sec` | Seconds of surrounding audio encoded with each chunk and discarded after alignment. |
-| `workers` | Threads used while chunking. `0` uses CPU count minus 1. |
-
-Songs without an LQ file need the `LQ/` and `HQ/` folder layout, with the song in `HQ/` only. Chunks whose chain fails the recipe's alignment or silence checks are left unencoded. A summary of compressed and rejected chunks is printed after chunking. The compression settings are part of the chunk cache key.
 
 ### model
 
