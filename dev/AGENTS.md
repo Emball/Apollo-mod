@@ -17,6 +17,12 @@ What does not belong in the README:
 - Anything that flatters the implementation ("fast", "automatically", "seamlessly", "cleanly")
 - M-dashes
 
+How to write a README section: order it by what the reader does, not by how the code works.
+- Open with the reader's situation (what they have or want), then where and what they configure, then why it helps them, then the one caveat that decides whether it fits.
+- Introduce a term where the reader first needs it, with plain-language capabilities attached, not in a standalone definition block.
+- Describe what the user can do, not the mechanism. Give the benefit in a clause. State a mechanism only as far as a decision needs it.
+- Bold only the lines a reader must not miss. No bolded lead-in labels that turn a paragraph into a manual.
+
 Do not add, expand, or rewrite README sections without a specific instruction to do so. When adding new content, match the tone and density of the surrounding text exactly -- do not editorialize.
 
 The GitHub wiki (`Changes-and-improvements` page, repo `Emball/Apollo-mod.wiki.git`) documents every meaningful change made in this fork relative to upstream `JusperLee/Apollo`, with rationale. Sync it alongside this file when changes to documented behavior land.
