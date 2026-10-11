@@ -13,7 +13,7 @@ Write from the user's perspective. If the user can't act on the information and 
 What does not belong in the README:
 - Implementation details: what library, what algorithm, how it's parallelized, internal mechanics
 - Project-specific config values presented as universal defaults (e.g. a hardcoded encoder delay for one dataset)
-- Advice sections, lessons learned, or "choosing your config" guidance -- that belongs in the wiki
+- Backward-compatibility, deprecation, or migration notes (they read as clutter; they belong here and in code)
 - Anything that flatters the implementation ("fast", "automatically", "seamlessly", "cleanly")
 - M-dashes
 
@@ -21,6 +21,7 @@ How to write a README section: order it by what the reader does, not by how the 
 - Open with the reader's situation (what they have or want), then where and what they configure, then why it helps them, then the one caveat that decides whether it fits.
 - Introduce a term where the reader first needs it, with plain-language capabilities attached, not in a standalone definition block.
 - Describe what the user can do, not the mechanism. Give the benefit in a clause. State a mechanism only as far as a decision needs it.
+- Advice and lessons from real runs belong in the README, woven in where they apply (next to the config key, in the data section), never in dedicated advice or lessons-learned sections.
 - Bold only the lines a reader must not miss. No bolded lead-in labels that turn a paragraph into a manual.
 
 Do not add, expand, or rewrite README sections without a specific instruction to do so. When adding new content, match the tone and density of the surrounding text exactly -- do not editorialize.

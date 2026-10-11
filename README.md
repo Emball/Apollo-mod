@@ -187,7 +187,7 @@ Two base configs are included: `apollo.yaml` and `apollo_uni.yaml` as well as a 
 
 ### compression
 
-Generates the LQ side for songs that have no LQ file, as described in [Generate LQ](#generate-lq). Set under `datas`. The older `augmentation.cached.compression` location still works but prints a deprecation notice. Requires `ffmpeg` with the encoders the recipe uses. A recipe can also mix Fraunhofer (`acmenc`, an older MP3 encoder much more common in the early days of the internet) and LAME MP3 passes within one chain; set `external_codecs.acmenc` in the recipe to your `acmenc` executable to use it.
+Generates the LQ side for songs that have no LQ file, as described in [Generate LQ](#generate-lq). Set under `datas`. Requires `ffmpeg` with the encoders the recipe uses. A recipe can also mix Fraunhofer (`acmenc`, an older MP3 encoder much more common in the early days of the internet) and LAME MP3 passes within one chain; set `external_codecs.acmenc` in the recipe to your `acmenc` executable to use it.
 
 | Key | Description |
 |---|---|
