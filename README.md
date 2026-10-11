@@ -39,7 +39,7 @@ On first run this creates a `.venv` with all dependencies. Subsequent runs open 
 
 ## Prepare Your Data
 
-Place your audio files under `data/<apollo_name>/`, where the folder name matches your config file (e.g. `configs/apollo_name.yaml`).
+Place your audio files under `data/apollo_name/`, where the folder name matches your config file (e.g. `configs/apollo_name.yaml`) and the `name` value in your config.
 
 ```
 data/apollo_stfl/
@@ -53,22 +53,9 @@ data/apollo_stfl/
 
 On first run, sources are converted to WAV and chunked into fixed-length segments under `usr/cache/chunks/`. The cache is keyed on source file contents and chunk parameters, so changing either automatically triggers a rebuild. The same cache is shared across configs that use the same dataset and parameters.
 
-16-bit WAV and FLAC are fully supported. MP3 is supported but not recommended as it requires manual delay compensation in your config.
+16-bit WAV and FLAC are fully supported. MP3 is supported but not recommended as it requires manual delay compensation in your config, which can be difficult to realiably calculate. You can utilize the compression augmentation feature for delay-controlled degradation instead, as the utilty supports very complex encoding configurations.
 
-### Validation Set Guidelines
-
-On the first val run, `val_songs` songs are selected from the val set and their file paths locked until the val set changes. Each val song is cut into two 10-second clips taken from its highest-energy sections, following ViSQOL's input guidelines, and the clips are held fixed for the entire training run. Every val run scores VISQOL, SI-SDR, and HFNR on those same clips, and writes the LQ/HQ/Restored triplets to `val_audio/` so you can listen and judge quality directly. Because the same clips are used throughout, scores are directly comparable across every checkpoint. If your val set is larger than `val_songs`, the active window rotates on `val_rotate_every` steps and the console prints a summary of the best metrics from the previous window before switching.
-
-After each val run the console prints:
-
-```
-  [val] visqol=3.821  sisdr=12.458  hfnr=0.968  (18.8s)
-```
-
-- **visqol** — perceptual quality score (0-5). Correlates with human listening judgement. Higher is better. Requires `visqol-python` (`uv pip install "visqol-python[all]"`); silently skipped and logged as -1 if not installed.
-- **sisdr** — waveform fidelity. Higher is better. Noisy for restoration, so use it as a tiebreaker.
-- **hfnr** — high-frequency noise ratio, the spectral flatness ratio in the 8-22kHz band. Rising is expected for MP3 restoration (the model is reconstructing frequencies the codec removed). Watch for abrupt changes, not absolute values.
-All three are logged to TensorBoard.
+### Validation Guidelines
 
 **What to put in your val set:**
 
@@ -76,54 +63,58 @@ All three are logged to TensorBoard.
 - Match the degradation type exactly to your training data.
 - A few songs of similar character is better than many songs of mixed difficulty.
 
+### Validation System
+
+On the first val run, `val_songs` songs are selected from the full val set and their file paths are locked in training until the val set changes. `val_rotate_every` allows the model to select a different set of val clips from the full val folder based on the configured step count. 
+
+Each val song is cut into two 10-second clips taken from its highest-energy sections to follow guidelines for metric calculations. Every val run scores VISQOL, SI-SDR, and HFNR on those same clips, and writes the LQ/HQ/Restored triplets to `runs/<timestamp>/apollo_name/val_audio/` so you can listen and judge quality directly after every validation. 
+
+Because the same clips are used throughout, scores are directly comparable across every checkpoint. If your val set is larger than `val_songs`, the active window rotates on `val_rotate_every` steps and the console prints a summary of the best metrics from the previous window before switching.
+
+### Validation Metrics
+
+After each val run the console prints metrics like this:
+
+```
+  [val] visqol=3.821  sisdr=12.458  hfnr=0.968  (18.8s)
+```
+
+- **visqol** — Perceptual quality score (0-5) that approximates human perception. Higher is better.
+- **sisdr** — Waveform fidelity. Higher is better. 
+- **hfnr** — High-frequency noise ratio. Rising is expected for MP3 restoration, so lower may not always be better.
+
 ---
 
 ## Training
 
 Run `apollo.bat` (Windows) or `./apollo.sh` (Linux/macOS) to open the TUI. Select **Train**, choose your config, and training starts immediately with live output in the terminal. Ctrl+C stops training cleanly, saves a checkpoint, and returns to the menu.
 
-Pass `--dev` to include configs from `dev/` alongside the standard `configs/` directory in the TUI config picker:
-
-```bash
-apollo.bat --dev
-```
-
 Before training begins, a baseline val pass runs on the pretrained weights so you have a reference point:
 
 ```
-[baseline] sisdr=22.140  (pretrained, before any training)
+[baseline] visqol=3.821  sisdr=13.567  hfnr=1.078
 ```
 
 Training lines show speed and the most recent val metrics:
 
 ```
-  24.9%  step=400  400/1604  1.38 it/s  visqol=3.821  sisdr=12.458  hfnr=0.968
+  24.9%  step=400  400/1604  1.38 it/s  visqol=3.913  sisdr=14.458  hfnr=0.968
 ```
 
-To run directly from the command line:
-
-```bash
-train --conf_dir configs/apollo_name.yaml
-```
-
-Each run creates a timestamped folder under `runs/<name>/<timestamp>/`. Set `resume: true` in your config to continue from the most recent checkpoint automatically.
+Each run creates a timestamped folder under `runs/apollo_name/<timestamp>/`. Set `resume: true` in your config to continue from the most recent checkpoint automatically or set `resume_checkpoint` to the exact checkpoint you wish to resume training from. If neither is set, the model will start training from thebase model.
 
 ### Checkpoints
 
-The best `keep_best` checkpoints by VISQOL and the latest `keep_latest` are kept; `interrupted.ckpt` is never removed. Set `keep_best: 0` to keep all. Each is named with full stats and a rank badge:
+Each checkpoint is named with full stats:
 
 ```
-[1]-step=001200-sisdr=12.470-visqol=3.940-hfnr=0.973.ckpt
-[2]-step=001100-sisdr=12.398-visqol=3.891-hfnr=0.975.ckpt
+step=001200-sisdr=12.470-visqol=3.940-hfnr=0.973.ckpt
+step=001100-sisdr=12.398-visqol=3.891-hfnr=0.975.ckpt
 ```
-
-`[1]` = best by VISQOL, with SI-SDR and then HFNR (closest to 1.0) as tiebreakers. Checkpoints saved under older names are renamed to this format on launch. The rank badges are updated after every new checkpoint save. Offline `evaluate.py` re-ranks the full set and can add additional metrics.
-
----
 
 ## Inference
 
-Open the TUI and select **Inference** to pick a config, model, and input file interactively. The model picker shows the **Latest checkpoint** (what training resumes from) and the **Best checkpoint** (rank `[1]` by the weighted composite score) as separate options. The TUI remembers your last-used settings per config. Batch processing runs all files in the input folder sequentially without prompting between files.
+Open the TUI and select **Inference** to pick a config, model, and input file interactively. The model picker shows the **Latest checkpoint** (what training resumes from) and the **Best checkpoint** by the weighted composite score) as separate options. The TUI remembers your last-used settings per config. Batch processing runs all files in the input folder sequentially without prompting between files.
 
 ### Spectral Merge (Ensemble Inference)
 
@@ -134,22 +125,6 @@ The inference engine can blend the original input with the enhanced output in th
 - **Low-end preserve** — applies `max_fft` below 700 Hz (original and enhanced blended by bin-wise maximum)
 - **Low-end + transition blend** — `max_fft` below 700 Hz + weighted average in the 15-22kHz transition band
 - **Custom JSON** — full band control via JSON input
-
-**Command-line flags:**
-
-```bash
-# Quick low-end preservation (crossover at 700 Hz)
-inference --in_wav input.wav --out_wav output.wav --conf_dir configs/apollo_stfl.yaml --low_end_preserve
-
-# Custom crossover frequency
-inference ... --low_end_preserve --low_end_hz 1000
-
-# Full ensemble control via JSON
-inference ... --ensemble '[{"lo":0,"hi":700,"mode":"max_fft","weight":1.0},{"lo":15000,"hi":22050,"mode":"avg","weight":0.6}]'
-
-# Auxiliary checkpoint blending
-inference ... --aux_weights runs/other/checkpoints/best.ckpt --aux_ensemble '[{"lo":8000,"hi":22050,"mode":"enhanced","weight":1.0}]'
-```
 
 **Blend modes per band:**
 - `max_fft` — bin-wise maximum magnitude (takes whichever of original or enhanced has more energy)
@@ -164,28 +139,7 @@ Each band also has a `weight` (0-1) that blends between the mode result and pure
 
 ## Config Reference
 
-Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yaml`. Copy and rename for each fine-tune. Local configs are not tracked by git.
-
-### Choosing Your Config: Lessons from Real Runs
-
-**Synthetic / noisy degradation (e.g., WMA→MP3 stacking, inconsistent encoding):**
-- Freeze 4 layers (`n_layers_to_freeze: 4`)
-- Keep batch size at 1 (`batch_size: 1`, `grad_accum_steps: 1`)
-- Disable noise augmentation (`noise.enabled: false`)
-- Set `val_check_interval` to 200-300 for cleaner metrics
-- Start with `band_weight_gain: 0`, enable after baseline
-
-**Real / consistent degradation (e.g., iTunes MP3s, single encoder fingerprint):**
-- Unfreeze all layers (`n_layers_to_freeze: 0`)
-- Can increase batch size to 2-4 (`batch_size: 2`, `grad_accum_steps: 2`)
-- Noise augmentation is safe (`noise.enabled: true`)
-- Start with `band_weight_gain: 0`, enable after baseline
-
-**General:**
-- Start with `band_weight_gain: 0` for a baseline run, then enable at 1.0-1.5 after you have a reference point
-- Use `val_songs` to match your validation set size
-- SI-SDR is noisy — use VISQOL as the primary signal; HFNR as a canary
-- HFNR climbing is not always a problem — it often means the model is synthesizing HF content. Watch for trend changes, not a hard threshold.
+Two base configs are included: `apollo.yaml` and `apollo_uni.yaml` as well as a few for custom projects like `apollo_stfl2` and `apollo_stfl_new.yaml`. Copy and rename for each fine-tune and change paremeters accordingly.
 
 ### exp
 
@@ -203,27 +157,27 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 | `cudnn_benchmark` | Benchmarks cuDNN conv algorithms on first batch. Leave `true` for fixed input shapes. |
 | `expandable_segments` | Reduces CUDA allocator fragmentation. Leave `true`. |
 | `triton_cache` | Caches compiled Triton kernels. Saves 30-60s on startup after first run. |
-| `ram_limit_fraction` | Fraction of system RAM at which the process exits cleanly. Default `0.95`. |
+| `ram_limit_fraction` | Fraction of system RAM at which the process exits cleanly. Default `0.98`. |
 
 ### training
 
 | Key | Description |
 |---|---|
-| `n_layers_to_freeze` | Freeze the first N BSNet layers. Apollo has 6 total. `4` is recommended for synthetic/noisy degradation; `0` for clean/consistent degradation like real iTunes encodes. |
+| `n_layers_to_freeze` | Freeze the first N BSNet layers. Apollo has 6 total. `4` is recommended for training the pretrained weights a new type of degradation as the model collapses quick attempting to train all layers at once on a small dataset. If you have a bigger one or feel like taking risks, you can experiment with lower values or progressively unfreezing more layers after the later ones are already mature.
 | `val_songs` | Number of val clips evaluated per val run. Each val song produces two 10-second clips, so with 3 val songs the pool has 6 clips and `val_songs: 6` uses all of them. Locked on the first val run and held fixed for the entire run. LQ/HQ/Restored triplets saved to `val_audio/` after each run. |
-| `val_rotate_every` | Steps between val song window rotation. Only meaningful when the val set is larger than `val_songs`. When the window rotates, the next clips are scored. Integer step count or omit to disable. |
+| `val_rotate_every` | Steps between val song window rotation which selects new pairs from the full folder. Only meaningful when the val set is larger than `val_songs`. For the clearest view possible, disabling this may be ideal unless you want to experiment with testing the model on different types of val inputs. Integer step count or omit to disable. |
 | `grad_accum_steps` | Accumulate gradients over N steps to simulate a larger batch without extra VRAM. |
 
 ### datas
 
 | Key | Description |
 |---|---|
-| `sr` | Sample rate. Fixed at `44100`. |
-| `segment_sec` | Chunk length in seconds. |
-| `batch_size` | Chunks per step. `1` is a safe starting point for noisy/synthetic degradation. |
-| `num_workers` | DataLoader workers. `2-4` recommended on 16 GB RAM. |
-| `pin_memory` | Set `false` on 16 GB systems. |
-| `align_data` | Fixed sample offset for encoder delay. Baked into WAV at conversion time. iTunes MP3s use `1057`. Set `false` to disable. |
+| `sr` | Sample rate. Fixed at `44100`. Changing this value requires training from scratch. |
+| `segment_sec` | Chunk length in seconds. If you have the VRAM, larger chunk lengths can potentially increase quality. |
+| `batch_size` | Chunks per step. If your dataset is extremely small, a value of `1` would be your best shot. For larger datasets, you can try 2-4 or raise until you OOM.|
+| `num_workers` | DataLoader workers. Can experiment for potential speed benefits. `2-4` tested as working on 16 GB RAM. |
+| `pin_memory` | Reccomended to set as `false` on 16 GB or low RAM systems as it can cause instability. You can try enabling it if you have 32 GB or more. |
+| `align_data` | Fixed sample offset for encoder delay if you know the exact value that the LQ files are misaligned by. Baked into WAV at conversion time. Set `false` to disable. |
 
 ### Augmentation
 
@@ -231,19 +185,18 @@ Two base configs are included: `configs/apollo.yaml` and `configs/apollo_uni.yam
 
 | Augmentation | Type | Notes |
 |---|---|---|
-| `stereo_alternation` | Live | Alternates L/R by sample index. Balanced stereo exposure without random channel collapse. Skipped if `mid_side_isolation` fires on the same chunk. |
+| `stereo_alternation` | Live | Alternates L/R channels respetively by sample index instead of feeding the network a mono mixdown. Adds data variety by balancing stereo exposure. Skipped if `mid_side_isolation` fires on the same chunk. |
 | `gain` | Live | Random gain shift applied identically to LQ and HQ. Never hard-clamps. |
 | `deep_gain` | Live | Large gain reduction (e.g. -10 to -6 dB) at low probability. Trains robustness to quiet passages. |
 | `silence_dip` | Live | Briefly fades signal toward silence with configurable ramp shapes. Trains robustness to dynamic dips. |
-| `polarity` | Live | Randomly flips signal polarity. |
-| `mid_side_isolation` | Live | Collapses the pair to mid `(L+R)/2` or side `(L-R)/2`, duplicated to both channels. Applied identically to LQ and HQ. Helps the model generalize to stereo field components. Rolls before stereo_alternation; if it fires, stereo_alternation is skipped. |
-| `noise` | Live | Matched Gaussian noise added to both LQ and HQ. **Do not use with fragile/synthetic degradation** — it pollutes the gradient signal. Safe for clean/consistent degradation. |
-| `pitch_shift` | Cached | Disabled recommended for codec restoration. |
-| `compression` | Cached | Generates the LQ chunks for songs that have no LQ file, each through its own random codec chain drawn from a recipe. Cached only; placing it under `live` is an error. |
+| `polarity` | Live | Randomly flips signal polarity. Cheat code for free data. You may get better results using controlled inversion on the data level, however, as in by inverting the second half a song where certain passages repeat and are identical. |
+| `mid_side_isolation` | Live | Collapses the pair to mid `(L+R)/2` or side `(L-R)/2`, duplicated to both channels. Applied identically to LQ and HQ. Helps the model generalize to stereo field components. This could potentially cause the model to overgeneralize inputs for non-mid-side-isolated audio. Rolls before stereo_alternation; if it fires, stereo_alternation is skipped. |
+| `noise` | Live | Matched Gaussian noise added to both LQ and HQ. **Do not use with codec degradation** as it pollutes the gradient signal. Safe for analog or other degradation types. |
+| `pitch_shift` | Cached | Can help add variety for certain data types. Disabled recommended for codec restoration. |
 
 #### compression
 
-Set under `augmentation.cached.compression`. Songs that have a file in `LQ/` are used as they are and are never encoded. Songs that exist only in `HQ/` get their LQ chunks generated: each chunk is encoded through a chain sampled from the recipe (MP3 and WMA, plus AAC, Vorbis, Opus, and MP2 when the recipe enables them; order, pass count, and CBR/VBR are drawn per chunk), then re-aligned to the source by measured delay. Requires `ffmpeg` with the encoders the recipe uses. A recipe can also mix Fraunhofer (`acmenc`) and LAME MP3 passes within one chain; set `external_codecs.acmenc` in the recipe to your `acmenc` executable.
+Set under `augmentation.cached.compression`. Songs that have a file in `LQ/` are used as they are and are never encoded. Songs that exist only in `HQ/` get their LQ chunks generated: each chunk is encoded through a chain sampled from the recipe (MP3 and WMA, plus AAC, Vorbis, Opus, and MP2 when the recipe enables them; order, pass count, and CBR/VBR are drawn per chunk), then re-aligned to the source by measured delay. Requires `ffmpeg` with the encoders the recipe uses. A recipe can also mix Fraunhofer (`acmenc`) (an older MP3 encoder much more common in the early days of the internet) and LAME MP3 passes within one chain; set `external_codecs.acmenc` in the recipe to your `acmenc` executable if you'd like to use it
 
 | Key | Description |
 |---|---|
@@ -252,29 +205,8 @@ Set under `augmentation.cached.compression`. Songs that have a file in `LQ/` are
 | `seed` | Seed for chain sampling. Each chunk is seeded from the seed, file name, and chunk index. |
 | `pad_sec` | Seconds of surrounding audio encoded with each chunk and discarded after alignment. |
 | `workers` | Threads used while chunking. `0` uses CPU count minus 1. |
-| `acmenc` | Path to a local `acmenc` executable. Only needed for recipes that draw Fraunhofer MP3 passes, e.g. `utils/degrade/stfl.json`. Overrides `external_codecs.acmenc` in the recipe. |
 
 Songs without an LQ file need the `LQ/` and `HQ/` folder layout, with the song in `HQ/` only. Chunks whose chain fails the recipe's alignment or silence checks are left unencoded. A summary of compressed and rejected chunks is printed after chunking. The compression settings are part of the chunk cache key.
-
-### loss_g (band weight)
-
-| Key | Description |
-|---|---|
-| `band_weight_shape` | `gaussian` or `trapezoid`. |
-| `band_weight_center_hz` | Gaussian only. Center frequency of the penalty bump in Hz. Default `15000`. |
-| `band_weight_sigma_hz` | Gaussian only. Width of the bump (1-sigma) in Hz. Default `3000`. |
-| `band_weight_lo_hz` | Trapezoid only. Low edge of the boosted band in Hz. Default `4500`. |
-| `band_weight_hi_hz` | Trapezoid only. High edge of the boosted band in Hz. Default `18500`. |
-| `band_weight_ramp_hz` | Trapezoid only. Width of the soft ramp at each edge in Hz. Default `1500`. |
-| `band_weight_gain` | Peak gain above baseline. `0` = flat loss regardless of shape. |
-
-`gaussian` adds a bump centered on one frequency — good for a targeted HF push. `trapezoid` targets a flat band with soft edges — useful for a known codec rolloff zone. Start with `gain: 0` for a baseline run.
-
-### discriminator
-
-| Key | Description |
-|---|---|
-| `window_weight_boost` | Biases discriminator toward HF detail. Leave `false` for mildly degraded sources. |
 
 ### model
 
@@ -288,42 +220,26 @@ Songs without an LQ file need the `LQ/` and `HQ/` folder layout, with the song i
 
 | Key | Description |
 |---|---|
-| `type` | `adamw`, `gefen` (recommended — lower memory, faster steps; `uv pip install gefen`), `gefen_muon` (same as `gefen` for Apollo — no 2D params), `adamw_8bit` (bitsandbytes). |
-| `lr_g` | Generator learning rate. `3e-6` recommended for fine-tuning close to the target distribution; `1e-5` for more aggressive adaptation. |
-| `lr_d` | Discriminator learning rate. Keep ~10x lower than `lr_g`. |
+| `type` | `adamw`,  (recommended), `adamw_8bit` (lower memory footprint). |
+| `lr_g` | Generator learning rate. |
+| `lr_d` | Discriminator learning rate. |
 | `betas_g` | Generator Adam betas. Default `[0.9, 0.999]`. |
-| `betas_d` | Discriminator Adam betas. Default `[0.5, 0.99]` — classic GAN recommendation. |
+| `betas_d` | Discriminator Adam betas. Default `[0.5, 0.99]` |
 
 ### system
 
 | Key | Description |
 |---|---|
 | `gradient_checkpointing` | Recomputes activations during backward. Saves 30-40% VRAM at ~30% compute cost. |
-| `visqol_fraction` | Fraction of val songs to score with VISQOL per val run. `1.0` = all. Requires `visqol-python` (`uv pip install "visqol-python[all]"`); silently skipped and logged as -1 if not installed. Default `1.0`. |
 
 ### checkpoint and trainer
 
 | Key | Description |
 |---|---|
-| `val_check_interval` | Validate every N training steps. |
-| `limit_val_batches` | Cap on the fixed chunk batch used for the sisdr computation. `1.0` uses all of it. |
-| `max_epochs` | Hard epoch cap. |
+| `val_check_interval` | Validate every N training steps, compute metrics and save preview audio. |
+| `limit_val_batches` | Cap on the fixed chunk batch used for the computation. `1.0` uses all of it. |
+| `max_epochs` | Hard epoch cap for training. |
 | `precision` | `16-mixed` for fp16 mixed precision. |
-
----
-
-## Lessons Learned (Quick Reference)
-
-- **Frozen layers** — `4` for synthetic/noisy degradation; `0` for clean/consistent degradation.
-- **Augmentation** — noise augmentation harms fragile/synthetic degradation; safe for clean degradation.
-- **Batch size** — smaller (`1`) stabilizes training on noisy degradation; larger (`2-4`) works for clean degradation.
-- **TF32** — disable for GAN training on spectral data; precision loss matters.
-- **Training step order** — discriminator first, fresh feature maps for generator loss. Do not reuse feature maps.
-- **SI-SDR** — noisy and misleading for restoration tasks. Use VISQOL as the primary signal; HFNR as a canary.
-- **HFNR** — watch for trend changes, not absolute threshold. Rising HFNR with stable VISQOL is fine.
-- **Encoder fingerprint** — real encoder output beats synthetic approximation. Match the encoder version exactly.
-
----
 
 ## Credits
 
