@@ -57,13 +57,13 @@ On first run, sources are converted to WAV and chunked into fixed-length segment
 
 ### Generate LQ
 
-Apollo-mod can build the degraded (LQ) half of a pair for you. It takes a clean HQ song and runs it through a chain of lossy codecs, for example WMA followed by several MP3 encodes at different bitrates, and the result becomes that song's LQ. You can train on HQ/LQ pairs without ever having a degraded copy of the song.
+For HQ songs that do not have an accompanying pre-prepared LQ file, Apollo-mod can build the degraded half of a pair for you using it's compression and degredation tools. Within /utils/degrade/, you can create custom configurations or 'recipes' for the type of codec degreadation you want, with broad support for layering different codecs, randomizing bitrates, setting percentages and likelihoods and other encoding settings.
 
-**The recipe.** A recipe is a JSON file that describes the degradation you want as odds instead of one fixed chain: which codecs to use, how many times to re-encode, which bitrates and quality settings are likely, and what the last step is. For every chunk of audio, Apollo-mod rolls against the recipe and builds a different chain, so the model sees a range of the degradation instead of one exact copy. Supported codecs are MP3 (LAME or Fraunhofer), WMA, AAC, Vorbis, Opus, and MP2. `utils/degrade/stfl.json` is the included example (WMA, then several MP3 passes, finishing at 192 kbps CBR). Copy it and change the numbers to match your own material.
+The recipe sits in a JSON file that describes the degradation you want as odds instead of one fixed chain. For every chunk of audio, Apollo-mod can roll against the recipe for each generated chunk so the model sees a range of the degradation, which can make the model more robust to tiny changes you can't account for otherwise. Supported codecs are MP3 (LAME or Fraunhofer), WMA, AAC, Vorbis, Opus, and MP2. `utils/degrade/stfl.json` is the included example (WMA, then several MP3 passes, finishing at 192 kbps CBR). Copy it and change the numbers to match your own material.
 
-**Using it.** Put a clean song in `HQ/` with no matching file in `LQ/` and turn on the [compression](#compression) block in your config, pointing it at your recipe. The generated LQ is aligned to the HQ automatically, so no `align_data` offset is needed. Songs that already have an LQ file are used as they are, so real pairs and generated ones can share a folder. It works for `val/` too. If you would rather have the degraded files written out ahead of time, the **Degrade audio** utility in the TUI can use the same recipes.
+To use it, put a clean song in `HQ/` with no matching file in `LQ/` and turn on the [compression](#compression) block in your config, pointing it at your recipe. The generated LQ passes are automatically aligned no matter how severe the compression. **Songs that already have an LQ file are used as they are, so real pairs and generated ones can share a folder.** This functionality also works for `val/` as well.
 
-This only helps when the degradation you are restoring can be reproduced by a codec chain. For anything else, supply your own LQ files.
+This only helps when the degradation you are restoring can be reproduced by a codec chain. **For anything else, supply your own LQ files.**
 
 ### Validation Guidelines
 
