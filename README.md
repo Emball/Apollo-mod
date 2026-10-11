@@ -71,35 +71,28 @@ This only helps when the degradation you are restoring can be reproduced by a co
 
 ### Validation System
 
-On the first val run, `val_songs` songs are selected from the full val set and their file paths are locked in training until the val set changes. `val_rotate_every` allows the model to select a different set of val clips from the full val folder based on the configured step count. 
+On the first val run, `val_songs` clips (two per val song, see below) are selected from the full val set and locked in training until the val set changes. `val_rotate_every` allows the model to select a different set of val clips from the full val folder based on the configured step count. 
 
-Each val song is cut into two 10-second clips taken from its highest-energy sections to follow guidelines for metric calculations. Every val run scores VISQOL, SI-SDR, and HFNR on those same clips, and writes the LQ/HQ/Restored triplets to `runs/<timestamp>/apollo_name/val_audio/` so you can listen and judge quality directly after every validation. 
+Each val song is cut into two 10-second clips taken from its highest-energy sections to follow guidelines for metric calculations. Every val run scores VISQOL, SI-SDR, and HFNR on those same clips, and writes the LQ/HQ/Restored triplets to `runs/apollo_name/<timestamp>/val_audio/` so you can listen and judge quality directly after every validation. 
 
-Because the same clips are used throughout, scores are directly comparable across every checkpoint. If your val set is larger than `val_songs`, the active window rotates on `val_rotate_every` steps and the console prints a summary of the best metrics from the previous window before switching.
+Because the same clips are used throughout, scores are directly comparable across checkpoints for as long as the clips stay the same. If your val set is larger than `val_songs` and `val_rotate_every` is set, the active window rotates on that step interval and the console prints a summary of the best metrics from the previous window before switching. `visqol` is not comparable across windows; use `visqol_gain` for that.
 
 ### Validation Metrics
 
-After each val run the console prints metrics like this:
-
-```
-  [val] visqol=3.821  sisdr=12.458  hfnr=0.968  (18.8s)
-```
+After each val run the training progress line (see Training) shows the latest metrics. All of them are logged to TensorBoard.
 
 - **visqol** — Perceptual quality score (0-5) that approximates human perception. Higher is better.
 - **sisdr** — Waveform fidelity. Higher is better. 
 - **hfnr** — High-frequency noise ratio. Rising is expected for MP3 restoration, so lower may not always be better.
+- **visqol_gain** — ViSQOL of the restored clips minus ViSQOL of the LQ clips, over the same clips. Logged to TensorBoard only. Unlike `visqol`, it stays comparable when the val window rotates.
 
 ---
 
 ## Training
 
-Run `apollo.bat` (Windows) or `./apollo.sh` (Linux/macOS) to open the TUI. Select **Train**, choose your config, and training starts immediately with live output in the terminal. Ctrl+C stops training cleanly, saves a checkpoint, and returns to the menu.
+Run `apollo.bat` (Windows) or `./apollo.sh` (Linux/macOS) to open the TUI. Select **Train**, choose your config, and training starts immediately with live output in the terminal. Ctrl+C saves an `interrupted` checkpoint at the next safe point and returns to the menu; a second Ctrl+C quits immediately without saving.
 
-Before training begins, a baseline val pass runs on the pretrained weights so you have a reference point:
-
-```
-[baseline] visqol=3.821  sisdr=13.567  hfnr=1.078
-```
+Before a fresh run begins, a baseline val pass runs on the pretrained weights so you have a reference point. Its metrics appear on the progress line until the first real val run.
 
 Training lines show speed and the most recent val metrics:
 
@@ -107,7 +100,7 @@ Training lines show speed and the most recent val metrics:
   24.9%  step=400  400/1604  1.38 it/s  visqol=3.913  sisdr=14.458  hfnr=0.968
 ```
 
-Each run creates a timestamped folder under `runs/apollo_name/<timestamp>/`. Set `resume: true` in your config to continue from the most recent checkpoint automatically or set `resume_checkpoint` to the exact checkpoint you wish to resume training from. If neither is set, the model will start training from thebase model.
+Each run creates a timestamped folder under `runs/apollo_name/<timestamp>/`. Set `resume: true` in your config to continue from the most recent checkpoint automatically or set `resume_checkpoint` to the exact checkpoint you wish to resume training from. If neither is set, the model will start training from the base model.
 
 ### Checkpoints
 
@@ -118,9 +111,12 @@ step=001200-sisdr=12.470-visqol=3.940-hfnr=0.973.ckpt
 step=001100-sisdr=12.398-visqol=3.891-hfnr=0.975.ckpt
 ```
 
+The best `keep_best` checkpoints by VISQOL and the latest `keep_latest` are kept (`10` and `3` in the shipped configs). Interrupted checkpoints are never removed. Set `keep_best: 0` to keep everything.
+
+Select **Evaluate** in the TUI to rank every checkpoint in a run on the val clips used in training. Metrics already in a checkpoint's filename are reused. Pass `--recompute` on the command line to rescore every checkpoint under the current val protocol, which is needed to compare checkpoints saved before protocol 2.
 ## Inference
 
-Open the TUI and select **Inference** to pick a config, model, and input file interactively. The model picker shows the **Latest checkpoint** (what training resumes from) and the **Best checkpoint** by the weighted composite score) as separate options. The TUI remembers your last-used settings per config. Batch processing runs all files in the input folder sequentially without prompting between files.
+Open the TUI and select **Inference** to pick a config, model, and input file interactively. The model picker shows the **Latest checkpoint** (what training resumes from) and the **Best checkpoint** (highest VISQOL, with SI-SDR and then HFNR closest to 1.0 as tiebreakers) as separate options. The TUI remembers your last-used settings per config. Batch processing runs all files in the input folder sequentially without prompting between files.
 
 ### Spectral Merge (Ensemble Inference)
 
@@ -145,7 +141,7 @@ Each band also has a `weight` (0-1) that blends between the mode result and pure
 
 ## Config Reference
 
-Two base configs are included: `apollo.yaml` and `apollo_uni.yaml` as well as a few for custom projects like `apollo_stfl2` and `apollo_stfl_new.yaml`. Copy and rename for each fine-tune and change paremeters accordingly.
+Two base configs are included: `apollo.yaml` and `apollo_uni.yaml` as well as a few for custom projects like `apollo_stfl2` and `apollo_stfl_new.yaml`. Copy and rename for each fine-tune and change parameters accordingly.
 
 ### exp
 
@@ -169,9 +165,9 @@ Two base configs are included: `apollo.yaml` and `apollo_uni.yaml` as well as a 
 
 | Key | Description |
 |---|---|
-| `n_layers_to_freeze` | Freeze the first N BSNet layers. Apollo has 6 total. `4` is recommended for training the pretrained weights a new type of degradation as the model collapses quick attempting to train all layers at once on a small dataset. If you have a bigger one or feel like taking risks, you can experiment with lower values or progressively unfreezing more layers after the later ones are already mature.
+| `n_layers_to_freeze` | Freeze the first N BSNet layers. Apollo has 6 total. `4` is recommended for training the pretrained weights a new type of degradation as the model collapses quick attempting to train all layers at once on a small dataset. If you have a bigger one or feel like taking risks, you can experiment with lower values or progressively unfreezing more layers after the later ones are already mature. Changing the value on resume is supported: saved optimizer state is carried over for every layer that still matches, and newly unfrozen layers start fresh (the console prints `[resume] The generator trainable parameters changed ...`). |
 | `val_songs` | Number of val clips evaluated per val run. Each val song produces two 10-second clips, so with 3 val songs the pool has 6 clips and `val_songs: 6` uses all of them. Locked on the first val run and held fixed for the entire run. LQ/HQ/Restored triplets saved to `val_audio/` after each run. |
-| `val_rotate_every` | Steps between val song window rotation which selects new pairs from the full folder. Only meaningful when the val set is larger than `val_songs`. For the clearest view possible, disabling this may be ideal unless you want to experiment with testing the model on different types of val inputs. Integer step count or omit to disable. |
+| `val_rotate_every` | Steps between val song window rotation which selects new pairs from the full folder. Only meaningful when the val set is larger than `val_songs`. For the clearest view possible, disabling this may be ideal unless you want to experiment with testing the model on different types of val inputs. Integer step count, or `auto`/omit to disable. |
 | `grad_accum_steps` | Accumulate gradients over N steps to simulate a larger batch without extra VRAM. |
 
 ### datas
@@ -182,7 +178,7 @@ Two base configs are included: `apollo.yaml` and `apollo_uni.yaml` as well as a 
 | `segment_sec` | Chunk length in seconds. If you have the VRAM, larger chunk lengths can potentially increase quality. |
 | `batch_size` | Chunks per step. If your dataset is extremely small, a value of `1` would be your best shot. For larger datasets, you can try 2-4 or raise until you OOM.|
 | `num_workers` | DataLoader workers. Can experiment for potential speed benefits. `2-4` tested as working on 16 GB RAM. |
-| `pin_memory` | Reccomended to set as `false` on 16 GB or low RAM systems as it can cause instability. You can try enabling it if you have 32 GB or more. |
+| `pin_memory` | Recommended to set as `false` on 16 GB or low RAM systems as it can cause instability. You can try enabling it if you have 32 GB or more. |
 | `align_data` | Fixed sample offset for encoder delay if you know the exact value that the LQ files are misaligned by. Baked into WAV at conversion time. Set `false` to disable. |
 
 ### compression
@@ -205,14 +201,12 @@ Chunks whose chain fails the recipe's alignment or silence checks are dropped, n
 
 | Augmentation | Type | Notes |
 |---|---|---|
-| `stereo_alternation` | Live | Alternates L/R channels respetively by sample index instead of feeding the network a mono mixdown. Adds data variety by balancing stereo exposure. Skipped if `mid_side_isolation` fires on the same chunk. |
+| `stereo_alternation` | Live | Alternates L/R channels respectively by sample index instead of feeding the network a mono mixdown. Adds data variety by balancing stereo exposure. Skipped if `mid_side_isolation` fires on the same chunk. |
 | `gain` | Live | Random gain shift applied identically to LQ and HQ. Never hard-clamps. |
 | `deep_gain` | Live | Large gain reduction (e.g. -10 to -6 dB) at low probability. Trains robustness to quiet passages. |
 | `silence_dip` | Live | Briefly fades signal toward silence with configurable ramp shapes. Trains robustness to dynamic dips. |
 | `polarity` | Live | Randomly flips signal polarity. Cheat code for free data. You may get better results using controlled inversion on the data level, however, as in by inverting the second half a song where certain passages repeat and are identical. |
 | `mid_side_isolation` | Live | Collapses the pair to mid `(L+R)/2` or side `(L-R)/2`, duplicated to both channels. Applied identically to LQ and HQ. Helps the model generalize to stereo field components. This could potentially cause the model to overgeneralize inputs for non-mid-side-isolated audio. Rolls before stereo_alternation; if it fires, stereo_alternation is skipped. |
-| `noise` | Live | Matched Gaussian noise added to both LQ and HQ. **Do not use with codec degradation** as it pollutes the gradient signal. Safe for analog or other degradation types. |
-| `pitch_shift` | Cached | Can help add variety for certain data types. Disabled recommended for codec restoration. |
 
 ### model
 
@@ -226,7 +220,7 @@ Chunks whose chain fails the recipe's alignment or silence checks are dropped, n
 
 | Key | Description |
 |---|---|
-| `type` | `adamw`,  (recommended), `adamw_8bit` (lower memory footprint). |
+| `type` | `adamw` (default), `adamw_8bit` (lower memory footprint; needs bitsandbytes), `gefen` and `gefen_muon` (lower memory, faster steps; need `uv pip install gefen`). |
 | `lr_g` | Generator learning rate. |
 | `lr_d` | Discriminator learning rate. |
 | `betas_g` | Generator Adam betas. Default `[0.9, 0.999]`. |
@@ -244,6 +238,8 @@ Chunks whose chain fails the recipe's alignment or silence checks are dropped, n
 |---|---|
 | `val_check_interval` | Validate every N training steps, compute metrics and save preview audio. |
 | `limit_val_batches` | Cap on the fixed chunk batch used for the computation. `1.0` uses all of it. |
+| `keep_best` | Under `checkpoint`. Number of best checkpoints (by VISQOL) to keep. `0` keeps all. |
+| `keep_latest` | Under `checkpoint`. Number of most recent checkpoints to keep. |
 | `max_epochs` | Hard epoch cap for training. |
 | `precision` | `16-mixed` for fp16 mixed precision. |
 

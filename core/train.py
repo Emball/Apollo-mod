@@ -53,12 +53,12 @@ def apply_optimizations(cfg: DictConfig) -> None:
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
     # RAM watchdog -- kills the process cleanly if system RAM crosses the threshold
-    # before the OS does it violently. Threshold is a fraction of total RAM (default 90%).
-    ram_limit = opt.get("ram_limit_fraction", 0.90)
+    # before the OS does it violently. Threshold is a fraction of total RAM (default 98%).
+    ram_limit = opt.get("ram_limit_fraction", 0.98)
     _start_ram_watchdog(ram_limit)
 
 
-def _start_ram_watchdog(limit_fraction: float = 0.90) -> None:
+def _start_ram_watchdog(limit_fraction: float = 0.98) -> None:
     """Background thread that monitors system RAM and exits cleanly if usage
     crosses limit_fraction of total RAM. Prevents OS-level crashes from
     DataLoader workers or CUDA allocator runaway."""
@@ -2017,7 +2017,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             try:
                 import psutil as _ps
                 _vm = _ps.virtual_memory()
-                _headroom = (_vm.total * cfg.get("optimizations", {}).get("ram_limit_fraction", 0.95)) - _vm.used
+                _headroom = (_vm.total * cfg.get("optimizations", {}).get("ram_limit_fraction", 0.98)) - _vm.used
                 if _headroom < 1.5 * (1024 ** 3):
                     print_only(f"[baseline] Skipped -- only {_headroom/(1024**3):.1f} GB RAM headroom.")
                     _baseline_ok = False
