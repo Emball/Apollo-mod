@@ -115,12 +115,12 @@ step=001200-sisdr=12.470-visqol=3.940-hfnr=0.973.ckpt
 step=001100-sisdr=12.398-visqol=3.891-hfnr=0.975.ckpt
 ```
 
-The best `keep_best` checkpoints by VISQOL and the latest `keep_latest` are kept (`10` and `3` in the shipped configs). Interrupted checkpoints are never removed. Set `keep_best: 0` to keep everything.
+The best `keep_best` checkpoints by VISQOL and the latest `keep_latest` are kept (`10` and `3` in the shipped configs). VISQOL is only compared between checkpoints scored on the same val clips and rotation window, so changing your val set does not push the new checkpoints out behind the old ones. Interrupted checkpoints are never removed. Set `keep_best: 0` to keep everything.
 
 Select **Evaluate** in the TUI to rank every checkpoint in a run on the val clips used in training. Metrics already in a checkpoint's filename are reused. Pass `--recompute` on the command line to rescore every checkpoint under the current val protocol, which is needed to compare checkpoints saved before protocol 2.
 ## Inference
 
-Open the TUI and select **Inference** to pick a config, model, and input file interactively. The model picker shows the **Latest checkpoint** (what training resumes from) and the **Best checkpoint** (highest VISQOL, with SI-SDR and then HFNR closest to 1.0 as tiebreakers) as separate options. The TUI remembers your last-used settings per config. Batch processing runs all files in the input folder sequentially without prompting between files.
+Open the TUI and select **Inference** to pick a config, model, and input file interactively. The model picker shows the **Latest checkpoint** (what training resumes from) and the **Best checkpoint** (highest VISQOL among checkpoints scored on the same val set as the latest one, with SI-SDR and then HFNR closest to 1.0 as tiebreakers) as separate options. The TUI remembers your last-used settings per config. Batch processing runs all files in the input folder sequentially without prompting between files.
 
 ### Spectral Merge (Ensemble Inference)
 
@@ -243,7 +243,7 @@ Chunks whose chain fails the recipe's alignment or silence checks are dropped, n
 |---|---|
 | `val_check_interval` | Validate every N training steps, compute metrics and save preview audio. |
 | `limit_val_batches` | Cap on the fixed chunk batch used for the computation. `1.0` uses all of it. |
-| `keep_best` | Under `checkpoint`. Number of best checkpoints (by VISQOL) to keep. `0` keeps all. |
+| `keep_best` | Under `checkpoint`. Number of best checkpoints (by VISQOL) to keep for each val set and rotation window. `0` keeps all. |
 | `keep_latest` | Under `checkpoint`. Number of most recent checkpoints to keep. |
 | `max_epochs` | Hard epoch cap for training. |
 | `precision` | `16-mixed` for fp16 mixed precision. |
