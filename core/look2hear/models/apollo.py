@@ -194,6 +194,7 @@ class Apollo(BaseModel):
         self.band_width = [bandwidth]*79
         self.band_width.append(self.enc_dim - np.sum(self.band_width))
         self.nband = len(self.band_width)
+        self._n_uniform = self.nband if self.band_width[-1] == self.band_width[0] else self.nband - 1
 
         self.BN = nn.ModuleList([])
         for i in range(self.nband):
@@ -214,48 +215,60 @@ class Apollo(BaseModel):
                                                 )
                                   )
 
-    def spec_band_split(self, input):
+    def _rms(self, x, weight, dim):
+        xf = x.float()
+        xn = xf * torch.rsqrt(xf.pow(2).mean(dim, keepdim=True) + 1e-5)
+        return xn.type_as(x) * weight
 
+    def _stack(self, modules, getter):
+        return torch.stack([getter(m) for m in modules], 0)
+
+    def _band_proj(self, x, norm_w, conv_w, conv_b):
+        # x: B, K, C, T with one weight set per band K
+        x = self._rms(x, norm_w.unsqueeze(0).unsqueeze(-1), 2)
+        return torch.einsum("bkct,kfc->bkft", x, conv_w) + conv_b.unsqueeze(0).unsqueeze(-1)
+
+    def feature_extractor(self, input):
         B, nch, nsample = input.shape
 
         # cuFFT doesn't support half precision for non-power-of-two sizes,
-        # so we cast to float32 for the STFT and back afterward.
-        input_f32 = input.float()
-        spec = torch.stft(input_f32.view(B*nch, nsample), n_fft=self.win, hop_length=self.stride,
+        # so the STFT runs in float32.
+        spec = torch.stft(input.float().view(B*nch, nsample), n_fft=self.win, hop_length=self.stride,
                           window=self.hann_win, return_complex=True)
+        T = spec.shape[-1]
+        nu, bw = self._n_uniform, self.band_width[0]
 
-        subband_spec = []
-        subband_spec_norm = []
-        subband_power = []
-        band_idx = 0
-        for i in range(self.nband):
-            this_spec = spec[:,band_idx:band_idx+self.band_width[i]]
-            subband_spec.append(this_spec)  # B, BW, T
-            subband_power.append((this_spec.abs().pow(2).sum(1) + self.eps).sqrt().unsqueeze(1))  # B, 1, T
-            subband_spec_norm.append(torch.complex(this_spec.real / subband_power[-1], this_spec.imag / subband_power[-1]))  # B, BW, T
-            band_idx += self.band_width[i]
-        subband_power = torch.cat(subband_power, 1)  # B, nband, T
+        parts = []
+        if nu > 0:
+            u = spec[:, :nu*bw].reshape(B*nch, nu, bw, T)
+            power = (u.abs().pow(2).sum(2) + self.eps).sqrt()  # B, nu, T
+            un = u / power.unsqueeze(2)
+            feat = torch.cat([un.real, un.imag, torch.log(power).unsqueeze(2)], 2)  # B, nu, 2*bw+1, T
+            bn = [self.BN[i] for i in range(nu)]
+            parts.append(self._band_proj(
+                feat,
+                self._stack(bn, lambda m: m[0].weight),
+                self._stack(bn, lambda m: m[1].weight.squeeze(-1)),
+                self._stack(bn, lambda m: m[1].bias)))
+        if nu < self.nband:
+            t = spec[:, nu*bw:]
+            power = (t.abs().pow(2).sum(1, keepdim=True) + self.eps).sqrt()  # B, 1, T
+            tn = t / power
+            feat = torch.cat([tn.real, tn.imag, torch.log(power)], 1).unsqueeze(1)  # B, 1, 2*bw_t+1, T
+            bn = self.BN[nu]
+            parts.append(self._band_proj(
+                feat, bn[0].weight.unsqueeze(0), bn[1].weight.squeeze(-1).unsqueeze(0), bn[1].bias.unsqueeze(0)))
+        return torch.cat(parts, 1)  # B, nband, N, T
 
-        return subband_spec_norm, subband_power
+    def _band_head(self, feat, norm_w, conv_w, conv_b, bw):
+        # feat: B, K, N, T -> real, imag each B, K, bw, T
+        x = self._rms(feat, norm_w.unsqueeze(0).unsqueeze(-1), 2)
+        x = torch.einsum("bknt,kon->bkot", x, conv_w) + conv_b.unsqueeze(0).unsqueeze(-1)
+        a, g = x.chunk(2, dim=2)
+        x = a * torch.sigmoid(g)
+        x = x.reshape(x.shape[0], x.shape[1], 2, bw, x.shape[-1])
+        return x[:, :, 0], x[:, :, 1]
 
-    def feature_extractor(self, input):
-        
-        subband_spec_norm, subband_power = self.spec_band_split(input)
-        
-        # normalization and bottleneck
-        # .real and .imag on complex tensors return non-contiguous views;
-        # make them contiguous before torch.cat / compiled kernels to avoid
-        # inductor stride assertion errors.
-        subband_feature = []
-        for i in range(self.nband):
-            real = subband_spec_norm[i].real.contiguous()
-            imag = subband_spec_norm[i].imag.contiguous()
-            concat_spec = torch.cat([real, imag, torch.log(subband_power[:,i].unsqueeze(1))], 1)
-            subband_feature.append(self.BN[i](concat_spec))
-        subband_feature = torch.stack(subband_feature, 1)  # B, nband, N, T
-
-        return subband_feature
-        
     def forward(self, input):
 
         B, nch, nsample = input.shape
@@ -263,16 +276,30 @@ class Apollo(BaseModel):
         subband_feature = self.feature_extractor(input)
         feature = self.net(subband_feature)
 
-        est_spec = []
-        for i in range(self.nband):
-            this_RI = self.output[i](feature[:,i]).view(B*nch, 2, self.band_width[i], -1)
-            est_spec.append(torch.complex(this_RI[:,0], this_RI[:,1]))
-        est_spec = torch.cat(est_spec, 1)
-        output = torch.istft(est_spec.to(torch.complex64), n_fft=self.win, hop_length=self.stride,
+        nu, bw = self._n_uniform, self.band_width[0]
+        real, imag = [], []
+        if nu > 0:
+            out = [self.output[i] for i in range(nu)]
+            r, im = self._band_head(
+                feature[:, :nu],
+                self._stack(out, lambda m: m[0].weight),
+                self._stack(out, lambda m: m[1].weight.squeeze(-1)),
+                self._stack(out, lambda m: m[1].bias), bw)
+            real.append(r.reshape(r.shape[0], nu*bw, -1))
+            imag.append(im.reshape(im.shape[0], nu*bw, -1))
+        if nu < self.nband:
+            head = self.output[nu]
+            r, im = self._band_head(
+                feature[:, nu:], head[0].weight.unsqueeze(0), head[1].weight.squeeze(-1).unsqueeze(0),
+                head[1].bias.unsqueeze(0), self.band_width[nu])
+            real.append(r[:, 0])
+            imag.append(im[:, 0])
+        est_spec = torch.complex(torch.cat(real, 1).float(), torch.cat(imag, 1).float())
+        output = torch.istft(est_spec, n_fft=self.win, hop_length=self.stride,
                              window=self.hann_win, length=nsample).view(B, nch, -1).to(input.dtype)
-        
+
         return output
-    
+
     def get_model_args(self):
         model_args = {"n_sample_rate": 2}
         return model_args
