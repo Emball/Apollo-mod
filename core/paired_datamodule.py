@@ -443,7 +443,6 @@ class PairedAudioDataModule(LightningDataModule):
         num_workers: int = 4,
         pin_memory: bool = True,
         augmentation: Optional[dict] = None,
-        val_bootstrap_chunks: int = 50,
         **kwargs,  # absorb train-only keys (e.g. align_data) passed via Hydra
     ):
         super().__init__()
@@ -455,7 +454,6 @@ class PairedAudioDataModule(LightningDataModule):
         self.num_workers          = num_workers
         self.pin_memory           = pin_memory
         self.aug_cfg              = _parse_aug_cfg(augmentation)
-        self.val_bootstrap_chunks = val_bootstrap_chunks
 
         self.data_train: Optional[Dataset] = None
         self.data_val:   Optional[Dataset] = None

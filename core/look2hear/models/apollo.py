@@ -69,20 +69,6 @@ class Roformer(nn.Module):
 
         return cos_freq, sin_freq
     
-    def _add_rotary_emb(self, feature, pos):
-        # feature shape: ..., N
-        N = feature.shape[-1]
-
-        feature_reshape = feature.reshape(-1, N)
-        pos = min(pos, self.window-1)
-        cos_freq = self.cos_freq[pos]
-        sin_freq = self.sin_freq[pos]
-        reverse_sign = self.reverse_sign.to(feature.dtype)
-        feature_reshape_neg = (torch.flip(feature_reshape.reshape(-1, N//2, 2), [-1]) * reverse_sign.reshape(1, 1, 2)).reshape(-1, N)
-        feature_rope = feature_reshape * cos_freq.unsqueeze(0) + feature_reshape_neg * sin_freq.unsqueeze(0)
-    
-        return feature_rope.reshape(feature.shape)
-
     def _add_rotary_sequence(self, feature):
         # feature shape: ..., T, N
         T, N = feature.shape[-2:]

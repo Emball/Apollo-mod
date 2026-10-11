@@ -28,9 +28,9 @@ rich==13.7.0
 visqol-python[all]==3.8.0
 
 # Misc
-psutil
+psutil==7.2.2
 sympy==1.12
 packaging==23.2
 setuptools>=68.0.0,<71
 bitsandbytes>=0.43.0; sys_platform != 'darwin'
-gefen
+gefen==1.2.3

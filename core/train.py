@@ -1238,12 +1238,13 @@ def prepare_data(cfg: DictConfig) -> None:
                 song_key = parts[0] if len(parts) == 2 and parts[1].replace(".wav","").isdigit() else fname
                 song_chunks[song_key].append(fname)
 
-            songs = list(song_chunks.keys())
-            _random.shuffle(songs)
+            _rng = _random.Random(0)
+            songs = sorted(song_chunks.keys())
+            _rng.shuffle(songs)
 
             selected = []
             # Round-robin across songs until we have enough
-            song_iters = {s: iter(_random.sample(song_chunks[s], len(song_chunks[s]))) for s in songs}
+            song_iters = {s: iter(_rng.sample(sorted(song_chunks[s]), len(song_chunks[s]))) for s in songs}
             while len(selected) < n_bootstrap:
                 progress = False
                 for song in songs:
