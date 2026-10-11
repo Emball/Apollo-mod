@@ -28,6 +28,7 @@ datas:
   pin_memory: false
   val_bootstrap_chunks: 15
   align_data: false
+  cache_retention_days: 30
   compression:
     enabled: false
     recipe: utils/degrade/stfl.json

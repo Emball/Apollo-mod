@@ -674,6 +674,65 @@ def _chunk_cache_lookup(key: str, split: str) -> str | None:
 
 
 
+def _touch(path: str) -> None:
+    """Mark a cache entry as used now. A directory gets a .last_used marker file."""
+    try:
+        if os.path.isdir(path):
+            marker = os.path.join(path, ".last_used")
+            with open(marker, "a"):
+                pass
+            os.utime(marker, None)
+        else:
+            os.utime(path, None)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        print_only(f"[cache] Could not mark {os.path.basename(path)} as used: {e}")
+
+
+def _entry_size(path: str) -> int:
+    if os.path.isfile(path):
+        return os.path.getsize(path)
+    return sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(path) for f in fs)
+
+
+def _prune_usr_cache(max_age_days, cache_dir: str = None) -> None:
+    """Delete converted source WAVs and chunk sets not used for max_age_days. 0 disables."""
+    import re, shutil, time
+    if not max_age_days or float(max_age_days) <= 0:
+        return
+    cache_dir = cache_dir or _CACHE_DIR
+    cutoff    = time.time() - float(max_age_days) * 86400
+    src_re, key_re = re.compile(r"^[0-9a-f]{32}(_t\d+)?\.wav$"), re.compile(r"^[0-9a-f]{16}$")
+
+    entries = []
+    if os.path.isdir(cache_dir):
+        entries += [os.path.join(cache_dir, n) for n in os.listdir(cache_dir)
+                    if src_re.match(n) and os.path.isfile(os.path.join(cache_dir, n))]
+    chunks_dir = os.path.join(cache_dir, "chunks")
+    if os.path.isdir(chunks_dir):
+        entries += [os.path.join(chunks_dir, n) for n in os.listdir(chunks_dir)
+                    if key_re.match(n) and os.path.isdir(os.path.join(chunks_dir, n))]
+
+    removed, freed = 0, 0
+    for p in entries:
+        try:
+            last = os.path.getmtime(p)
+            marker = os.path.join(p, ".last_used")
+            if os.path.isfile(marker):
+                last = max(last, os.path.getmtime(marker))
+            if last >= cutoff:
+                continue
+            size = _entry_size(p)
+            shutil.rmtree(p) if os.path.isdir(p) else os.remove(p)
+            removed += 1
+            freed  += size
+        except OSError as e:
+            print_only(f"[cache] Could not remove {os.path.basename(p)}: {e}")
+    if removed:
+        print_only(f"[cache] Removed {removed} entries unused for {max_age_days}+ days ({freed / 1024**3:.1f} GB)")
+
+
 def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=None, fixed_delay: int = None,
                  compression=None) -> int:
     """
@@ -783,7 +842,9 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
         md5 = _file_md5(src)
         key = md5 if trim_samples == 0 else f"{md5}_t{trim_samples}"
         os.makedirs(_CACHE_DIR, exist_ok=True)
-        return os.path.join(_CACHE_DIR, f"{key}.wav")
+        dst = os.path.join(_CACHE_DIR, f"{key}.wav")
+        _touch(dst)
+        return dst
 
     def _to_cached_wav_ffmpeg(src: str, trim_samples: int) -> str:
         """Decode src to usr/cache via ffmpeg. Returns cache path."""
@@ -967,6 +1028,7 @@ def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 10.0, fix
         os.makedirs(_CACHE_DIR, exist_ok=True)
         dst = os.path.join(_CACHE_DIR, f"{md5}.wav")
         if os.path.isfile(dst):
+            _touch(dst)
             return dst
         try:
             import ffmpeg, tempfile as _tmp
@@ -1205,6 +1267,10 @@ def prepare_data(cfg: DictConfig) -> None:
     with open_dict(cfg):
         cfg.datas.train_dir = train_chunks
         cfg.datas.eval_dir  = val_wav_dir
+
+    _touch(os.path.dirname(train_chunks))
+    _touch(os.path.dirname(val_wav_dir))
+    _prune_usr_cache(cfg.datas.get("cache_retention_days", 30))
 
     # Val bootstrap from train chunks
     # If val is still empty after WAV conversion (no data/val source exists),

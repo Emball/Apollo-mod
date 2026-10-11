@@ -184,6 +184,7 @@ Two base configs are included: `apollo.yaml` and `apollo_uni.yaml` as well as a 
 | `num_workers` | DataLoader workers. Can experiment for potential speed benefits. `2-4` tested as working on 16 GB RAM. |
 | `pin_memory` | Recommended to set as `false` on 16 GB or low RAM systems as it can cause instability. You can try enabling it if you have 32 GB or more. |
 | `align_data` | Fixed sample offset for encoder delay if you know the exact value that the LQ files are misaligned by. Baked into WAV at conversion time. Set `false` to disable. |
+| `cache_retention_days` | Days a cached chunk set or converted source file can go unused before it is deleted at startup. Anything deleted is rebuilt the next time it is needed, so lower this if `usr/cache` is eating your disk. `0` keeps everything. |
 
 ### compression
 
