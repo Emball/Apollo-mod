@@ -1,12 +1,8 @@
 {
   "name": "stfl",
-  "description": "STFL encoding, one random chain per chunk, centered on WMA 128k -> 5 VBR LAME passes (q5/q2) -> CBR 192. WMA always present, no encode above 192 kbps, 5-9 total MP3 encodes with 6 most common, CBR 192 final. Set external_codecs.acmenc to your acmenc executable.",
-  "tools": {
-    "ffmpeg": "ffmpeg"
-  },
-  "external_codecs": {
-    "acmenc": "D:/Software/acmenc/acmenc.exe"
-  },
+  "description": "STFL encoding, one random chain per chunk, centered on WMA 128k -> 5 VBR LAME passes (q5/q2) -> CBR 192. Never lighter than that baseline in codec quality; 5-9 total MP3 encodes, 6 most common; CBR 192 final.",
+  "tools": { "ffmpeg": "ffmpeg" },
+  "external_codecs": { "acmenc": "D:/Software/acmenc/acmenc.exe" },
   "random": {
     "segment_sec": 30,
     "pad_sec": 1.0,
@@ -15,16 +11,16 @@
     "silence_dbfs": -60,
     "wma_position": { "first": 85, "middle": 8, "last": 4, "double": 3, "none": 0 },
     "wma_bitrate": { "128k": 70, "96k": 20, "64k": 10 },
-    "mp3_passes": { "4": 10, "5": 50, "6": 25, "7": 15 },
-    "mp3_vbr_prob": 0.85,
+    "mp3_passes": { "4": 10, "5": 50, "6": 30, "7": 10 },
+    "mp3_vbr_prob": 0.95,
     "mp3_vbr_quality": { "2": 30, "3": 8, "4": 12, "5": 35, "6": 15 },
-    "mp3_cbr_bitrate": { "128": 30, "160": 20, "192": 50 },
+    "mp3_cbr_bitrate": { "128": 25, "160": 15, "192": 65 },
     "final": { "cbr192": 90, "cbr192_extra": 10, "vbr": 0, "none": 0 },
-    "final_extra_bitrate": { "128": 40, "160": 60 },
-    "mp3_encoder": { "mode": { "lame": 70, "fhg": 18, "mixed": 12 } },
+    "final_extra_bitrate": { "192": 60, "128": 40 },
+    "mp3_encoder": { "mode": { "lame": 33, "fhg": 33, "mixed": 33 } },
     "mp3_fhg": {
       "enc_delay": 672,
-      "bitrate": { "128": 25, "160": 25, "192": 50 }
+      "bitrate": { "128": 15, "160": 15, "192": 70 }
     }
   }
 }
