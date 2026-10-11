@@ -1335,12 +1335,39 @@ def prepare_data(cfg: DictConfig) -> None:
             print_only(f"[data/val] Bootstrapped {len(selected)} val chunks across {len(songs)} songs (copied, not moved).")
 
 def _prune_checkpoints(ckpt_dir: str, keep_best: int, keep_latest: int, protect=()) -> None:
-    """Delete scored checkpoints outside the best `keep_best` (by visqol, then sisdr) and the
-    latest `keep_latest` (by modification time; step numbers saved before 2.9.0.0 are doubled). interrupted.ckpt, last.ckpt and `protect` are never deleted."""
+    """Delete scored checkpoints outside the best `keep_best` and the latest `keep_latest`
+    (by modification time; step numbers saved before 2.9.0.0 are doubled). "Best" is by visqol,
+    then sisdr, within each val set and rotation window, since visqol is not comparable across
+    them. interrupted.ckpt, last.ckpt and `protect` are never deleted."""
     import re as _re
     if not ckpt_dir or not os.path.isdir(ckpt_dir):
         return
+    utils_dir = os.path.join(_REPO_ROOT, "utils")
+    if utils_dir not in sys.path:
+        sys.path.insert(0, utils_dir)
+    import ckpt_groups
+
     protect = {os.path.abspath(p) for p in protect if p}
+    tags    = ckpt_groups.read_tags(ckpt_dir)
+    learned = {}
+
+    def _group(fname, fpath):
+        if fname in tags:
+            return tags[fname]
+        try:
+            try:
+                data = torch.load(fpath, map_location="cpu", weights_only=False, mmap=True)
+            except TypeError:
+                data = torch.load(fpath, map_location="cpu", weights_only=False)
+            gid = ckpt_groups.group_id(data.get("val_dataset_sig"), data.get("val_window_idx", 0))
+            del data
+        except Exception as e:
+            print_only(f"[checkpoint] Could not read the val set of {fname}: {e}")
+            return None
+        if gid:
+            learned[fname] = gid
+        return gid
+
     entries = []
     for fname in os.listdir(ckpt_dir):
         if not fname.endswith(".ckpt") or fname == "last.ckpt" or "interrupted" in fname:
@@ -1358,10 +1385,15 @@ def _prune_checkpoints(ckpt_dir: str, keep_best: int, keep_latest: int, protect=
         entries.append((mtime,
                         float(m_vq.group(1)) if m_vq else float("-inf"),
                         float(m_sd.group(1)) if m_sd else float("-inf"),
-                        fpath))
-    keep = {e[3] for e in sorted(entries, key=lambda e: (e[1], e[2], e[0]), reverse=True)[:keep_best]}
+                        fpath, _group(fname, fpath)))
+    ckpt_groups.write_tags(ckpt_dir, learned)
+
+    keep = set()
+    for gid in {e[4] for e in entries}:
+        pool = [e for e in entries if e[4] == gid]
+        keep |= {e[3] for e in sorted(pool, key=lambda e: (e[1], e[2], e[0]), reverse=True)[:keep_best]}
     keep |= {e[3] for e in sorted(entries, key=lambda e: e[0], reverse=True)[:max(0, keep_latest)]}
-    for _, _, _, path in entries:
+    for _, _, _, path, _ in entries:
         if path in keep or os.path.abspath(path) in protect:
             continue
         try:
@@ -1997,6 +2029,28 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             "-{hfnr:.3f}"
         )
         callbacks.append(checkpoint)
+
+        class _ValSetTagger(_Callback):
+            """Record which val set and window each new checkpoint was scored on."""
+            def __init__(self):
+                self._seen = set()
+
+            def on_validation_start(self, trainer, pl_module):
+                d = checkpoint.dirpath
+                self._seen = set(os.listdir(d)) if d and os.path.isdir(d) else set()
+
+            def on_validation_end(self, trainer, pl_module):
+                d = checkpoint.dirpath
+                if trainer.sanity_checking or not d or not os.path.isdir(d):
+                    return
+                utils_dir = os.path.join(_REPO_ROOT, "utils")
+                if utils_dir not in sys.path:
+                    sys.path.insert(0, utils_dir)
+                import ckpt_groups
+                gid = ckpt_groups.group_id(pl_module._val_sig, pl_module._val_window_idx)
+                ckpt_groups.write_tags(d, {f: gid for f in os.listdir(d)
+                                           if f.endswith(".ckpt") and f not in self._seen})
+        callbacks.append(_ValSetTagger())
         if keep_best > 0:
             class _CheckpointPruner(_Callback):
                 def on_validation_end(self, trainer, pl_module):

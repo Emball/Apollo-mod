@@ -343,35 +343,49 @@ def _dedup_ckpts(ckpts):
     return [v[0] for v in by_step.values()]
 
 
+def _best_in_current_set(ckpts):
+    """Best scored checkpoint among those scored on the same val set and window as the newest
+    scored one. visqol is not comparable across val sets or rotation windows. Checkpoints with
+    no recorded set count as one group. Returns (path, score) or (None, None)."""
+    import ckpt_groups
+    scored = [(c, s) for c in ckpts for s in [_ckpt_score(c.stem)] if s is not None]
+    if not scored:
+        return None, None
+    newest = max(scored, key=lambda cs: cs[0].stat().st_mtime)[0]
+    gid    = ckpt_groups.group_of(newest)
+    pool   = [cs for cs in scored if ckpt_groups.group_of(cs[0]) == gid]
+    return max(pool, key=lambda cs: cs[1])
+
+
+def _run_checkpoints(cfg_path: Path):
+    """All deduplicated checkpoints across the runs of a config."""
+    import yaml
+    cfg = yaml.safe_load(cfg_path.read_text())
+    name = cfg.get("exp", {}).get("name") or cfg_path.stem
+    runs_path = RUNS_DIR / name
+    if not runs_path.exists():
+        return None
+    ckpts = []
+    for run_dir in sorted(runs_path.iterdir()):
+        ckpt_dir = run_dir / "checkpoints"
+        if ckpt_dir.exists():
+            ckpts += _dedup_ckpts(ckpt_dir.glob("*.ckpt"))
+    return ckpts
+
+
 def _config_summary(cfg_path: Path) -> str:
     """Return a one-line summary of training state for this config."""
     try:
-        import yaml  # type: ignore
         import re as _re
-        cfg = yaml.safe_load(cfg_path.read_text())
-        name = cfg.get("exp", {}).get("name") or cfg_path.stem
-        runs_path = RUNS_DIR / name
-        if not runs_path.exists():
+        ckpts = _run_checkpoints(cfg_path)
+        if ckpts is None:
             return "no runs yet"
-        best_score = None
-        best_step  = None
-        for run_dir in sorted(runs_path.iterdir()):
-            ckpt_dir = run_dir / "checkpoints"
-            if not ckpt_dir.exists():
-                continue
-            for ckpt in _dedup_ckpts(ckpt_dir.glob("*.ckpt")):
-                score = _ckpt_score(ckpt.stem)
-                if score is None:
-                    continue
-                s = _re.search(r"step=(\d+)", ckpt.stem)
-                step = int(s.group(1)) if s else 0
-                if best_score is None or score > best_score:
-                    best_score = score
-                    best_step  = step
-        if best_score is not None:
-            visqol, sisdr, neg_hfnr = best_score
+        best, score = _best_in_current_set(ckpts)
+        if best is not None:
+            visqol, sisdr, neg_hfnr = score
+            s = _re.search(r"step=(\d+)", best.stem)
             return (f"best visqol={visqol:.3f}  sisdr={sisdr:.2f}"
-                    f"  hfnr={-neg_hfnr:.3f}  step={best_step}")
+                    f"  hfnr={-neg_hfnr:.3f}  step={int(s.group(1)) if s else 0}")
         return "checkpoint found (no metrics in name)"
     except Exception:
         return ""
@@ -382,28 +396,10 @@ def _config_summary(cfg_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 def _find_best_checkpoint(cfg_path: Path) -> Path | None:
-    """Find best checkpoint using composite score: visqol > sisdr > hfnr."""
+    """Best checkpoint for the current val set: visqol > sisdr > hfnr."""
     try:
-        import yaml
-        cfg = yaml.safe_load(cfg_path.read_text())
-        name = cfg.get("exp", {}).get("name") or cfg_path.stem
-        runs_path = RUNS_DIR / name
-        if not runs_path.exists():
-            return None
-        best_score = None
-        best_ckpt  = None
-        for run_dir in sorted(runs_path.iterdir()):
-            ckpt_dir = run_dir / "checkpoints"
-            if not ckpt_dir.exists():
-                continue
-            for ckpt in _dedup_ckpts(ckpt_dir.glob("*.ckpt")):
-                score = _ckpt_score(ckpt.stem)
-                if score is None:
-                    continue
-                if best_score is None or score > best_score:
-                    best_score = score
-                    best_ckpt  = ckpt
-        return best_ckpt
+        ckpts = _run_checkpoints(cfg_path)
+        return _best_in_current_set(ckpts)[0] if ckpts else None
     except Exception:
         return None
 
