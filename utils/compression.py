@@ -199,6 +199,7 @@ def _encode_step(step: dict, src: Path, tmpdir: Path, n: int, ffmpeg: str, log: 
         if not acmenc:
             raise CompressionError("mp3_fhg step needs external_codecs.acmenc")
         wav = tmpdir / f"gen{n}_in.wav"
+        # acmenc only accepts 16-bit PCM
         _run([ffmpeg, "-y", "-i", src, "-vn", "-c:a", "pcm_s16le", wav], log)
         out = tmpdir / f"gen{n}.mp3"
         cmd = [acmenc, "-c", step.get("codec_name", FHG_CODEC_NAME),
@@ -222,7 +223,7 @@ def encode_chain(chain: list[dict], src_wav: Path, tmpdir: Path, ffmpeg: str, sr
     for i, step in enumerate(chain, start=1):
         current = _encode_step(step, current, tmpdir, i, ffmpeg, log, acmenc)
     out = tmpdir / "final.wav"
-    _run([ffmpeg, "-y", "-i", current, "-vn", "-ar", sr, "-c:a", "pcm_s16le", out], log)
+    _run([ffmpeg, "-y", "-i", current, "-vn", "-ar", sr, "-c:a", "pcm_f32le", out], log)
     return out
 
 
@@ -274,7 +275,7 @@ def degrade_window(window: np.ndarray, pad_start: int, core_len: int, sr: int, c
     tmpdir.mkdir(parents=True, exist_ok=True)
     try:
         src = tmpdir / "seg.wav"
-        sf.write(str(src), window, sr, subtype="PCM_24")
+        sf.write(str(src), window, sr, subtype="FLOAT")
         out = encode_chain(chain, src, tmpdir, ffmpeg, sr, log, acmenc)
         lq, _ = sf.read(str(out), always_2d=True, dtype="float64")
     except CompressionError as ex:

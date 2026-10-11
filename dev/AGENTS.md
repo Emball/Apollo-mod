@@ -82,7 +82,7 @@ input/ output/           -- inference I/O staging dirs
 
 **Chunk cache:** `usr/cache/chunks/<key>/<split>/` — keyed on MD5 of (source contents + `segment_sec` + overlap + `fixed_delay` + aug config + compression recipe contents). Shared across configs with matching dataset and params. `.manifest.json` written after each successful run. File digests are reused from `usr/cache/md5_index.json` while a file's path, size and mtime are unchanged. After the val clips are locked, the val dataloader reads only those clips (`PairedAudioDataModule.set_val_subset`).
 
-**Source conversion:** Non-WAV sources converted to 32-bit float WAV via FFmpeg in parallel threads. `align_data` integer offset baked in via `atrim`. Already-WAV files are never re-converted.
+**Source conversion:** Non-WAV sources converted to 32-bit float WAV via FFmpeg in parallel threads. `align_data` integer offset baked in via `atrim`. Already-WAV files are never re-converted. Every audio file the pipeline writes (source cache, chunks, val clips, degrade and align outputs, compression chain decodes) is 32-bit float WAV with no clipping; the one 16-bit file is the `acmenc` input. `_compression_digest` carries a `chain_format` token, so changing the chain's sample format rebuilds the generated-LQ caches.
 
 **Run isolation:** Each fresh run creates `runs/<name>/<timestamp>/`. Resume finds the most recently modified timestamped subfolder with a `checkpoints/` dir.
 

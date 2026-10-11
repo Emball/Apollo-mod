@@ -136,13 +136,13 @@ def _step_filter(step: dict, kind: str, src: Path, tmpdir: Path, n: int, tools: 
     poles = step.get("poles", 2)
     out = tmpdir / f"gen{n}_{kind}.wav"
     af = f"{kind}=f={cutoff}:poles={poles}"
-    _run([tools["ffmpeg"], "-y", "-i", str(src), "-vn", "-af", af, "-c:a", "pcm_s16le", str(out)], print_fn)
+    _run([tools["ffmpeg"], "-y", "-i", str(src), "-vn", "-af", af, "-c:a", "pcm_f32le", str(out)], print_fn)
     return out
 
 
-def _decode_to_wav(src: Path, tmpdir: Path, n: int, tools: dict, print_fn) -> Path:
+def _decode_to_wav(src: Path, tmpdir: Path, n: int, tools: dict, print_fn, codec: str = "pcm_f32le") -> Path:
     out = tmpdir / f"gen{n}_dec.wav"
-    _run([tools["ffmpeg"], "-y", "-i", str(src), "-vn", "-c:a", "pcm_s16le", str(out)], print_fn)
+    _run([tools["ffmpeg"], "-y", "-i", str(src), "-vn", "-c:a", codec, str(out)], print_fn)
     return out
 
 
@@ -187,9 +187,8 @@ def run_chain(config: dict, input_path: str | Path, output_dir: str | Path, prin
             elif step_type == "mp3_lame":
                 current = _step_mp3_lame(step, current, tmpdir, i, tools, print_fn)
             elif step_type == "mp3_fhg":
-                # mp3_fhg needs WAV input; decode first if the previous step left compressed audio.
-                if current.suffix.lower() != ".wav":
-                    current = _decode_to_wav(current, tmpdir, i, tools, print_fn)
+                # acmenc only accepts 16-bit WAV, whatever the previous step left
+                current = _decode_to_wav(current, tmpdir, i, tools, print_fn, codec="pcm_s16le")
                 dest_dir = output_dir if is_last else None
                 current = _step_mp3_fhg(step, current, tmpdir, i, external_codecs, print_fn, outdir_override=dest_dir)
                 if is_last:
@@ -274,8 +273,8 @@ def _segment_worker(job: dict) -> dict:
             return res
 
         tmp_hq, tmp_lq = job["out_hq"] + ".part", job["out_lq"] + ".part"
-        sf.write(tmp_hq, hq_c, sr, subtype="PCM_24", format="WAV")
-        sf.write(tmp_lq, lq_c, sr, subtype="PCM_24", format="WAV")
+        sf.write(tmp_hq, hq_c, sr, subtype="FLOAT", format="WAV")
+        sf.write(tmp_lq, lq_c, sr, subtype="FLOAT", format="WAV")
         os.replace(tmp_lq, job["out_lq"])
         os.replace(tmp_hq, job["out_hq"])
         res["seconds"] = round(len(hq_c) / sr, 3)

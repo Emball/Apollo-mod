@@ -14,9 +14,8 @@ def load_audio(path: str):
 
 
 def save_audio(path: str, data: np.ndarray, sr: int):
-    """Save audio file, clipping to [-1, 1]."""
-    data = np.clip(data, -1.0, 1.0)
-    sf.write(path, data, sr, subtype="PCM_24")
+    """Save audio file as 32-bit float WAV (no clipping, no quantization)."""
+    sf.write(path, data, sr, subtype="FLOAT")
     print(f"  Saved → {path}  ({data.shape[0]} samples, {data.shape[0]/sr:.4f}s)")
 
 

@@ -584,6 +584,7 @@ def _compression_digest(cfg: "DictConfig") -> str:
         return ""
     data, _ = _load_recipe(blk)
     data = {k: v for k, v in data.items() if k != "external_codecs"}
+    data["chain_format"] = "f32"
     return hashlib.md5(_json.dumps(data, sort_keys=True).encode(), usedforsecurity=False).hexdigest()[:12]
 
 
