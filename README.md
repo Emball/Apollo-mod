@@ -53,13 +53,13 @@ data/apollo_stfl/
 
 On first run, sources are converted to WAV and chunked into fixed-length segments under `usr/cache/chunks/`. The cache is keyed on source file contents and chunk parameters, so changing either automatically triggers a rebuild. The same cache is shared across configs that use the same dataset and parameters.
 
-16-bit WAV and FLAC are fully supported. MP3 is supported but not recommended as it requires manual delay compensation in your config, which can be difficult to reliably calculate. For delay-controlled degradation, you can have the LQ side generated from your HQ files instead (see below); the generator supports very complex encoding configurations.
+16-bit WAV and FLAC are fully supported. MP3 is supported but not recommended as it requires manual delay compensation in your config, which can be difficult to reliably calculate. For delay-controlled degradation, you can have the LQ side generated from your HQ files instead (see Generate LQ below); the generator supports very complex encoding configurations.
 
-### Generating LQ From HQ Only
+### Generate LQ
 
-Pairing every song by hand is optional. A song placed in `HQ/` with no matching file in `LQ/` gets its LQ generated: each chunk is encoded through a random codec chain drawn from a recipe (MP3 and WMA, plus AAC, Vorbis, Opus, and MP2 when the recipe enables them; order, pass count, and CBR/VBR are drawn per chunk), then re-aligned to the source by measured delay, so no `align_data` offset is needed. Songs that already have an LQ file are used as they are and are never encoded, so real pairs and generated ones can share a folder. The same applies to `val/`, where each HQ-only song gets its two clips encoded the same way.
+If you only have clean audio, Apollo-mod can generate the degraded side for you. Put the song in `HQ/` with no matching file in `LQ/` and turn on the [compression](#compression) block in your config. Songs that already have an LQ file are used as they are, so real pairs and generated ones can share a folder. This works for `val/` too.
 
-This only helps when the degradation you are restoring can be reproduced by a codec chain. For anything else, supply your own LQ files. It needs the `LQ/` and `HQ/` folder layout and is turned on with the [compression](#compression) block in your config.
+The degradation comes from a recipe. `utils/degrade/stfl.json` is the included example and you can copy it to make your own. The **Degrade audio** utility in the TUI uses the same recipes if you would rather generate LQ files ahead of time.
 
 ### Validation Guidelines
 
@@ -183,7 +183,7 @@ Two base configs are included: `apollo.yaml` and `apollo_uni.yaml` as well as a 
 
 ### compression
 
-Generates the LQ side for songs that have no LQ file, as described in [Generating LQ From HQ Only](#generating-lq-from-hq-only). Set under `datas`. The older `augmentation.cached.compression` location still works but prints a deprecation notice. Requires `ffmpeg` with the encoders the recipe uses. A recipe can also mix Fraunhofer (`acmenc`, an older MP3 encoder much more common in the early days of the internet) and LAME MP3 passes within one chain; set `external_codecs.acmenc` in the recipe to your `acmenc` executable to use it.
+Generates the LQ side for songs that have no LQ file, as described in [Generate LQ](#generate-lq). Set under `datas`. The older `augmentation.cached.compression` location still works but prints a deprecation notice. Requires `ffmpeg` with the encoders the recipe uses. A recipe can also mix Fraunhofer (`acmenc`, an older MP3 encoder much more common in the early days of the internet) and LAME MP3 passes within one chain; set `external_codecs.acmenc` in the recipe to your `acmenc` executable to use it.
 
 | Key | Description |
 |---|---|
