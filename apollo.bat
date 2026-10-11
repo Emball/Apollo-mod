@@ -12,8 +12,8 @@ if exist "%SCRIPT_DIR%\.git" (
     if !errorlevel! equ 0 (
         echo [apollo] Checking for updates...
         pushd "%SCRIPT_DIR%"
-        git pull --ff-only
-        if !errorlevel! neq 0 echo [apollo] WARNING: git pull failed -- continuing with local copy.
+        git pull --rebase --autostash
+        if !errorlevel! neq 0 echo [apollo] WARNING: git pull hit a conflict with your local edits. Run git status and resolve it before training.
         popd
     )
 )

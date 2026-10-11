@@ -115,7 +115,7 @@ input/ output/           -- inference I/O staging dirs
 
 **Augmentation — mid/side priority:** `mid_side_isolation` rolls first. If it fires, `stereo_alternation` is skipped. If not, `stereo_alternation` runs normally. They cannot both apply to the same chunk.
 
-**Startup update check:** `apollo.bat` runs `git pull --ff-only` on startup. Failure is non-fatal.
+**Startup update check:** `apollo.bat` runs `git pull --rebase --autostash` on startup, so local edits to tracked files are stashed and reapplied. A conflict prints a warning and is non-fatal; `apollo.sh` has no update check.
 
 **Dev mode:** `apollo.bat --dev` sets `APOLLO_DEV=1`. `tui.py` includes `dev/*.yaml` in the config picker.
 
