@@ -245,7 +245,6 @@ class AudioLightningModule(pl.LightningModule):
 
         # Val fixed-index lock (for val_loss / SI-SDR computation in validation_step)
         self._val_fixed_indices = None   # set[int] locked after first real val run
-        self._val_seen_indices  = []     # accumulator during first run
 
         # Full-song val refs: active window of songs for metric computation.
         self._val_song_refs:   dict = {}   # song_key -> (lq_path, hq_path) -- current window
@@ -420,10 +419,6 @@ class AudioLightningModule(pl.LightningModule):
             loss = self.metrics(est_sources, ori_data)
             return {"sisdr": loss}
 
-        # First run: collect all seen indices for locking later
-        if self._val_fixed_indices is None:
-            self._val_seen_indices.append(ds_idx)
-
         # Once locked, skip chunks not in the fixed set
         if self._val_fixed_indices is not None and ds_idx not in self._val_fixed_indices:
             return {"sisdr": None}
@@ -441,34 +436,36 @@ class AudioLightningModule(pl.LightningModule):
     # Val index locking
     # ------------------------------------------------------------------
 
+    def _val_clip_groups(self) -> dict:
+        """song key -> dataset indices, built from the whole val set in dataset order."""
+        groups = {}
+        for ds_idx, (_, hq_path) in enumerate(self.trainer.datamodule.data_val.pairs):
+            stem  = os.path.splitext(os.path.basename(hq_path))[0]
+            parts = stem.rsplit("_", 1)
+            key   = parts[0] if len(parts) == 2 and parts[1].isdigit() else stem
+            groups.setdefault(key, []).append(ds_idx)
+        return groups
+
     def _lock_val_fixed_indices(self):
         """Stratified sample -- equal chunks per song -- locked for all future runs."""
         import random
 
-        dataset = self.trainer.datamodule.data_val
-        seen    = self._val_seen_indices
-        if not seen:
+        groups = self._val_clip_groups()
+        if not groups:
             return
 
-        by_song = {}
-        for ds_idx in seen:
-            _, hq_path = dataset.pairs[ds_idx]
-            stem  = os.path.splitext(os.path.basename(hq_path))[0]
-            parts = stem.rsplit("_", 1)
-            key   = parts[0] if len(parts) == 2 and parts[1].isdigit() else stem
-            by_song.setdefault(key, []).append(ds_idx)
+        dataset  = self.trainer.datamodule.data_val
+        lv       = self.trainer.limit_val_batches
+        total_n  = lv if isinstance(lv, int) else int(lv * len(dataset))
+        per_song = max(1, total_n // len(groups))
 
-        num_songs  = len(by_song)
-        lv         = self.trainer.limit_val_batches
-        total_n    = lv if isinstance(lv, int) else int(lv * len(dataset))
-        per_song   = max(1, total_n // num_songs)
-
+        rng   = random.Random(0)
         fixed = set()
-        for key, indices in by_song.items():
-            k = min(per_song, len(indices))
-            fixed.update(random.sample(indices, k))
+        for indices in groups.values():
+            fixed.update(rng.sample(indices, min(per_song, len(indices))))
 
         self._val_fixed_indices = fixed
+        print(f"[val] Locked {len(fixed)} of {len(dataset)} val clips for the SI-SDR pass")
 
     # ------------------------------------------------------------------
     # Full-song val ref locking + rotation
@@ -492,7 +489,6 @@ class AudioLightningModule(pl.LightningModule):
     def _reset_val_state(self) -> None:
         """Forget everything locked against a previous val set; it re-locks on the next val run."""
         self._val_fixed_indices = None
-        self._val_seen_indices  = []
         self._val_song_refs     = {}
         self._val_all_songs     = []
         self._val_window_idx    = 0
@@ -532,6 +528,12 @@ class AudioLightningModule(pl.LightningModule):
                 why = "locked val clips are not in the current val set"
             elif self._val_fixed_indices and any(not 0 <= int(i) < len(pairs) for i in self._val_fixed_indices):
                 why = "locked val indices are out of range"
+            else:
+                n_groups = len(self._val_clip_groups())
+                if self._val_all_songs and len(self._val_all_songs) != n_groups:
+                    why = f"the locked pool has {len(self._val_all_songs)} of {n_groups} val clips"
+                elif self._val_fixed_indices is not None and len(self._val_fixed_indices) < n_groups:
+                    why = f"only {len(self._val_fixed_indices)} of {n_groups} val clips are locked"
         if why:
             print(f"[val] Discarding locked val state ({why}); re-locking from the current val clips.")
             self._reset_val_state()
@@ -704,7 +706,8 @@ class AudioLightningModule(pl.LightningModule):
         self._last_val_visqol_gain = None
 
 
-        if self._val_loss_count > 0:
+        scored = self._val_loss_count
+        if scored > 0:
             avg_val_loss = self._val_loss_sum / self._val_loss_count
             sisdr_val = -float(avg_val_loss)   # loss is negated SI-SDR; flip to real value
             self.log("sisdr", sisdr_val, prog_bar=True, logger=True)
@@ -718,26 +721,18 @@ class AudioLightningModule(pl.LightningModule):
             return
 
         # --- Lock fixed indices on first real val run ---
-        if self._val_fixed_indices is None and self._val_seen_indices:
+        expected = (len(self._val_fixed_indices) if self._val_fixed_indices is not None
+                    else len(self.trainer.datamodule.data_val))
+        if scored != expected:
+            print(f"[val] WARNING: SI-SDR scored {scored} clip(s), expected {expected}")
+        if self._val_fixed_indices is None:
             self._lock_val_fixed_indices()
             self._apply_val_subset()
 
         # --- Lock full-song metric refs on first real val run ---
         if not self._val_song_refs and self._val_fixed_indices is not None:
-            dataset   = self.trainer.datamodule.data_val
-            by_song   = {}
-            all_songs = []
-            seen_keys = set()
-            for ds_idx in self._val_seen_indices or self._val_fixed_indices:
-                _, hq_path = dataset.pairs[ds_idx]
-                stem  = os.path.splitext(os.path.basename(hq_path))[0]
-                parts = stem.rsplit("_", 1)
-                key   = parts[0] if len(parts) == 2 and parts[1].isdigit() else stem
-                by_song.setdefault(key, []).append(ds_idx)
-                if key not in seen_keys:
-                    seen_keys.add(key)
-                    all_songs.append(key)
-            self._lock_val_songs(by_song)
+            self._lock_val_songs(self._val_clip_groups())
+            print(f"[val] Metric window: {list(self._val_song_refs)}")
 
         # --- Check if it's time to rotate the song window ---
         rotate_steps = getattr(self, "_val_rotate_steps", None)
@@ -821,9 +816,6 @@ class AudioLightningModule(pl.LightningModule):
         for k in unexpected:
             del sd[k]
         checkpoint["state_dict"] = sd
-
-        # Clear seen-indices accumulator on load (we already have fixed indices)
-        self._val_seen_indices = []
 
     # ------------------------------------------------------------------
     # Test
