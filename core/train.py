@@ -1297,6 +1297,67 @@ def _prune_checkpoints(ckpt_dir: str, keep_best: int, keep_latest: int, protect=
             print_only(f"[checkpoint] Could not prune {os.path.basename(path)}: {e}")
 
 
+def _remap_checkpoint_optimizers(ckpt_data: dict, system) -> bool:
+    """Make the checkpoint's optimizer state fit the live optimizers when the trainable
+    parameter set changed (freeze count, layer count, architecture edits). Matching state is
+    carried over, new parameters start fresh, the scheduler state is kept. Anything that cannot
+    be matched (optimizer type or group layout changed) drops optimizer and scheduler state so
+    both optimizers start fresh. Returns True when the checkpoint was modified."""
+    from look2hear.utils.optim_remap import remap_optimizer_state
+
+    states = ckpt_data.get("optimizer_states") or []
+    if not states:
+        return False
+
+    labels = ("generator", "discriminator")
+    live_opts = list(system.optimizer)
+    live_named = [
+        [(f"audio_model.{n}", p) for n, p in system.audio_model.named_parameters() if p.requires_grad],
+        [(f"discriminator.{n}", p) for n, p in system.discriminator.named_parameters()],
+    ]
+    saved_names = ckpt_data.get("optimizer_param_names")
+
+    def _drop(why: str) -> bool:
+        print_only(f"[resume] {why} -- optimizer and scheduler state dropped, optimizers start fresh.")
+        ckpt_data["optimizer_states"] = []
+        ckpt_data["lr_schedulers"] = []
+        return True
+
+    if len(states) != len(live_opts):
+        return _drop(f"Checkpoint has {len(states)} optimizers, expected {len(live_opts)}")
+
+    new_states, changed = [], False
+    for i, (saved_sd, live_opt) in enumerate(zip(states, live_opts)):
+        live_sd = live_opt.state_dict()
+        named = live_named[i]
+        if "opt_2d" in live_sd or "opt_2d" in saved_sd:
+            if ("opt_2d" in live_sd) != ("opt_2d" in saved_sd):
+                return _drop(f"The {labels[i]} optimizer type changed")
+            sig = lambda sd: [len(g["params"]) for k in ("opt_2d", "opt_rest") for g in sd[k]["param_groups"]]
+            if sig(saved_sd) != sig(live_sd):
+                return _drop(f"The {labels[i]} trainable parameters changed under a composite optimizer")
+            new_states.append(saved_sd)
+            continue
+        names_i = [saved_names[i]] if saved_names and i < len(saved_names) else None
+        try:
+            new_sd, rep = remap_optimizer_state(
+                saved_sd, names_i, live_sd,
+                [[n for n, _ in named]], [[tuple(p.shape) for _, p in named]])
+        except ValueError as e:
+            return _drop(f"The {labels[i]} optimizer layout changed ({e})")
+        if new_sd is None:
+            new_states.append(saved_sd)
+            continue
+        print_only(f"[resume] The {labels[i]} trainable parameters changed ({rep['saved']} -> {rep['live']} tensors): "
+                   f"kept optimizer state for {rep['carried']} ({rep['how']}), {rep['fresh']} start fresh"
+                   + (f", {rep['dropped']} dropped" if rep["dropped"] else "") + ".")
+        new_states.append(new_sd)
+        changed = True
+    if changed:
+        ckpt_data["optimizer_states"] = new_states
+    return changed
+
+
 def freeze_early_layers(model, n_layers_to_freeze=4):
     """
     Freeze the band-split front-end (BN) and first N BSNet layers.
@@ -2026,6 +2087,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                     _sd_now[k] = _fresh_sd[k]
                 print_only(f"[resume] Key reconciliation: dropped {len(_unexpected)} unexpected, filled {len(_missing)} missing.")
                 _patched = True
+
+        if _remap_checkpoint_optimizers(_ckpt_data, system):
+            _patched = True
 
         # If checkpoint has no optimizer state, inject empty stubs so Lightning
         # doesn't crash trying to restore them. Training will start fresh optimizers.

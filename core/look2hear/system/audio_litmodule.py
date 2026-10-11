@@ -795,6 +795,10 @@ class AudioLightningModule(pl.LightningModule):
         checkpoint["val_window_best"]   = self._val_window_best
         checkpoint["val_lq_visqol"]     = self._val_lq_visqol
         checkpoint["val_dataset_sig"]   = self._val_sig
+        checkpoint["optimizer_param_names"] = [
+            [f"audio_model.{n}" for n, p in self.audio_model.named_parameters() if p.requires_grad],
+            [f"discriminator.{n}" for n, _ in self.discriminator.named_parameters()],
+        ]
 
     def on_load_checkpoint(self, checkpoint: dict) -> None:
         self._val_fixed_indices = checkpoint.get("val_fixed_indices", None)
