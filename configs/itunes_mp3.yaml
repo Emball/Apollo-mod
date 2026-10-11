@@ -1,21 +1,22 @@
 exp:
   dir: ./runs
-  name: apollo_stfl
+  name: itunes_mp3
 
 resume_checkpoint: null  # set to explicit .ckpt path to override auto-resume
-resume: true
+resume: true  # auto-resume from latest checkpoint (including interrupted.ckpt) if present
+seed: null  # integer = fixed random seed, null = off
 
 optimizations:
   cudnn_benchmark: true
   expandable_segments: true
   triton_cache: true
-  ram_limit_fraction: 0.98
+  ram_limit_fraction: 0.98  # kill process cleanly at this fraction of total system RAM
 
 training:
-  n_layers_to_freeze: 4
+  n_layers_to_freeze: 0
   val_songs: 6
-  val_rotate_every: 1500
-  grad_accum_steps: 1
+  val_rotate_every: 20000  # integer = steps between val window rotations, auto = never
+  grad_accum_steps: 2
 
 datas:
   _target_: paired_datamodule.PairedAudioDataModule
@@ -25,8 +26,8 @@ datas:
   num_workers: 2
   pin_memory: false
   val_bootstrap_chunks: 15
-  align_data: 0
-  cache_retention_days: 30
+  align_data: false  # integer = fixed offset in samples (+ trims LQ, - trims HQ), false = off
+  cache_retention_days: 30  # days a cached chunk set or converted file can go unused before it is deleted at startup, 0 = keep everything
   compression:
     enabled: false
     recipe: utils/degrade/stfl.json
@@ -48,12 +49,12 @@ datas:
         prob: 0.5
         db_max: 1.5
       deep_gain:
-        enabled: false
+        enabled: true
         prob: 0.03
         db_min: -10.0
         db_max: -6.0
       silence_dip:
-        enabled: false
+        enabled: true
         prob: 0.05
         max_hold_sec: 2.0
         short_ramp_ms: 10.0
@@ -65,17 +66,8 @@ datas:
       polarity:
         enabled: true
         prob: 0.5
-      pitch_shift:
-        enabled: false
-        prob: 0.5
-        semitones_max: 1.5
-      noise:
-        enabled: false  # disabled -- corrupts discriminator HF gradient signal
-        prob: 0.5
-        sigma: 0.002
     cached:
       enabled: false
-      cached_variants: 1
       stereo_alternation:
         enabled: false
         fraction: 1.0
@@ -86,14 +78,6 @@ datas:
       polarity:
         enabled: false
         fraction: 0.5
-      pitch_shift:
-        enabled: false
-        fraction: 0.5
-        semitones_max: 1.5
-      noise:
-        enabled: false
-        fraction: 0.5
-        sigma: 0.002
 
 model:
   _target_: look2hear.models.apollo.Apollo
@@ -132,7 +116,7 @@ loss_g:
   band_weight_shape: gaussian
   band_weight_center_hz: 15000.0
   band_weight_sigma_hz: 3000.0
-  band_weight_gain: 1.2
+  band_weight_gain: 0.0  # 0 = flat
   band_weight_lo_hz: 4500.0
   band_weight_hi_hz: 18500.0
   band_weight_ramp_hz: 1500.0
@@ -148,26 +132,17 @@ metrics:
 system:
   _target_: look2hear.system.audio_litmodule.AudioLightningModule
   gradient_checkpointing: true
-  grad_accum_steps: ${training.grad_accum_steps}
-  val_songs: ${training.val_songs}
-  val_rotate_every: ${training.val_rotate_every}
   visqol_fraction: 1.0
 
 checkpoint:
   _target_: pytorch_lightning.callbacks.ModelCheckpoint
-  dirpath: ${exp.dir}/${exp.name}/checkpoints
-  monitor: visqol
-  mode: max
   verbose: true
-  save_top_k: -1
-  keep_best: 10    # prune to best N by visqol + latest M; 0 = keep everything
-  keep_latest: 3
   save_last: false
-  filename: 'step={step:06d}-sisdr={sisdr:.3f}-visqol={visqol:.3f}-hfnr={hfnr:.3f}'
+  keep_best: 10  # prune to the best N by visqol (per val set) plus the latest M; 0 = keep everything
+  keep_latest: 3
 
 logger:
   _target_: pytorch_lightning.loggers.TensorBoardLogger
-  save_dir: ${exp.dir}/${exp.name}/logs
   name: ""
   version: ""
   log_graph: false
@@ -175,8 +150,7 @@ logger:
 trainer:
   _target_: pytorch_lightning.Trainer
   devices: [0]
-  max_epochs: 400
-  default_root_dir: ${exp.dir}/${exp.name}/
+  max_epochs: 800
   accelerator: cuda
   precision: 16-mixed
   limit_train_batches: 1.0

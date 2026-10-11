@@ -51,13 +51,7 @@ utils/                   -- TUI and tools
   degrade_audio.py       -- synthetic degradation pipeline
   compression.py         -- shared codec-chain sampling, encoding, alignment
   degrade/               -- degradation JSON configs
-configs/                 -- training YAML configs
-  apollo.yaml            -- base config (feature_dim=256)
-  apollo_uni.yaml        -- universal config (feature_dim=384)
-  apollo_stfl.yaml       -- stfl active run config
-  apollo_stfl-og.yaml    -- original stfl config (reference baseline, resume: false)
-  apollo_stfl2.yaml      -- stfl2 experimental (deep_gain, silence_dip, all layers unfrozen)
-  apollo_stfl_new.yaml   -- stfl_new run (HQ-only songs get generated LQ)
+configs/                 -- training YAML configs (mp3, universal, itunes_mp3, wma_mp3_cake_new, wma_mp3_cake_legacy)
 dev/                     -- internal docs (not user-facing)
   AGENTS.md
 data/                    -- training source audio (LQ/ + HQ/ pairs per split)
@@ -90,6 +84,8 @@ input/ output/           -- inference I/O staging dirs
 **Chunk cache:** `usr/cache/chunks/<key>/<split>/` — keyed on MD5 of (source contents + `segment_sec` + overlap + `fixed_delay` + aug config + compression recipe contents). Shared across configs with matching dataset and params. `.manifest.json` written after each successful run. File digests are reused from `usr/cache/md5_index.json` while a file's path, size and mtime are unchanged. After the val clips are locked, the val dataloader reads only those clips (`PairedAudioDataModule.set_val_subset`).
 
 **Source conversion:** Non-WAV sources converted to 32-bit float WAV via FFmpeg in parallel threads. `align_data` integer offset baked in via `atrim`. Already-WAV files are never re-converted. Every audio file the pipeline writes (source cache, chunks, val clips, degrade and align outputs, compression chain decodes) is 32-bit float WAV with no clipping; the one 16-bit file is the `acmenc` input. `_compression_digest` carries a `chain_format` token, so changing the chain's sample format rebuilds the generated-LQ caches.
+
+**Config files:** any file name works; `exp.name` (the file stem when unset) names the `data/<name>/`, `chunks/<name>/` and `runs/<name>/` folders, so keep it equal to the stem. All shipped configs share one key structure; a key added to one goes into all. Keys that `train.py` always overwrites or that nothing reads are left out: `checkpoint.dirpath/monitor/mode/save_top_k/filename`, `logger.save_dir`, `trainer.default_root_dir`, `system.val_songs/val_rotate_every/grad_accum_steps` (read from `training`), `cached_variants`, and the unimplemented `noise` and `pitch_shift` blocks. The chunk cache key hashes the whole `datas.augmentation` block, so editing it rebuilds that config's chunks.
 
 **Run isolation:** Each fresh run creates `runs/<name>/<timestamp>/`. Resume finds the most recently modified timestamped subfolder with a `checkpoints/` dir.
 

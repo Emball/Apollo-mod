@@ -5,29 +5,29 @@ inference.py -- Apollo audio enhancement script
 
 Usage:
     # Auto-select best checkpoint from run folder
-    python inference.py --in_wav input.wav --out_wav output.wav --conf_dir configs/apollo_stfl.yaml
+    python inference.py --in_wav input.wav --out_wav output.wav --conf_dir configs/wma_mp3_cake_new.yaml
 
     # Explicit checkpoint
     python inference.py --in_wav input.wav --out_wav output.wav \\
-        --weights runs/apollo_stfl/20260819/checkpoints/step=001200-sisdr=28.10-visqol=3.940-hfnr=0.973.ckpt \\
-        --conf_dir configs/apollo_stfl.yaml
+        --weights runs/wma_mp3_cake_new/20260819/checkpoints/step=001200-sisdr=28.10-visqol=3.940-hfnr=0.973.ckpt \\
+        --conf_dir configs/wma_mp3_cake_new.yaml
 
     # Pretrained shortnames (no conf_dir needed)
     python inference.py --in_wav input.wav --out_wav output.wav --weights lew_v2
 
     # Low-end preservation (max_fft blend below 700 Hz)
     python inference.py --in_wav input.wav --out_wav output.wav --weights my.ckpt \\
-        --conf_dir configs/apollo_stfl.yaml --low_end_preserve
+        --conf_dir configs/wma_mp3_cake_new.yaml --low_end_preserve
 
     # Custom band ensemble (JSON list of band specs)
     python inference.py --in_wav input.wav --out_wav output.wav --weights my.ckpt \\
-        --conf_dir configs/apollo_stfl.yaml \\
+        --conf_dir configs/wma_mp3_cake_new.yaml \\
         --ensemble '[{"lo":0,"hi":700,"mode":"max_fft","weight":1.0},{"lo":15000,"hi":22050,"mode":"avg","weight":0.7}]'
 
     # Dual-checkpoint ensemble (primary + aux with per-band routing)
     python inference.py --in_wav input.wav --out_wav output.wav --weights primary.ckpt \\
-        --conf_dir configs/apollo_stfl.yaml \\
-        --aux_weights secondary.ckpt --aux_conf_dir configs/apollo_stfl2.yaml \\
+        --conf_dir configs/wma_mp3_cake_new.yaml \\
+        --aux_weights secondary.ckpt --aux_conf_dir configs/wma_mp3_cake_legacy.yaml \\
         --aux_ensemble '[{"lo":8000,"hi":22050,"mode":"max_fft","weight":0.5}]'
 """
 import argparse

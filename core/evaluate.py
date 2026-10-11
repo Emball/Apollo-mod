@@ -2,7 +2,7 @@
 evaluate.py -- Retroactive checkpoint evaluator for Apollo-mod.
 
 Launched from tui.py as a TUI screen, or standalone:
-    python evaluate.py --conf_dir configs/apollo_stfl2.yaml
+    python evaluate.py --conf_dir configs/wma_mp3_cake_new.yaml
 
 Metrics computed per checkpoint:
     visqol  -- ViSQOL perceptual score (primary; requires: uv pip install "visqol-python[all]")

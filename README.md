@@ -39,10 +39,10 @@ On first run this creates a `.venv` with all dependencies. Subsequent runs open 
 
 ## Prepare Your Data
 
-Place your audio files under `data/apollo_name/`, where the folder name matches your config file (e.g. `configs/apollo_name.yaml`) and the `name` value in your config.
+Place your audio files under `data/<name>/`, where `<name>` is the `name` value in your config (e.g. `configs/mp3.yaml` uses `data/mp3/`).
 
 ```
-data/apollo_stfl/
+data/mp3/
   train/
     LQ/    -> degraded audio (filenames must match HQ)
     HQ/    -> clean reference audio
@@ -77,7 +77,7 @@ This only helps when the degradation you are restoring can be reproduced by a co
 
 On the first val run, `val_songs` clips (two per val song, see below) are selected from the full val set and locked in training until the val set changes. `val_rotate_every` allows the model to select a different set of val clips from the full val folder based on the configured step count. 
 
-Each val song is cut into two 10-second clips taken from its highest-energy sections to follow guidelines for metric calculations. Every val run scores VISQOL, SI-SDR, and HFNR on those same clips, and writes the LQ/HQ/Restored triplets to `runs/apollo_name/<timestamp>/val_audio/` so you can listen and judge quality directly after every validation. 
+Each val song is cut into two 10-second clips taken from its highest-energy sections to follow guidelines for metric calculations. Every val run scores VISQOL, SI-SDR, and HFNR on those same clips, and writes the LQ/HQ/Restored triplets to `runs/<name>/<timestamp>/val_audio/` so you can listen and judge quality directly after every validation. 
 
 Because the same clips are used throughout, scores are directly comparable across checkpoints for as long as the clips stay the same. If your val set is larger than `val_songs` and `val_rotate_every` is set, the active window rotates on that step interval and the console prints a summary of the best metrics from the previous window before switching. `visqol` is not comparable across windows; use `visqol_gain` for that.
 
@@ -104,7 +104,7 @@ Training lines show speed and the most recent val metrics:
   24.9%  step=400  400/1604  1.38 it/s  visqol=3.913  sisdr=14.458  hfnr=0.968
 ```
 
-Each run creates a timestamped folder under `runs/apollo_name/<timestamp>/`. Set `resume: true` in your config to continue from the most recent checkpoint automatically or set `resume_checkpoint` to the exact checkpoint you wish to resume training from. If neither is set, the model will start training from the base model.
+Each run creates a timestamped folder under `runs/<name>/<timestamp>/`. Set `resume: true` in your config to continue from the most recent checkpoint automatically or set `resume_checkpoint` to the exact checkpoint you wish to resume training from. If neither is set, the model will start training from the base model.
 
 ### Checkpoints
 
@@ -145,7 +145,7 @@ Each band also has a `weight` (0-1) that blends between the mode result and pure
 
 ## Config Reference
 
-Two base configs are included: `apollo.yaml` and `apollo_uni.yaml` as well as a few for custom projects like `apollo_stfl2` and `apollo_stfl_new.yaml`. Copy and rename for each fine-tune and change parameters accordingly.
+Configs can be named anything. Two are included as starting points: `mp3.yaml` (base weights, `feature_dim` 256) and `universal.yaml` (universal weights, `feature_dim` 384). `itunes_mp3`, `wma_mp3_cake_new` and `wma_mp3_cake_legacy` are configs for specific projects. Copy and rename for each fine-tune and change parameters accordingly.
 
 ### exp
 
@@ -155,6 +155,7 @@ Two base configs are included: `apollo.yaml` and `apollo_uni.yaml` as well as a 
 | `name` | Subfolder name for this run. Derived from config filename if not set. |
 | `resume_checkpoint` | Path to a specific `.ckpt` file to resume from. Overrides `resume`. `null` = use `resume` behavior. |
 | `resume` | `true` = resume from most recent checkpoint. `false` = start a new run. |
+| `seed` | Fixed random seed for repeatable runs. `null` leaves it unseeded. |
 
 ### optimizations
 

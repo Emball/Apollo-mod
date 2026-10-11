@@ -2268,7 +2268,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--conf_dir",
-        default="configs/apollo.yaml",
+        default="configs/mp3.yaml",
         help="Path to config file",
     )
     parser.add_argument(
@@ -2286,7 +2286,7 @@ if __name__ == "__main__":
 
     # --- Autodiscovery ---
     # Derive exp.name from config filename stem if not explicitly set in config.
-    # e.g. configs/apollo_sftl.yaml -> "apollo_sftl"
+    # e.g. configs/mp3.yaml -> "mp3"
     _conf_stem = os.path.splitext(os.path.basename(args.conf_dir))[0]
     if not cfg.exp.get("name"):
         cfg.exp.name = _conf_stem
