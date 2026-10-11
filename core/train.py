@@ -461,7 +461,7 @@ def _cached_block(cfg: "DictConfig"):
     if cached is None or not getattr(cached, "enabled", False):
         return None
     if getattr(cached, "mp3_degradation", None) is not None:
-        raise ValueError("augmentation.cached.mp3_degradation was replaced by augmentation.cached.compression.")
+        raise ValueError("augmentation.cached.mp3_degradation was replaced by datas.compression.")
     for key in ("pitch_shift", "noise"):
         blk = getattr(cached, key, None)
         if blk is not None and bool(blk.get("enabled", False)):
@@ -554,9 +554,15 @@ class _CompressionAug:
 
 
 def _compression_cfg(cfg: "DictConfig"):
-    """The enabled augmentation.cached.compression block, or None."""
-    cached = _cached_block(cfg)
-    blk = getattr(cached, "compression", None) if cached is not None else None
+    """The enabled datas.compression block, or None. The legacy augmentation.cached.compression
+    location is still read, with a one-time deprecation line."""
+    blk = getattr(cfg.datas, "compression", None)
+    if blk is None:
+        cached = _cached_block(cfg)
+        blk = getattr(cached, "compression", None) if cached is not None else None
+        if blk is not None and not getattr(_compression_cfg, "_warned", False):
+            _compression_cfg._warned = True
+            print_only("[compression] augmentation.cached.compression is deprecated -- move the block to datas.compression")
     if blk is None or not bool(blk.get("enabled", False)):
         return None
     return blk

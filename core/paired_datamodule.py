@@ -108,8 +108,8 @@ def _parse_aug_cfg(raw) -> AugmentationCfg:
     for key in ("compression", "mp3_degradation"):
         if _get(raw, key, None) is not None:
             raise ValueError(
-                f"augmentation.live.{key} is not allowed: compression augmentation is cached only. "
-                "Move it to augmentation.cached.compression."
+                f"augmentation.live.{key} is not allowed: LQ generation is not an augmentation. "
+                "Move it to datas.compression."
             )
 
     gain_raw = _get(raw, "gain", {})

@@ -26,6 +26,12 @@ datas:
   pin_memory: false
   val_bootstrap_chunks: 15
   align_data: 0
+  compression:
+    enabled: true
+    recipe: utils/degrade/stfl.json
+    seed: 0
+    pad_sec: 1.0
+    workers: 0
   augmentation:
     live:
       enabled: true
@@ -87,12 +93,6 @@ datas:
         enabled: false
         fraction: 0.5
         sigma: 0.002
-      compression:
-        enabled: true
-        recipe: utils/degrade/stfl.json
-        seed: 0
-        pad_sec: 1.0
-        workers: 0
 
 model:
   _target_: look2hear.models.apollo.Apollo
