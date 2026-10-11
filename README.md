@@ -57,9 +57,13 @@ On first run, sources are converted to WAV and chunked into fixed-length segment
 
 ### Generate LQ
 
-If you only have clean audio, Apollo-mod can generate the degraded side for you. Put the song in `HQ/` with no matching file in `LQ/` and turn on the [compression](#compression) block in your config. Songs that already have an LQ file are used as they are, so real pairs and generated ones can share a folder. This works for `val/` too.
+Apollo-mod can build the degraded (LQ) half of a pair for you. It takes a clean HQ song and runs it through a chain of lossy codecs, for example WMA followed by several MP3 encodes at different bitrates, and the result becomes that song's LQ. You can train on HQ/LQ pairs without ever having a degraded copy of the song.
 
-The degradation comes from a recipe. `utils/degrade/stfl.json` is the included example and you can copy it to make your own. The **Degrade audio** utility in the TUI uses the same recipes if you would rather generate LQ files ahead of time.
+**The recipe.** A recipe is a JSON file that describes the degradation you want as odds instead of one fixed chain: which codecs to use, how many times to re-encode, which bitrates and quality settings are likely, and what the last step is. For every chunk of audio, Apollo-mod rolls against the recipe and builds a different chain, so the model sees a range of the degradation instead of one exact copy. Supported codecs are MP3 (LAME or Fraunhofer), WMA, AAC, Vorbis, Opus, and MP2. `utils/degrade/stfl.json` is the included example (WMA, then several MP3 passes, finishing at 192 kbps CBR). Copy it and change the numbers to match your own material.
+
+**Using it.** Put a clean song in `HQ/` with no matching file in `LQ/` and turn on the [compression](#compression) block in your config, pointing it at your recipe. The generated LQ is aligned to the HQ automatically, so no `align_data` offset is needed. Songs that already have an LQ file are used as they are, so real pairs and generated ones can share a folder. It works for `val/` too. If you would rather have the degraded files written out ahead of time, the **Degrade audio** utility in the TUI can use the same recipes.
+
+This only helps when the degradation you are restoring can be reproduced by a codec chain. For anything else, supply your own LQ files.
 
 ### Validation Guidelines
 
