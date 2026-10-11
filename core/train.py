@@ -2265,6 +2265,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         print_only("[train] No best checkpoint found -- skipping best_model.pth export.")
 
 if __name__ == "__main__":
+    from config_schema import load_config
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--conf_dir",
@@ -2282,7 +2283,7 @@ if __name__ == "__main__":
         help="Resume from the last checkpoint in the experiment checkpoint directory.",
     )
     args = parser.parse_args()
-    cfg = OmegaConf.load(args.conf_dir)
+    cfg = load_config(args.conf_dir)
 
     # --- Autodiscovery ---
     # Derive exp.name from config filename stem if not explicitly set in config.
