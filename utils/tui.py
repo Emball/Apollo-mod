@@ -759,7 +759,21 @@ def screen_train(state: dict) -> None:
         state.setdefault("train", {})["last_config"] = cfg_path.name
         _save_state(state)
 
+        # Keep corpus preparation in the interactive flow. This is useful for
+        # large datasets, where users may want to build/refresh caches before
+        # committing to a training run.
+        action = _pick(
+            f"Train -- {cfg_path.stem}",
+            ["Train now", "Prepare data only", "Back"],
+            hint="Enter=select  Esc=back",
+        )
+        if action is None or action == 2:
+            start = idx
+            continue
+
         cmd = [_python_bin(), str(ROOT / "core" / "train.py"), "--conf_dir", str(cfg_path)]
+        if action == 1:
+            cmd.append("--prepare-only")
         # Derive run dir for pause file -- matches train.py's run isolation logic.
         # We use the base dir; train.py will pick the right timestamped subfolder.
         # The pause file goes in the base exp dir so train.py can always find it.
@@ -771,9 +785,14 @@ def screen_train(state: dict) -> None:
             _pause_dir = ROOT / _exp_dir / _exp_name
         except Exception:
             _pause_dir = None
-        _run_with_live_output(cmd, f"Training: {cfg_path.stem}",
+        label = f"Preparing data: {cfg_path.stem}" if action == 1 else f"Training: {cfg_path.stem}"
+        _run_with_live_output(cmd, label,
                               pause_dir=_pause_dir, state=state, cfg_path=cfg_path)
         start = idx
+        if action == 1:
+            # After preparation, return to config selection so the user can
+            # start training from the same TUI without relaunching Apollo.
+            continue
         return
 
 
