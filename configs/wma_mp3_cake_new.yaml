@@ -13,12 +13,16 @@ optimizations:
   ram_limit_fraction: 0.98  # kill process cleanly at this fraction of total system RAM
 
 training:
+  freeze_frontend: true
   n_layers_to_freeze: 3
   val_songs: 6
   val_rotate_every: 20000  # integer = steps between val window rotations, auto = never
   grad_accum_steps: 1
 
 datas:
+  cache_disk_reserve_gb: 0
+  chunk_overlap: 0.5
+  prefetch_factor: 2
   _target_: paired_datamodule.PairedAudioDataModule
   sr: 44100
   segment_sec: 3
@@ -130,6 +134,8 @@ metrics:
   sdr_type: sisdr
 
 system:
+  activation_cpu_offload: false
+  validation_overlap_add: false
   _target_: look2hear.system.audio_litmodule.AudioLightningModule
   gradient_checkpointing: true
   visqol_fraction: 1.0

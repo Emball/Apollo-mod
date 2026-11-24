@@ -358,8 +358,8 @@ class ChunkedPairDataset(Dataset):
         stem_to_indices: dict = defaultdict(list)
         for i, (lq_path, _) in enumerate(self.pairs):
             fname = os.path.splitext(os.path.basename(lq_path))[0]
-            # Strip trailing _NNNN chunk index to recover the song stem
-            stem = re.sub(r'_\d{4}$', '', fname)
+            # Chunk indices are zero-padded to at least four digits.
+            stem = re.sub(r'_\d{4,}$', '', fname)
             stem_to_indices[stem].append(i)
 
         self._in_second_half: list[bool] = [False] * len(self.pairs)
@@ -425,8 +425,13 @@ class _SwitchableSampler(torch.utils.data.Sampler):
 
     def __iter__(self):
         if self.indices is None:
-            return iter(torch.randperm(self.n).tolist())
+            return self._shuffled_indices()
         return iter(list(self.indices))
+
+    def _shuffled_indices(self):
+        permutation = torch.randperm(self.n)
+        for block in permutation.split(4096):
+            yield from block.tolist()
 
     def __len__(self) -> int:
         return self.n if self.indices is None else len(self.indices)
@@ -441,6 +446,7 @@ class PairedAudioDataModule(LightningDataModule):
         segment_sec: float = 2.0,
         batch_size: int = 1,
         num_workers: int = 4,
+        prefetch_factor: int = 2,
         pin_memory: bool = True,
         augmentation: Optional[dict] = None,
         **kwargs,  # absorb train-only keys (e.g. align_data) passed via Hydra
@@ -452,6 +458,9 @@ class PairedAudioDataModule(LightningDataModule):
         self.segment_sec          = segment_sec
         self.batch_size           = batch_size
         self.num_workers          = num_workers
+        self.prefetch_factor      = prefetch_factor
+        if self.prefetch_factor < 1:
+            raise ValueError("datas.prefetch_factor must be at least 1")
         self.pin_memory           = pin_memory
         self.aug_cfg              = _parse_aug_cfg(augmentation)
 
@@ -486,11 +495,11 @@ class PairedAudioDataModule(LightningDataModule):
         return DataLoader(
             self.data_train,
             batch_size=self.batch_size,
-            shuffle=True,
+            sampler=_SwitchableSampler(len(self.data_train)),
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             persistent_workers=self.num_workers > 0,
-            prefetch_factor=2 if self.num_workers > 0 else None,
+            prefetch_factor=self.prefetch_factor if self.num_workers > 0 else None,
             drop_last=True,
         )
 

@@ -17,6 +17,7 @@
 #   - Timer fix: val timer now stops after module hook (captures audio save time)
 #   - Step fix: val_check_interval interpreted in optimizer steps not batches
 ###
+from contextlib import nullcontext
 import os
 import threading
 import torchaudio
@@ -191,6 +192,8 @@ class AudioLightningModule(pl.LightningModule):
         val_songs=3,                # number of val songs to evaluate (full-song metrics + saved audio)
         val_rotate_every="auto",    # "auto" or int steps between preview-clip position rotations
         gradient_checkpointing=False,
+        activation_cpu_offload=False,
+        validation_overlap_add=False,
         grad_accum_steps=1,
         # VISQOL: fraction of val audio pairs to score (0.0 = off, 1.0 = all)
         visqol_fraction=1.0,
@@ -206,6 +209,8 @@ class AudioLightningModule(pl.LightningModule):
         self.val_audio_dir        = val_audio_dir
         self.val_songs            = val_songs
         self.val_rotate_every     = val_rotate_every
+        self.activation_cpu_offload = activation_cpu_offload
+        self.validation_overlap_add = validation_overlap_add
         self.visqol_fraction          = max(0.0, min(1.0, float(visqol_fraction)))
 
         # Val fixed-index lock (for val_loss / SI-SDR computation in validation_step)
@@ -302,7 +307,9 @@ class AudioLightningModule(pl.LightningModule):
             optimizer_d.zero_grad()
 
         # --- Generator forward (under Lightning's AMP context) ---
-        output = self(codec_data)
+        offload = self.activation_cpu_offload and codec_data.is_cuda
+        with torch.autograd.graph.save_on_cpu() if offload else nullcontext():
+            output = self(codec_data)
 
         # --- Discriminator update ---
         # output detached so D grads don't flow into the generator.
@@ -379,18 +386,20 @@ class AudioLightningModule(pl.LightningModule):
         ds_idx   = int(ds_idx[0])
         song_key = song_key[0] if isinstance(song_key, (list, tuple)) else song_key
 
-        if self.trainer.sanity_checking:
-            est_sources = self(codec_data)
-            loss = self.metrics(est_sources, ori_data)
-            return {"sisdr": loss}
-
         # Once locked, skip chunks not in the fixed set
-        if self._val_fixed_indices is not None and ds_idx not in self._val_fixed_indices:
+        sanity_checking = self.trainer.sanity_checking
+        if not sanity_checking and self._val_fixed_indices is not None and ds_idx not in self._val_fixed_indices:
             return {"sisdr": None}
 
-        est_sources = self(codec_data)
+        if self.validation_overlap_add:
+            est_sources = self._infer_clip(codec_data[0].cpu()).unsqueeze(0)
+            ori_data = ori_data.cpu()
+        else:
+            est_sources = self(codec_data)
         loss = self.metrics(est_sources, ori_data)
 
+        if sanity_checking:
+            return {"sisdr": loss}
         self._val_loss_sum   += float(loss)
         self._val_loss_count += 1
         self.validation_step_outputs.append(float(loss))

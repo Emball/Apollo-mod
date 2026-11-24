@@ -12,6 +12,7 @@ pyyaml
 
 # HuggingFace
 huggingface-hub==0.20.3
+filelock
 
 # Audio
 librosa==0.10.1

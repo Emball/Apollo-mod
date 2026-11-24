@@ -1,12 +1,8 @@
 # @claude last-modified: 2026-05-05T06:34:39Z
 # @claude last-commit: feat: major update -- TUI, augmentation system, gradient checkpointing, optimization bootstrap
 
-# Must be set before torch is imported -- CUDA allocator reads this env var at
-# device init time. Setting it inside apply_optimizations() (post-import) has
-# no effect because CUDA is already initialised by then.
 import os
 import sys
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import json
 from collections import deque
@@ -36,12 +32,9 @@ def apply_optimizations(cfg: DictConfig) -> None:
     cudnn_benchmark = opt.get("cudnn_benchmark", True)
     torch.backends.cudnn.benchmark = cudnn_benchmark
 
-    # CUDA allocator: expandable segments (reduces fragmentation)
-    alloc_conf_parts = []
-    if opt.get("expandable_segments", True):
-        alloc_conf_parts.append("expandable_segments:True")
-    if alloc_conf_parts:
-        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = ",".join(alloc_conf_parts)
+    # The allocator reads this at CUDA initialization. Windows builds may lack it.
+    if os.name != "nt" and opt.get("expandable_segments", True):
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
     # Triton kernel cache (compiled kernels persist between runs)
     triton_cache = opt.get("triton_cache", True)
@@ -214,109 +207,75 @@ _atexit.register(_md5_index_save)
 
 # Data preparation -- runs before training, skips gracefully if already done
 
-def _load_wav_stereo(path: str, frame_offset: int = 0):
-    """Load audio (WAV, MP3, FLAC), resample to _SR if needed, force stereo float32.
-
-    frame_offset: skip this many samples at the start of the file.
-    For MP3s this is passed directly to torchaudio.load so the decoder
-    seeks past the offset rather than decoding and discarding it.
-    """
-    import torchaudio
-    wav, sr = torchaudio.load(path, frame_offset=frame_offset)
-    wav = wav.float()
-    if sr != _SR:
-        wav = torchaudio.functional.resample(wav, sr, _SR)
-    if wav.shape[0] == 1:
-        wav = wav.repeat(2, 1)
-    elif wav.shape[0] > 2:
-        wav = wav[:2]
-    return wav
-
-
 def _save_wav_f32(tensor, path: str, sr: int = None) -> None:
-    """Save a tensor as 32-bit float WAV. No quantisation — full dynamic range preserved."""
+    """Save a tensor as 32-bit float WAV, preserving its dynamic range."""
     import torchaudio
     torchaudio.save(path, tensor.float().cpu(), sr or _SR, encoding="PCM_F", bits_per_sample=32)
 
 
-def _chunk_starts(n_samples: int) -> list:
-    if n_samples < _CHUNK_SAMPLES:
-        return []
-    return list(range(0, n_samples - _CHUNK_SAMPLES + 1, _HOP_SAMPLES))
+def _chunk_starts(n_samples: int) -> range:
+    return range(0, n_samples - _CHUNK_SAMPLES + 1, _HOP_SAMPLES)
+
+
+def _check_prepare_stop():
+    stop_file = os.environ.get("APOLLO_STOP_FILE")
+    if stop_file and os.path.exists(stop_file):
+        raise SystemExit(0)
 
 
 def _slice_and_save(
-    lq_wav, hq_wav, stem: str, lq_out: str, hq_out: str,
-    cached_aug_fn=None,
-    progress_cb=None,
-    compression=None,
-    generate_lq: bool = False,
-) -> list:
-    """Slice a pair into overlapping chunks and write each one immediately, so long
-    songs never sit in memory as chunk lists.
+    lq_source, hq_source, stem: str, lq_out: str, hq_out: str,
+    cached_aug_fn=None, progress_cb=None, compression=None, generate_lq: bool = False,
+) -> int:
+    """Read and write bounded chunks while preserving full-song normalization."""
+    from concurrent.futures import ThreadPoolExecutor
+    from audio_windows import bounded_map
 
-    cached_aug_fn: callable(lq, hq, in_second_half) -> (lq, hq) for gain, polarity and
-        stereo alternation.
-    compression: optional _CompressionAug. With generate_lq (the song has no LQ file and lq_wav
-        is a copy of HQ), every chunk's LQ is encoded through its own random codec chain before
-        cached_aug_fn runs. A chunk whose compression fails is dropped, never written with a clean
-        LQ. Songs with a real LQ are never encoded.
-    progress_cb: optional callable(chunks_done, chunks_total) called after each chunk write.
-    """
-    import concurrent.futures as _cf
-
-    min_len = min(lq_wav.shape[-1], hq_wav.shape[-1])
-    lq_wav  = lq_wav[:, :min_len]
-    hq_wav  = hq_wav[:, :min_len]
-
-    song_peak = max(lq_wav.abs().max().item(), hq_wav.abs().max().item())
-    if song_peak > 1.0:
-        lq_wav = lq_wav / song_peak
-        hq_wav = hq_wav / song_peak
-
-    starts = _chunk_starts(min_len)
-    total_chunks = len(starts)
+    frames = min(lq_source.frames, hq_source.frames)
+    starts = _chunk_starts(frames)
     if not starts:
-        print_only(f"[chunk] {stem}: shorter than one {_CHUNK_SEC:g}s chunk ({min_len / _SR:.2f}s) -- skipped")
-    else:
-        _tail = min_len - (starts[-1] + _CHUNK_SAMPLES)
-        if _tail > _SR // 2:
-            print_only(f"[chunk] {stem}: last {_tail / _SR:.1f}s does not fill a chunk and is not used")
-    use_comp = compression is not None and generate_lq
-    half = min_len / 2
+        print_only(f"[chunk] {stem}: shorter than one {_CHUNK_SEC:g}s chunk ({frames / _SR:.2f}s) -- skipped")
+        return 0
+    tail = frames - (starts[-1] + _CHUNK_SAMPLES)
+    if tail > _SR // 2:
+        print_only(f"[chunk] {stem}: last {tail / _SR:.1f}s does not fill a chunk and is not used")
 
-    def _make(idx_start):
-        idx, start = idx_start
-        lq_c = lq_wav[:, start:start + _CHUNK_SAMPLES].clone()
-        hq_c = hq_wav[:, start:start + _CHUNK_SAMPLES].clone()
-        if use_comp:
-            lq_c = compression.apply(lq_wav, start, _CHUNK_SAMPLES, stem, idx, lq_c)
-            if lq_c is None:
-                return None
+    hq_peak = hq_source.peak(frames)
+    scale = max(1.0, hq_peak, lq_source.peak(frames) if lq_source is not hq_source else hq_peak)
+
+    def read_lq(start, length):
+        return lq_source.read(start, length) / scale
+
+    def write_chunk(item):
+        _check_prepare_stop()
+        idx, start = item
+        filename = f"{stem}_{idx:04d}.wav"
+        lq_path = os.path.join(lq_out, filename)
+        hq_path = os.path.join(hq_out, filename)
+        if generate_lq:
+            lq = compression.apply(read_lq, frames, start, _CHUNK_SAMPLES, stem, idx)
+            if lq is None:
+                from pathlib import Path
+                Path(lq_path).unlink(missing_ok=True)
+                Path(hq_path).unlink(missing_ok=True)
+                return False
+        else:
+            lq = read_lq(start, _CHUNK_SAMPLES)
+        hq = hq_source.read(start, _CHUNK_SAMPLES) / scale
         if cached_aug_fn is not None:
-            lq_c, hq_c = cached_aug_fn(lq_c, hq_c, in_second_half=start >= half)
-        fname = f"{stem}_{idx:04d}.wav"
-        _save_wav_f32(lq_c, os.path.join(lq_out, fname))
-        _save_wav_f32(hq_c, os.path.join(hq_out, fname))
-        return fname
+            lq, hq = cached_aug_fn(lq, hq, in_second_half=start >= frames / 2)
+        _save_wav_f32(lq, lq_path)
+        _save_wav_f32(hq, hq_path)
+        if progress_cb:
+            progress_cb()
+        return True
 
-    saved = []
-    workers = compression.workers if use_comp else 1
-    if workers > 1:
-        with _cf.ThreadPoolExecutor(max_workers=workers) as pool:
-            for n, fname in enumerate(pool.map(_make, enumerate(starts)), start=1):
-                if fname is not None:
-                    saved.append(fname)
-                if progress_cb:
-                    progress_cb(n, total_chunks)
-    else:
-        for n, item in enumerate(enumerate(starts), start=1):
-            fname = _make(item)
-            if fname is not None:
-                saved.append(fname)
-            if progress_cb:
-                progress_cb(n, total_chunks)
-    return saved
+    workers = compression.workers if generate_lq else 1
+    if workers == 1:
+        return sum(map(write_chunk, enumerate(starts)))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return sum(bounded_map(pool, write_chunk, enumerate(starts), workers))
+
 
 def _normalize_data_dir(src_root: str, split_name: str) -> bool:
     """
@@ -519,7 +478,7 @@ class _CompressionAug:
         with self._lock:
             self.stats[key] = self.stats.get(key, 0) + 1
 
-    def apply(self, lq_wav, start: int, length: int, stem: str, idx: int, lq_chunk):
+    def apply(self, read_audio, frames: int, start: int, length: int, stem: str, idx: int):
         import random as _random
         import uuid
         from pathlib import Path
@@ -530,8 +489,8 @@ class _CompressionAug:
         rng = _random.Random(f"{self.seed}:{stem}:{idx}")
         chain = cmp.sample_chain(self.rc, rng)
         rd_start = max(0, start - self.pad)
-        rd_stop = min(lq_wav.shape[-1], start + length + self.pad)
-        window = lq_wav[:, rd_start:rd_stop].T.numpy().astype(np.float64)
+        rd_stop = min(frames, start + length + self.pad)
+        window = read_audio(rd_start, rd_stop - rd_start).T.numpy().astype(np.float64)
         core, info = cmp.degrade_window(
             window, start - rd_start, length, self.sr, chain, self.ffmpeg,
             Path(self.tmp_root) / uuid.uuid4().hex,
@@ -585,7 +544,7 @@ def _compression_digest(cfg: "DictConfig") -> str:
     return hashlib.md5(_json.dumps(data, sort_keys=True).encode(), usedforsecurity=False).hexdigest()[:12]
 
 
-def _build_compression(cfg: "DictConfig"):
+def _build_compression(cfg: "DictConfig", tmp_parent=None):
     """Build the _CompressionAug for this config, or None when compression is off."""
     blk = _compression_cfg(cfg)
     if blk is None:
@@ -609,7 +568,7 @@ def _build_compression(cfg: "DictConfig"):
         rc=rc, ffmpeg=ffmpeg, sr=int(getattr(cfg.datas, "sr", _SR)),
         seed=int(blk.get("seed", 0)),
         pad_sec=float(blk.get("pad_sec", rc.get("pad_sec", 1.0))), workers=workers,
-        tmp_root=tempfile.mkdtemp(prefix="apollo_comp_"),
+        tmp_root=tempfile.mkdtemp(prefix="apollo_comp_", dir=tmp_parent),
         max_lag=int(rc.get("max_lag", 16384)), min_corr=float(rc.get("min_corr", 0.5)),
         silence_dbfs=float(rc.get("silence_dbfs", -60)), acmenc=acmenc)
     print_only(f"[compression] recipe={os.path.basename(path)}  workers={workers}  acmenc={acmenc or 'off'}")
@@ -638,12 +597,13 @@ def _source_md5s(src_root: str) -> str:
     return h.hexdigest()
 
 
-def _chunk_cache_key(src_root: str, fixed_delay, aug_cfg, extra: str = "") -> str:
+def _chunk_cache_key(src_root: str, fixed_delay, aug_cfg, extra: str = "",
+                     *, segment_sec=None, overlap=None) -> str:
     """Stable cache key: source file md5s + chunk params + aug params."""
     import hashlib, json as _json
     params = {
-        "segment_sec": _CHUNK_SEC,
-        "overlap": _OVERLAP,
+        "segment_sec": _CHUNK_SEC if segment_sec is None else segment_sec,
+        "overlap": _OVERLAP if overlap is None else overlap,
         "fixed_delay": str(fixed_delay),
         "aug": aug_cfg if aug_cfg is None else _json.dumps(
             OmegaConf.to_container(aug_cfg, resolve=True), sort_keys=True
@@ -658,9 +618,12 @@ def _chunk_cache_key(src_root: str, fixed_delay, aug_cfg, extra: str = "") -> st
 
 def _chunk_cache_lookup(key: str, split: str) -> str | None:
     """Return the cache chunk dir for this key+split if it exists and has WAV files, else None."""
-    d = os.path.join(_CHUNK_CACHE_DIR, key, split, "LQ")
-    if os.path.isdir(d) and any(f.endswith(".wav") for f in os.listdir(d)):
-        return os.path.join(_CHUNK_CACHE_DIR, key, split)
+    root = os.path.join(_CHUNK_CACHE_DIR, key, split)
+    d = os.path.join(root, "LQ")
+    if os.path.isfile(os.path.join(root, ".manifest.json")) and os.path.isdir(d):
+        with os.scandir(d) as entries:
+            if any(entry.name.endswith(".wav") for entry in entries):
+                return root
     return None
 
 
@@ -725,7 +688,7 @@ def _prune_usr_cache(max_age_days, cache_dir: str = None) -> None:
 
 
 def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=None, fixed_delay: int = None,
-                 compression=None) -> int:
+                 compression=None, disk_reserve_bytes: int = 0) -> int:
     """
     Normalize src_root into LQ/ + HQ/ layout (if not already), then chunk all
     matched pairs into dst_root/LQ and dst_root/HQ.
@@ -760,7 +723,7 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
             print_only(f"[data/{split_name}] Already chunked ({n} pairs) -- skipping.")
             return n
         else:
-            print_only(f"[data/{split_name}] Chunk parameters changed -- re-chunking.")
+            print_only(f"[data/{split_name}] Incomplete or incompatible cache -- checking completed songs.")
 
     # Normalize the source layout first
     if not _normalize_data_dir(src_root, split_name):
@@ -801,6 +764,9 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
     print_only(f"[data/{split_name}] {sep}\n")
 
     import threading, concurrent.futures as _cf
+    import shutil
+    import soundfile as sf
+    from audio_windows import WaveSource, bounded_map
 
     lq_offset = fixed_delay if (fixed_delay is not None and fixed_delay > 0) else 0
     hq_offset = (-fixed_delay) if (fixed_delay is not None and fixed_delay < 0) else 0
@@ -882,36 +848,67 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
             wav = wav.repeat(2, 1)
         elif wav.shape[0] > 2:
             wav = wav[:2]
-        torchaudio.save(dst, wav, _SR, encoding="PCM_F", bits_per_sample=32)
+        import tempfile
+        fd, tmp_path = tempfile.mkstemp(suffix=".wav", dir=_CACHE_DIR)
+        os.close(fd)
+        try:
+            _save_wav_f32(wav, tmp_path)
+            os.replace(tmp_path, dst)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
         print_only(f"[cache] Wrote {os.path.basename(dst)}  ({os.path.basename(src)})")
         return dst
 
     use_ffmpeg = _has_ffmpeg()
     # Files needing cache conversion: non-WAV always; WAV with alignment trim also
     # needs a cached trimmed version. WAVs with no trim are used directly.
+    def _needs_conversion(path, offset):
+        return offset > 0 or os.path.splitext(path)[1].lower() != ".wav" or sf.info(path).samplerate != _SR
+
     needs_cache = {
-        s for s in matched
-        if os.path.splitext(_lq_path(s))[1].lower() != ".wav"
-        or os.path.splitext(hq_files[s])[1].lower() != ".wav"
-        or max(_offsets(s)) > 0
+        stem for stem in matched
+        if _needs_conversion(_lq_path(stem), _offsets(stem)[0])
+        or _needs_conversion(os.path.join(hq_src, hq_files[stem]), _offsets(stem)[1])
     }
 
     wav_paths: dict[str, tuple[str, str]] = {}
 
     if needs_cache:
+        conversion_bytes = 0
+        counted = set()
+        for stem in needs_cache:
+            lq_off, hq_off = _offsets(stem)
+            for source, offset in ((_lq_path(stem), lq_off),
+                                   (os.path.join(hq_src, hq_files[stem]), hq_off)):
+                if not _needs_conversion(source, offset):
+                    continue
+                target = _cached_wav_path(source, offset)
+                if target in counted or os.path.isfile(target):
+                    continue
+                counted.add(target)
+                try:
+                    info = sf.info(source)
+                except RuntimeError:
+                    continue  # FFmpeg handles formats unsupported by libsndfile.
+                frames = max(0, int(info.frames * _SR / info.samplerate) - offset)
+                conversion_bytes += frames * 2 * 4 + 128
+        if conversion_bytes and conversion_bytes + disk_reserve_bytes > shutil.disk_usage(_CACHE_DIR).free:
+            raise OSError(f"Source WAV cache needs about {conversion_bytes / 1e9:.1f} GB plus "
+                          f"{disk_reserve_bytes / 1e9:.1f} GB reserved at {_CACHE_DIR}.")
         to_wav = _to_cached_wav_ffmpeg if use_ffmpeg else _to_cached_wav_torchaudio
         method = "FFmpeg" if use_ffmpeg else "torchaudio (install ffmpeg-python for faster conversion)"
         print_only(f"[data/{split_name}] Caching {len(needs_cache)} source(s) to WAV via {method}...")
         done_conv = [0]
 
         def _cache_stem(stem):
+            _check_prepare_stop()
             lq_p = _lq_path(stem)
             hq_p = os.path.join(hq_src, hq_files[stem])
             lq_off, hq_off = _offsets(stem)
-            lq_ext = os.path.splitext(lq_p)[1].lower()
-            hq_ext = os.path.splitext(hq_p)[1].lower()
-            new_lq = to_wav(lq_p, lq_off) if (lq_ext != ".wav" or lq_off > 0) else lq_p
-            new_hq = to_wav(hq_p, hq_off) if (hq_ext != ".wav" or hq_off > 0) else hq_p
+            new_lq = to_wav(lq_p, lq_off) if _needs_conversion(lq_p, lq_off) else lq_p
+            new_hq = new_lq if hq_p == lq_p and hq_off == lq_off else (
+                to_wav(hq_p, hq_off) if _needs_conversion(hq_p, hq_off) else hq_p)
             with print_lock:
                 done_conv[0] += 1
                 print_only(f"[data/{split_name}]   Cached {done_conv[0]}/{len(needs_cache)}: {stem}")
@@ -919,7 +916,7 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
 
         n_conv = min(len(needs_cache), 2)  # FFmpeg is disk+CPU heavy; >2 concurrent thrashes the system
         with _cf.ThreadPoolExecutor(max_workers=n_conv) as ex:
-            for stem, lq_p, hq_p in ex.map(_cache_stem, sorted(needs_cache)):
+            for stem, lq_p, hq_p in bounded_map(ex, _cache_stem, sorted(needs_cache), n_conv):
                 wav_paths[stem] = (lq_p, hq_p)
 
         for stem in matched:
@@ -932,23 +929,51 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
             for s in matched
         }
 
-    # --- Phase 2: Parallel WAV chunking ---
-    # Sources are now guaranteed WAV. torchaudio WAV load is near-zero-copy
-    # (GIL released during I/O). Numpy slicing and wave.write are also GIL-free.
-    # cap at 2 to avoid OOM on long source files; one at a time when compression runs its own pool
+    # --- Phase 2: Read and write bounded WAV windows ---
     n_workers = 1 if compression is not None else min(len(matched), 2)
+    completed_dir = os.path.join(dst_root, ".completed_songs")
+    os.makedirs(completed_dir, exist_ok=True)
+
+    def _song_marker(stem):
+        import hashlib
+        return os.path.join(completed_dir, hashlib.sha256(stem.encode()).hexdigest())
+
+    def _completed_count(stem):
+        try:
+            with open(_song_marker(stem), encoding="ascii") as marker:
+                return int(marker.read())
+        except (FileNotFoundError, ValueError):
+            return None
+
+    def _sources(stem):
+        lq_path, hq_path = wav_paths[stem]
+        lq = WaveSource(lq_path, _SR)
+        return lq, lq if hq_path == lq_path else WaveSource(hq_path, _SR)
+
+    completed = {stem: count for stem in matched if (count := _completed_count(stem)) is not None}
+    pending = [stem for stem in matched if stem not in completed]
+    max_chunks = 0
+    for stem in pending:
+        lq, hq = _sources(stem)
+        max_chunks += len(_chunk_starts(min(lq.frames, hq.frames)))
+    required = max_chunks * 2 * (_CHUNK_SAMPLES * 2 * 4 + 128)
+    free = shutil.disk_usage(dst_root).free
+    if required and required + disk_reserve_bytes > free:
+        raise OSError(f"Training chunk cache needs up to {required / 1e9:.1f} GB for remaining songs, "
+                      f"with {free / 1e9:.1f} GB free and {disk_reserve_bytes / 1e9:.1f} GB reserved at "
+                      f"{dst_root}. Reduce datas.chunk_overlap or free disk space.")
+    print_only(f"[data/{split_name}] {len(completed)} songs already cached. "
+               f"Remaining chunk cache: up to {required / 1e9:.2f} GB.")
     total = 0
     chunks_done = [0]
-    songs_done = [0]
+    songs_done = [len(completed)]
     n_songs = len(matched)
     _REPORT_EVERY = 50  # print a progress line every N chunks across all songs
 
     def _chunk_stem(stem):
-        lq_p, hq_p = wav_paths[stem]
-        lq_wav = _load_wav_stereo(lq_p)
-        hq_wav = lq_wav if hq_p == lq_p else _load_wav_stereo(hq_p)
+        lq, hq = _sources(stem)
 
-        def _progress(done, total_c):
+        def _progress():
             with print_lock:
                 chunks_done[0] += 1
                 if chunks_done[0] % _REPORT_EVERY == 0:
@@ -957,31 +982,35 @@ def _chunk_split(src_root: str, dst_root: str, split_name: str, cached_aug_fn=No
                         f"{chunks_done[0]} chunks"
                     )
 
-        saved = _slice_and_save(lq_wav, hq_wav, stem, lq_out, hq_out,
+        saved = _slice_and_save(lq, hq, stem, lq_out, hq_out,
                                 cached_aug_fn=cached_aug_fn,
                                 progress_cb=_progress,
                                 compression=compression,
                                 generate_lq=stem in generated)
+        marker_path = _song_marker(stem)
+        with open(marker_path + ".tmp", "w", encoding="ascii") as marker:
+            marker.write(str(saved))
+        os.replace(marker_path + ".tmp", marker_path)
         with print_lock:
             songs_done[0] += 1
-            _lost = len(_chunk_starts(min(lq_wav.shape[-1], hq_wav.shape[-1]))) - len(saved)
-            print_only(f"[data/{split_name}]   {stem}: done ({len(saved)} chunks"
+            _lost = len(_chunk_starts(min(lq.frames, hq.frames))) - saved
+            print_only(f"[data/{split_name}]   {stem}: done ({saved} chunks"
                        + (f", {_lost} dropped: compression failed" if _lost > 0 else "") + f")  [{songs_done[0]}/{n_songs}]")
-        return len(saved)
+        return saved
 
+    total = sum(completed.values())
     with _cf.ThreadPoolExecutor(max_workers=n_workers) as pool:
-        for n in pool.map(_chunk_stem, matched):
+        for n in bounded_map(pool, _chunk_stem, pending, n_workers):
             total += n
 
     print_only(f"[data/{split_name}] Done -- {total} chunk pairs -> {dst_root}\n")
     if compression is not None:
-        import shutil as _shutil
-        _shutil.rmtree(compression.tmp_root, ignore_errors=True)
         if compression.stats:
             print_only(f"[data/{split_name}] compression: " + ", ".join(f"{v} {k}" for k, v in sorted(compression.stats.items())))
     import json as _json
-    with open(manifest_path, "w") as _f:
+    with open(manifest_path + ".tmp", "w") as _f:
         _json.dump(_manifest_params(), _f, indent=2)
+    os.replace(manifest_path + ".tmp", manifest_path)
     return total
 
 def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 10.0, fixed_delay: int = None,
@@ -1003,6 +1032,7 @@ def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 10.0, fix
     """
     import torch
     import torchaudio
+    from audio_windows import WaveSource
 
     lq_src = os.path.join(src_root, "LQ")
     hq_src = os.path.join(src_root, "HQ")
@@ -1021,33 +1051,34 @@ def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 10.0, fix
         if os.path.isfile(dst):
             _touch(dst)
             return dst
+        import tempfile
+        fd, tmp = tempfile.mkstemp(suffix=".wav", dir=_CACHE_DIR)
+        os.close(fd)
         try:
-            import ffmpeg, tempfile as _tmp
-            fd, tmp = _tmp.mkstemp(suffix=".wav", dir=_CACHE_DIR)
-            os.close(fd)
-            (ffmpeg.input(src).output(tmp, format="wav", acodec="pcm_f32le", ar=_SR, ac=2)
-             .overwrite_output().run(capture_stdout=True, capture_stderr=True))
+            try:
+                import ffmpeg
+                (ffmpeg.input(src).output(tmp, format="wav", acodec="pcm_f32le", ar=_SR, ac=2)
+                 .overwrite_output().run(capture_stdout=True, capture_stderr=True))
+            except (ImportError, FileNotFoundError):
+                wav, sr = torchaudio.load(src)
+                if sr != _SR:
+                    wav = torchaudio.functional.resample(wav, sr, _SR)
+                wav = wav.repeat(2, 1) if wav.shape[0] == 1 else wav[:2]
+                _save_wav_f32(wav, tmp)
             os.replace(tmp, dst)
-        except Exception:
-            wav, sr = torchaudio.load(src)
-            wav = wav.float()
-            if sr != _SR:
-                wav = torchaudio.functional.resample(wav, sr, _SR)
-            if wav.shape[0] == 1: wav = wav.repeat(2, 1)
-            elif wav.shape[0] > 2: wav = wav[:2]
-            torchaudio.save(dst, wav, _SR, encoding="PCM_F", bits_per_sample=32)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
         return dst
 
-    def _pick_two_rms_clips(wav: "torch.Tensor", clip_samples: int, sr: int,
+    def _pick_two_rms_clips(source, n: int, clip_samples: int, sr: int,
                              margin_sec: float = 5.0) -> "list[int]":
         """
         Return start-sample offsets for two non-overlapping highest-RMS windows.
         Skips the first and last margin_sec of the file. Clips must be separated
         by at least clip_samples samples.
-        mono wav: shape (T,)
         """
         margin = int(margin_sec * sr)
-        n = wav.shape[-1]
         search_start = margin
         search_end   = n - margin - clip_samples
         if search_end <= search_start:
@@ -1057,13 +1088,11 @@ def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 10.0, fix
 
         # Scan with hop = clip_samples // 4 for reasonable resolution
         hop = max(1, clip_samples // 4)
-        offsets = list(range(search_start, search_end + 1, hop))
-        if not offsets:
-            offsets = [search_start]
+        offsets = range(search_start, search_end + 1, hop)
 
         rms_scores = []
         for s in offsets:
-            window = wav[s: s + clip_samples]
+            window = source.read(s, clip_samples).mean(dim=0)
             rms = float(window.pow(2).mean().sqrt())
             rms_scores.append((rms, s))
         rms_scores.sort(key=lambda x: -x[0])
@@ -1114,21 +1143,14 @@ def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 10.0, fix
     print_only("[data/val] ==========================================================\n")
     n = 0
     for song_idx, (lq_path, hq_path) in enumerate(pairs):
+        _check_prepare_stop()
         generate = lq_path is None
         if generate and compressor is None:
             continue
-        hq_wav_path = _cached_wav(hq_path)
-        hq_wav, _ = torchaudio.load(hq_wav_path)  # already at _SR, stereo
-        if generate:
-            lq_wav = hq_wav
-        else:
-            lq_wav, _ = torchaudio.load(_cached_wav(lq_path))
-
-        min_frames = min(lq_wav.shape[-1], hq_wav.shape[-1])
-
-        # Mono mix HQ for RMS selection (reference should be clean per ViSQOL spec)
-        hq_mono = hq_wav[:, :min_frames].mean(dim=0)  # (T,)
-        starts = _pick_two_rms_clips(hq_mono, clip_samples, _SR)
+        hq_source = WaveSource(_cached_wav(hq_path), _SR)
+        lq_source = hq_source if generate else WaveSource(_cached_wav(lq_path), _SR)
+        min_frames = min(lq_source.frames, hq_source.frames)
+        starts = _pick_two_rms_clips(hq_source, min_frames, clip_samples, _SR)
 
         stem = os.path.splitext(os.path.basename(hq_path))[0]
         for clip_idx, start in enumerate(starts):
@@ -1138,16 +1160,17 @@ def _extract_val_clips(src_root: str, dst_root: str, clip_sec: float = 10.0, fix
                 lq_start = max(0, start - fixed_delay) if fixed_delay and fixed_delay > 0 else start
                 hq_start = max(0, start + fixed_delay) if fixed_delay and fixed_delay < 0 else start
 
-            hq_clip = hq_wav[:, hq_start: hq_start + clip_samples]
+            hq_clip = hq_source.read(hq_start, clip_samples)
             if generate:
-                lq_clip  = compressor.apply(hq_wav, hq_start, clip_samples, f"{stem}_val", clip_idx, hq_clip.clone())
+                lq_clip = compressor.apply(hq_source.read, hq_source.frames, hq_start,
+                                           clip_samples, f"{stem}_val", clip_idx)
                 if lq_clip is None:
                     print_only(f"[data/val]   {stem} clip{clip_idx}: compression failed -- clip dropped")
                     continue
                 if lq_clip.shape[-1] > clip_samples:
                     lq_clip = lq_clip[:, :clip_samples]
             else:
-                lq_clip = lq_wav[:, lq_start: lq_start + clip_samples]
+                lq_clip = lq_source.read(lq_start, clip_samples)
 
             # Pad to exact clip_samples if the file was shorter
             if lq_clip.shape[-1] < clip_samples:
@@ -1188,15 +1211,46 @@ def _val_clip_key(cfg: "DictConfig", data_val: str, fixed_delay) -> str:
                 if os.path.splitext(f)[1].lower() in _SUPPORTED_EXTS} if os.path.isdir(d) else set()
     if _stems(hq_dir) - _stems(lq_dir):
         extra += "_gen" + _compression_digest(cfg)
-    return _chunk_cache_key(data_val, fixed_delay, None, extra=extra)
+    return _chunk_cache_key(data_val, fixed_delay, None, extra=extra,
+                            segment_sec=float(cfg.datas.get("segment_sec", 3)),
+                            overlap=float(cfg.datas.get("chunk_overlap", 0.5)))
 
 
 def prepare_data(cfg: DictConfig) -> None:
-    # Sync chunk size globals from config so _slice_and_save uses the correct sizes.
-    global _CHUNK_SEC, _CHUNK_SAMPLES, _HOP_SAMPLES
+    """Serialize cache preparation across Apollo processes."""
+    from filelock import FileLock, Timeout
+
+    os.makedirs(_CHUNK_CACHE_DIR, exist_ok=True)
+    lock = FileLock(os.path.join(_CHUNK_CACHE_DIR, ".prepare.lock"))
+    while True:
+        _check_prepare_stop()
+        try:
+            lock.acquire(timeout=1)
+            break
+        except Timeout:
+            continue
+    try:
+        _prepare_data(cfg)
+    finally:
+        lock.release()
+
+
+def _prepare_data(cfg: DictConfig) -> None:
+    import shutil
+    import tempfile
+
+    global _CHUNK_SEC, _CHUNK_SAMPLES, _HOP_SAMPLES, _OVERLAP
     _CHUNK_SEC     = float(getattr(cfg.datas, "segment_sec", 3))
+    _OVERLAP = float(cfg.datas.get("chunk_overlap", 0.5))
+    if not 0 <= _OVERLAP < 1 or _CHUNK_SEC <= 0:
+        raise ValueError("datas.chunk_overlap must be in [0, 1) and datas.segment_sec must be positive")
     _CHUNK_SAMPLES = int(_CHUNK_SEC * _SR)
     _HOP_SAMPLES   = int(_CHUNK_SAMPLES * (1 - _OVERLAP))
+    if _HOP_SAMPLES < 1:
+        raise ValueError("Chunk length and overlap must leave a hop of at least one audio sample")
+    disk_reserve_bytes = int(float(cfg.datas.get("cache_disk_reserve_gb", 0)) * 1e9)
+    if disk_reserve_bytes < 0:
+        raise ValueError("datas.cache_disk_reserve_gb must be nonnegative")
     """
     Auto-preprocessing pipeline called before training.
 
@@ -1239,8 +1293,14 @@ def prepare_data(cfg: DictConfig) -> None:
         print_only(f"[data/train] Cache hit ({train_key[:8]}...) -- skipping chunking.")
     else:
         train_chunks = os.path.join(_CHUNK_CACHE_DIR, train_key, "train")
-        _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn, fixed_delay=fixed_delay,
-                     compression=_build_compression(cfg))
+        compression = _build_compression(cfg)
+        try:
+            _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn,
+                         fixed_delay=fixed_delay, compression=compression,
+                         disk_reserve_bytes=disk_reserve_bytes)
+        finally:
+            if compression is not None:
+                shutil.rmtree(compression.tmp_root, ignore_errors=True)
 
     # Val clips: two highest-RMS 10s clips per song (ViSQOL-compliant), cached to disk.
     # Reuses the WAV conversion cache from _chunk_split so no re-encoding.
@@ -1251,8 +1311,16 @@ def prepare_data(cfg: DictConfig) -> None:
     if os.path.isdir(val_lq_check) and any(f.endswith(".wav") for f in os.listdir(val_lq_check)):
         print_only(f"[data/val]   Cache hit ({val_clip_key[:8]}...) -- skipping clip extraction.")
     else:
-        _extract_val_clips(data_val, val_wav_dir, clip_sec=val_clip_sec, fixed_delay=fixed_delay,
-                           compression_fn=lambda: _build_compression(cfg))
+        val_cache_root = os.path.dirname(val_wav_dir)
+        os.makedirs(val_cache_root, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".val-", dir=val_cache_root) as work_dir:
+            staged_val = os.path.join(work_dir, "val")
+            _extract_val_clips(data_val, staged_val, clip_sec=val_clip_sec, fixed_delay=fixed_delay,
+                               compression_fn=lambda: _build_compression(cfg, tmp_parent=work_dir))
+            if os.path.isdir(staged_val):
+                if os.path.isdir(val_wav_dir):
+                    shutil.rmtree(val_wav_dir)
+                os.replace(staged_val, val_wav_dir)
 
     # Expose resolved absolute paths back into cfg so the datamodule picks them up.
     with open_dict(cfg):
@@ -1455,7 +1523,7 @@ def _remap_checkpoint_optimizers(ckpt_data: dict, system) -> bool:
     return changed
 
 
-def freeze_early_layers(model, n_layers_to_freeze=4):
+def freeze_early_layers(model, n_layers_to_freeze=4, freeze_frontend=True):
     """
     Freeze the band-split front-end (BN) and first N BSNet layers.
     Default of 4 keeps VRAM and backprop cost manageable on the universal
@@ -1464,8 +1532,7 @@ def freeze_early_layers(model, n_layers_to_freeze=4):
     and where codec-specific adaptation matters most.
     """
     # Freeze band normalization and bottleneck front-end
-    for param in model.BN.parameters():
-        param.requires_grad = False
+    model.BN.requires_grad_(not freeze_frontend)
 
     # Freeze first N layers of the BSNet stack
     for i, layer in enumerate(model.net):
@@ -1631,7 +1698,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     # Freeze early layers for fine-tuning -- count driven by config
     # (no-op when resuming since frozen params are restored by the checkpoint too)
-    freeze_early_layers(model, n_layers_to_freeze=cfg.training.n_layers_to_freeze)
+    freeze_early_layers(model, n_layers_to_freeze=cfg.training.n_layers_to_freeze,
+                        freeze_frontend=cfg.training.get("freeze_frontend", True))
 
     # Instantiate discriminator fresh -- learns your artifact type from scratch
     print_only(f"Instantiating Discriminator <{cfg.discriminator._target_}>")
@@ -1764,7 +1832,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     _SYSTEM_MANAGED = {
         "model", "discriminator", "loss_func", "metrics", "optimizer", "scheduler",
         "val_audio_dir", "val_songs", "val_preview_samples", "val_metric_songs", "val_rotate_every",
-        "gradient_checkpointing", "grad_accum_steps", "visqol_fraction",
+        "gradient_checkpointing", "activation_cpu_offload", "validation_overlap_add",
+        "grad_accum_steps", "visqol_fraction",
         "val_songs", "val_audio_pairs",
     }
     from omegaconf import OmegaConf
@@ -1782,6 +1851,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         val_songs=cfg.training.get("val_songs", cfg.training.get("val_metric_songs", cfg.training.get("val_metric_samples", 3))),
         val_rotate_every=cfg.training.get("val_rotate_every", "auto"),
         gradient_checkpointing=cfg.system.get("gradient_checkpointing", False),
+        activation_cpu_offload=cfg.system.get("activation_cpu_offload", False),
+        validation_overlap_add=cfg.system.get("validation_overlap_add", False),
         grad_accum_steps=cfg.training.get("grad_accum_steps", 1),
         visqol_fraction=cfg.system.get("visqol_fraction", 1.0),
     )
@@ -2057,10 +2128,11 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             return h.hexdigest()[:16]
 
         _baseline_cache_dir  = os.path.join(_CACHE_DIR, "baseline")
+        val_mode_key = ":ola-sisdr" if cfg.system.get("validation_overlap_add", False) else ""
         _baseline_cache_key_ = _baseline_cache_key(
             local_path or "",
             val_clip_key,
-            f"p{look2hear.system.audio_litmodule._VAL_PROTOCOL}:{cfg.get('training', {}).get('val_songs')}:{cfg.system.get('visqol_fraction', 1.0)}:{_m_sr}:{_m_win}:{_m_layer}:{feature_dim}",
+            f"p{look2hear.system.audio_litmodule._VAL_PROTOCOL}:{cfg.get('training', {}).get('val_songs')}:{cfg.system.get('visqol_fraction', 1.0)}:{_m_sr}:{_m_win}:{_m_layer}:{feature_dim}{val_mode_key}",
         )
         _baseline_cache_file = os.path.join(_baseline_cache_dir, f"{_baseline_cache_key_}.json")
 
@@ -2224,6 +2296,8 @@ if __name__ == "__main__":
         action="store_true",
         help="Resume from the last checkpoint in the experiment checkpoint directory.",
     )
+    parser.add_argument("--prepare-only", action="store_true",
+                        help="Prepare the training and validation cache, then exit before loading the model")
     args = parser.parse_args()
     cfg = load_config(args.conf_dir)
 
@@ -2273,4 +2347,8 @@ if __name__ == "__main__":
 
     os.makedirs(os.path.join(cfg.exp.dir, cfg.exp.name), exist_ok=True)
 
-    train(cfg)
+    if args.prepare_only:
+        _start_ram_watchdog(cfg.optimizations.ram_limit_fraction)
+        prepare_data(cfg)
+    else:
+        train(cfg)

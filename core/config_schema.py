@@ -31,6 +31,7 @@ CONFIG = {
     },
     "training": {
         "n_layers_to_freeze": 4,
+        "freeze_frontend": True,
         "val_songs": 3,
         "val_rotate_every": "auto",
         "grad_accum_steps": 1,
@@ -38,8 +39,11 @@ CONFIG = {
     "datas": {
         "sr": 44100,
         "segment_sec": 3,
+        "chunk_overlap": 0.5,
+        "cache_disk_reserve_gb": 0,
         "batch_size": 1,
         "num_workers": 2,
+        "prefetch_factor": 2,
         "pin_memory": False,
         "val_bootstrap_chunks": 50,
         "align_data": False,
@@ -84,7 +88,8 @@ CONFIG = {
         "betas_g": [0.9, 0.999],
         "betas_d": [0.5, 0.99],
     },
-    "system": {"gradient_checkpointing": False, "visqol_fraction": 1.0},
+    "system": {"gradient_checkpointing": False, "activation_cpu_offload": False,
+               "validation_overlap_add": False, "visqol_fraction": 1.0},
     "checkpoint": {"keep_best": 0, "keep_latest": 0},
 }
 
