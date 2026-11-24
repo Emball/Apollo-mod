@@ -10,6 +10,7 @@ are checked in them; any other key there is the target class's business.
 """
 
 import copy
+from pathlib import Path
 
 from omegaconf import OmegaConf
 
@@ -204,6 +205,29 @@ def analyze(raw):
             continue
         missing.append(p)
     return {"unknown": sorted(unknown), "dead": sorted(dead), "missing": sorted(missing)}
+
+
+def load_parallel_config(path):
+    """Resolve a launcher preset into labeled specialist config paths and common overrides."""
+    path = Path(path)
+    raw = OmegaConf.to_container(OmegaConf.load(path), resolve=True)
+    if "parallel" not in raw:
+        return None
+    group = raw["parallel"]
+    options = {"configs", "batch_size", "grad_accum_steps", "num_workers"}
+    if set(raw) != {"parallel"} or not isinstance(group, dict) or set(group) != options:
+        raise ValueError(f"{path.name}: expected parallel configs, batch_size, grad_accum_steps and num_workers")
+    if not isinstance(group["configs"], dict) or set(group["configs"]) != {"low", "mid", "high"}:
+        raise ValueError(f"{path.name}: parallel.configs must identify the low, mid and high presets")
+    for key in ("batch_size", "grad_accum_steps", "num_workers"):
+        minimum = 0 if key == "num_workers" else 1
+        if type(group[key]) is not int or group[key] < minimum:
+            raise ValueError(f"{path.name}: parallel.{key} must be an integer >= {minimum}")
+    configs = {band: (path.parent / name).resolve() for band, name in group["configs"].items()}
+    if len(set(configs.values())) != 3 or any(not config.is_file() or config == path.resolve()
+                                              for config in configs.values()):
+        raise ValueError(f"{path.name}: expected three distinct existing specialist presets")
+    return configs, group
 
 
 def defaults():

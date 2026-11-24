@@ -287,12 +287,15 @@ def _pick(title: str, items: list[str], hint: str = "", subtitle: str = "", star
 # Config helpers
 # ---------------------------------------------------------------------------
 
-def _list_configs() -> list[Path]:
+def _list_configs(include_parallel: bool = True) -> list[Path]:
     if not CONFIGS_DIR.exists():
         return []
     configs = list(CONFIGS_DIR.glob("*.yaml"))
     if os.environ.get("APOLLO_DEV") and DEV_CONFIGS_DIR.exists():
         configs += [p for p in DEV_CONFIGS_DIR.glob("*.yaml") if p.name != "AGENTS.md"]
+    if not include_parallel:
+        import yaml
+        configs = [path for path in configs if "parallel" not in (yaml.safe_load(path.read_text()) or {})]
     return sorted(configs, key=lambda p: p.stem)
 
 
@@ -378,6 +381,9 @@ def _config_summary(cfg_path: Path) -> str:
     """Return a one-line summary of training state for this config."""
     try:
         import re as _re
+        import yaml
+        if "parallel" in yaml.safe_load(cfg_path.read_text()):
+            return "runs low, mid and high concurrently"
         ckpts = _run_checkpoints(cfg_path)
         if ckpts is None:
             return "no runs yet"
@@ -769,6 +775,8 @@ def screen_train(state: dict) -> None:
             _exp_dir  = _cfg_data.get("exp", {}).get("dir", "./runs")
             _exp_name = _cfg_data.get("exp", {}).get("name") or cfg_path.stem
             _pause_dir = ROOT / _exp_dir / _exp_name
+            if "parallel" in _cfg_data:
+                _pause_dir = None
         except Exception:
             _pause_dir = None
         _run_with_live_output(cmd, f"Training: {cfg_path.stem}",
@@ -954,7 +962,7 @@ def _pick_inference_weights(cfg_path: Path, last_weights: str = "", title: str =
 
 
 def screen_inference(state: dict) -> None:
-    configs = _list_configs()
+    configs = _list_configs(include_parallel=False)
     if not configs:
         console.clear()
         console.print("[red]No configs found in configs/[/]")

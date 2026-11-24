@@ -1477,7 +1477,10 @@ def freeze_early_layers(model, n_layers_to_freeze=4):
     total  = sum(p.numel() for p in model.parameters())
     print_only(f"Frozen {frozen:,} / {total:,} parameters ({100*frozen/total:.1f}%)")
 
-def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def train(cfg: DictConfig, prepared_data=None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    stop_file = os.environ.get("APOLLO_STOP_FILE")
+    if stop_file and os.path.isfile(stop_file):
+        return {}, {}
     # Apply hardware / compiler optimisations declared in cfg.optimizations
     apply_optimizations(cfg)
 
@@ -1485,12 +1488,14 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         pl.seed_everything(cfg.seed, workers=True)
 
     # Auto-preprocess raw data and bootstrap eval if needed
-    prepare_data(cfg)
-
-    # Recompute val_clip_key here (same formula as prepare_data) for use in the baseline cache.
     data_name = cfg.exp.get("data_name") or cfg.exp.name
-    val_clip_key = _val_clip_key(cfg, os.path.join(_REPO_ROOT, "data", data_name, "val"),
-                                 _fixed_delay_from_cfg(cfg))
+    if prepared_data is None:
+        prepare_data(cfg)
+        val_clip_key = _val_clip_key(cfg, os.path.join(_REPO_ROOT, "data", data_name, "val"),
+                                     _fixed_delay_from_cfg(cfg))
+    else:
+        cfg.datas.train_dir, cfg.datas.eval_dir, val_clip_key = prepared_data
+        val_clip_key = f"{val_clip_key}:{cfg.exp.name}"
 
     # Verify chunks exist -- if data/ was empty, provide a clear error
     train_lq   = os.path.join(cfg.datas.train_dir, "LQ")
@@ -1816,7 +1821,6 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     from pytorch_lightning.callbacks import Callback as _Callback
 
     _interrupt = {"requested": False, "count": 0, "saved": False}
-    stop_file = os.environ.get("APOLLO_STOP_FILE")
 
     def _interrupt_check(trainer) -> None:
         """Called from batch-end hooks: save at a consistent point, then stop."""
@@ -2233,7 +2237,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         print_only("[train] No best checkpoint found -- skipping best_model.pth export.")
 
 if __name__ == "__main__":
-    from config_schema import load_config
+    from config_schema import load_config, load_parallel_config
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--conf_dir",
@@ -2250,8 +2254,44 @@ if __name__ == "__main__":
         action="store_true",
         help="Resume from the last checkpoint in the experiment checkpoint directory.",
     )
+    parser.add_argument("--prepared-data", nargs=3, help=argparse.SUPPRESS)
+    parser.add_argument("--parallel-settings", nargs=3, type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    parallel = load_parallel_config(args.conf_dir)
+    if parallel is not None:
+        from parallel_training import run_parallel
+
+        configs, settings = parallel
+        members = [load_config(path) for path in configs.values()]
+        first = members[0]
+        source = first.exp.get("data_name") or first.exp.name
+        if any((member.exp.get("data_name") or member.exp.name) != source or member.datas != first.datas
+               for member in members):
+            parser.error("Parallel specialist presets must share the same dataset and data settings")
+        if len({(member.exp.dir, member.exp.name) for member in members}) != len(members):
+            parser.error("Parallel specialist presets must use separate experiment names")
+        prepare_data(first)
+        val_key = _val_clip_key(first, os.path.join(_REPO_ROOT, "data", source, "val"),
+                                _fixed_delay_from_cfg(first))
+        prepared = (first.datas.train_dir, first.datas.eval_dir, val_key)
+        common_args = ["--prepared-data", *prepared, "--parallel-settings",
+                       *(str(settings[key]) for key in ("batch_size", "grad_accum_steps", "num_workers"))]
+        if args.weights_path:
+            common_args += ["--weights_path", args.weights_path]
+        if args.resume:
+            common_args.append("--resume")
+        raise SystemExit(run_parallel(configs, common_args, __file__))
+
     cfg = load_config(args.conf_dir)
+    if args.parallel_settings is not None:
+        import threading
+
+        def watch_launcher():
+            sys.stdin.read()
+            os._exit(1)
+
+        threading.Thread(target=watch_launcher, daemon=True).start()
+        cfg.datas.batch_size, cfg.training.grad_accum_steps, cfg.datas.num_workers = args.parallel_settings
 
     # --- Autodiscovery ---
     # Derive exp.name from config filename stem if not explicitly set in config.
@@ -2276,7 +2316,7 @@ if __name__ == "__main__":
 
     # If loose _LQ/_HQ files exist in data/ root, move them into data/<name>/
     _data_root = os.path.join(_REPO_ROOT, "data")
-    if os.path.isdir(_data_root):
+    if args.prepared_data is None and os.path.isdir(_data_root):
         import shutil as _shutil
         _loose = [f for f in os.listdir(_data_root)
                   if os.path.isfile(os.path.join(_data_root, f))
@@ -2300,4 +2340,4 @@ if __name__ == "__main__":
 
     os.makedirs(os.path.join(cfg.exp.dir, cfg.exp.name), exist_ok=True)
 
-    train(cfg)
+    train(cfg, prepared_data=args.prepared_data)
