@@ -449,6 +449,7 @@ class PairedAudioDataModule(LightningDataModule):
         prefetch_factor: int = 2,
         pin_memory: bool = True,
         augmentation: Optional[dict] = None,
+        stem_mix: Optional[dict] = None,
         **kwargs,  # absorb train-only keys (e.g. align_data) passed via Hydra
     ):
         super().__init__()
@@ -463,6 +464,8 @@ class PairedAudioDataModule(LightningDataModule):
             raise ValueError("datas.prefetch_factor must be at least 1")
         self.pin_memory           = pin_memory
         self.aug_cfg              = _parse_aug_cfg(augmentation)
+        self.stem_mix = stem_mix
+        self.mix_compression = None
 
         self.data_train: Optional[Dataset] = None
         self.data_val:   Optional[Dataset] = None
@@ -478,11 +481,16 @@ class PairedAudioDataModule(LightningDataModule):
 
     def setup(self, stage: Optional[str] = None):
         if self.data_train is None:
-            self.data_train = ChunkedPairDataset(
-                chunks_dir=self.train_dir,
-                sr=self.sr,
-                aug_cfg=self.aug_cfg,
-            )
+            if self.stem_mix is None:
+                self.data_train = ChunkedPairDataset(
+                    chunks_dir=self.train_dir, sr=self.sr, aug_cfg=self.aug_cfg,
+                )
+            else:
+                from stem_mix_dataset import StemMixDataset
+                self.data_train = StemMixDataset(
+                    self.stem_mix["directory"], self.stem_mix.get("num_samples", 40000),
+                    self.mix_compression, self.sr, self.segment_sec,
+                )
         if self.data_val is None:
             self.data_val = ChunkedPairDataset(
                 chunks_dir=self.eval_dir,

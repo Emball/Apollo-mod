@@ -474,6 +474,14 @@ class _CompressionAug:
         self.stats: dict = {}
         self._lock = threading.Lock()
 
+    def __getstate__(self):
+        return {key: value for key, value in vars(self).items() if key != "_lock"}
+
+    def __setstate__(self, state):
+        import threading
+        self.__dict__.update(state)
+        self._lock = threading.Lock()
+
     def _count(self, key: str) -> None:
         with self._lock:
             self.stats[key] = self.stats.get(key, 0) + 1
@@ -1270,6 +1278,16 @@ def _prepare_data(cfg: DictConfig) -> None:
     data_root  = os.path.join(_REPO_ROOT, "data", cfg.exp.name)
     data_train = os.path.join(data_root, "train")
     data_val   = os.path.join(data_root, "val")
+    stem_mix = cfg.datas.get("stem_mix")
+    if stem_mix is not None:
+        from stem_mix_dataset import StemMixDataset
+
+        if not stem_mix.get("directory"):
+            raise ValueError("datas.stem_mix.directory must point to the upstream HDF5 output")
+        stem_mix.directory = os.path.join(_REPO_ROOT, os.path.expanduser(stem_mix.directory))
+        StemMixDataset(stem_mix.directory, stem_mix.get("num_samples", 40000), None, cfg.datas.sr, _CHUNK_SEC)
+        if _compression_cfg(cfg) is None:
+            raise ValueError("Stem mixing requires datas.compression.enabled")
 
     cached_aug_fn = _build_cached_aug_fn(cfg)
     _align_raw    = getattr(cfg.datas, "align_data", False)
@@ -1281,26 +1299,28 @@ def _prepare_data(cfg: DictConfig) -> None:
     aug_cfg = getattr(cfg.datas, "augmentation", None)
 
     # Normalize source dirs so _source_md5s can hash them correctly before chunking.
-    _normalize_data_dir(data_train, "train")
+    if stem_mix is None:
+        _normalize_data_dir(data_train, "train")
     _normalize_data_dir(data_val, "val")
 
     # Chunks live in usr/cache/chunks/<key>/<split>/ keyed on (source md5s + params).
     # Any config that requests the same dataset with the same params reuses the cache.
-    train_key = _chunk_cache_key(data_train, fixed_delay, aug_cfg, extra=_compression_digest(cfg))
-
-    train_chunks = _chunk_cache_lookup(train_key, "train")
-    if train_chunks:
-        print_only(f"[data/train] Cache hit ({train_key[:8]}...) -- skipping chunking.")
-    else:
-        train_chunks = os.path.join(_CHUNK_CACHE_DIR, train_key, "train")
-        compression = _build_compression(cfg)
-        try:
-            _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn,
-                         fixed_delay=fixed_delay, compression=compression,
-                         disk_reserve_bytes=disk_reserve_bytes)
-        finally:
-            if compression is not None:
-                shutil.rmtree(compression.tmp_root, ignore_errors=True)
+    train_chunks = None
+    if stem_mix is None:
+        train_key = _chunk_cache_key(data_train, fixed_delay, aug_cfg, extra=_compression_digest(cfg))
+        train_chunks = _chunk_cache_lookup(train_key, "train")
+        if train_chunks:
+            print_only(f"[data/train] Cache hit ({train_key[:8]}...) -- skipping chunking.")
+        else:
+            train_chunks = os.path.join(_CHUNK_CACHE_DIR, train_key, "train")
+            compression = _build_compression(cfg)
+            try:
+                _chunk_split(data_train, train_chunks, "train", cached_aug_fn=cached_aug_fn,
+                             fixed_delay=fixed_delay, compression=compression,
+                             disk_reserve_bytes=disk_reserve_bytes)
+            finally:
+                if compression is not None:
+                    shutil.rmtree(compression.tmp_root, ignore_errors=True)
 
     # Val clips: two highest-RMS 10s clips per song (ViSQOL-compliant), cached to disk.
     # Reuses the WAV conversion cache from _chunk_split so no re-encoding.
@@ -1327,7 +1347,8 @@ def _prepare_data(cfg: DictConfig) -> None:
         cfg.datas.train_dir = train_chunks
         cfg.datas.eval_dir  = val_wav_dir
 
-    _touch(os.path.dirname(train_chunks))
+    if train_chunks is not None:
+        _touch(os.path.dirname(train_chunks))
     _touch(os.path.dirname(val_wav_dir))
     _prune_usr_cache(cfg.datas.get("cache_retention_days", 30))
 
@@ -1344,6 +1365,8 @@ def _prepare_data(cfg: DictConfig) -> None:
     ) if os.path.isdir(val_lq) else False
 
     if not val_has_files:
+        if stem_mix is not None:
+            raise RuntimeError(f"Stem mixing requires separate validation audio in {data_val}/HQ")
         import shutil, random as _random
         n_bootstrap = int(cfg.datas.get("val_bootstrap_chunks", 50))
         train_lq = os.path.join(train_chunks, "LQ")
@@ -1559,8 +1582,9 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                                  _fixed_delay_from_cfg(cfg))
 
     # Verify chunks exist -- if data/ was empty, provide a clear error
-    train_lq   = os.path.join(cfg.datas.train_dir, "LQ")
-    if not os.path.isdir(train_lq) or not any(f.endswith(".wav") for f in os.listdir(train_lq)):
+    stem_mix = cfg.datas.get("stem_mix")
+    train_lq = os.path.join(cfg.datas.train_dir, "LQ") if stem_mix is None else None
+    if train_lq and (not os.path.isdir(train_lq) or not any(f.endswith(".wav") for f in os.listdir(train_lq))):
         _name = cfg.exp.name
         print_only("")
         print_only("ERROR: No training chunks found.")
@@ -1578,6 +1602,12 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # Instantiate datamodule
     print_only(f"Instantiating datamodule <{cfg.datas._target_}>")
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.datas)
+    if stem_mix is not None:
+        import atexit
+        import shutil
+
+        datamodule.mix_compression = _build_compression(cfg)
+        atexit.register(shutil.rmtree, datamodule.mix_compression.tmp_root, ignore_errors=True)
 
     # Resolve run directory -- fresh start gets a timestamped subfolder,
     # resume reuses the most recent existing run folder.

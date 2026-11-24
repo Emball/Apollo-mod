@@ -17,6 +17,7 @@ filelock
 # Audio
 librosa==0.10.1
 soundfile==0.12.1
+h5py
 scipy>=1.11.0
 numpy==1.26.4
 ffmpeg-python

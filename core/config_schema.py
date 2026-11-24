@@ -48,6 +48,7 @@ CONFIG = {
         "val_bootstrap_chunks": 50,
         "align_data": False,
         "cache_retention_days": 30,
+        "stem_mix": {"directory": None, "num_samples": 40000},
         "compression": {
             "enabled": False,
             "recipe": "utils/degrade/stfl.json",
@@ -99,6 +100,9 @@ OPEN = {"model", "system", "checkpoint", "logger", "trainer", "discriminator",
 # Keys the code reads only when present, so a config may omit them and they are never filled in.
 OPTIONAL = {
     ("exp", "name"),
+    ("datas", "stem_mix"),
+    ("datas", "stem_mix", "directory"),
+    ("datas", "stem_mix", "num_samples"),
     ("datas", "compression", "ffmpeg"),
     ("datas", "compression", "acmenc"),
 }
