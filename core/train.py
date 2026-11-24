@@ -98,7 +98,7 @@ import look2hear.losses
 import look2hear.models
 import look2hear.models.apollo
 from look2hear.utils import print_only
-from look2hear.utils.ckpt_io import load_checkpoint, atomic_torch_save, download_file
+from look2hear.utils.ckpt_io import load_checkpoint, atomic_torch_save, ensure_pretrained_weights
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -210,16 +210,6 @@ def _md5_file(path: str) -> str:
 import atexit as _atexit
 _atexit.register(_md5_index_save)
 
-
-# Pretrained model filenames to search for (base -> universal).
-# Set download URLs here once you have them; None = skip auto-download.
-_PRETRAINED_MODELS = {
-    "apollo.ckpt":           None,  # base model   (feature_dim=256)
-    "apollo_uni.ckpt":       None,  # universal     (feature_dim=384)
-    "apollo_model.ckpt":     None,  # legacy name   (feature_dim=256)
-    "apollo_model_uni.ckpt": None,  # legacy name   (feature_dim=384)
-    "pytorch_model.bin":     None,  # HF bin format (feature_dim=256)
-}
 
 # Data preparation -- runs before training, skips gracefully if already done
 
@@ -1588,8 +1578,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # Priority:
     #   1. Explicit --weights_path / cfg.weights_path
     #   2. Auto-scan ./models/ for known filenames (first match wins)
-    #   3. Auto-download if a URL is configured in _PRETRAINED_MODELS
-    #   4. Fall back to HuggingFace hub (legacy behaviour)
+    #   3. Download the matching default checkpoint into models/
     # Skipped entirely when resuming from a checkpoint (ckpt_path is set above).
     # -----------------------------------------------------------------------
     feature_dim = cfg.model.get("feature_dim", 256)
@@ -1633,50 +1622,10 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     else:
         local_path = cfg.get("weights_path", None)
 
-        # Cascade starts from the official MP3 base unless explicitly warm-started.
-        if not local_path and not cfg.model.get("cascade", False):
-            # Auto-scan ./models/ -- prefer the checkpoint that matches feature_dim.
-            # 384 -> apollo_model_uni.ckpt first; 256 -> apollo_model.ckpt / pytorch_model.bin first.
-            os.makedirs(_MODELS_DIR, exist_ok=True)
-            is_uni = (feature_dim == 384)
-            scan_order = (
-                ["apollo_uni.ckpt", "apollo_model_uni.ckpt", "apollo.ckpt", "apollo_model.ckpt", "pytorch_model.bin"]
-                if is_uni else
-                ["apollo.ckpt", "apollo_model.ckpt", "pytorch_model.bin", "apollo_uni.ckpt", "apollo_model_uni.ckpt"]
-            )
-            for fname in scan_order:
-                candidate = os.path.join(_MODELS_DIR, fname)
-                if os.path.isfile(candidate):
-                    print_only(f"[weights] Found pretrained model in models/: {fname}")
-                    local_path = candidate
-                    break
-                url = _PRETRAINED_MODELS.get(fname)
-                if url is not None:
-                    print_only(f"[weights] Downloading {fname} from configured URL...")
-                    download_file(url, candidate, label="weights")
-                    print_only(f"[weights] Saved to {candidate}")
-                    local_path = candidate
-                    break
-
         if not local_path:
-            # The official Hugging Face checkpoint is the 256-dim base model.
-            if feature_dim == 384:
-                raise FileNotFoundError(
-                    "[weights] feature_dim=384 requires a local universal checkpoint, "
-                    "but none was found in models/. "
-                    "Place apollo_model_uni.ckpt in the models/ folder, "
-                    "or set weights_path in your config to point at it explicitly. "
-                    "The JusperLee/Apollo HuggingFace repo does not host a 384-dim checkpoint."
-                )
-            hf_repo  = "JusperLee/Apollo"
-            hf_file  = "pytorch_model.bin"
-            print_only(f"[weights] Resolving official base Apollo weights from Hugging Face ({hf_file})...")
-            from huggingface_hub import hf_hub_download
-            local_path = hf_hub_download(
-                repo_id=hf_repo, filename=hf_file,
-                revision="0b123a4606d5345d9082f6f633d8bfebe84c8e79",
+            local_path = ensure_pretrained_weights(
+                feature_dim, _MODELS_DIR, official_base=cfg.model.get("cascade", False),
             )
-            print_only(f"[weights] Cached at: {local_path}")
         print_only(f"[weights] Loading from: {local_path}")
         model = _load_weights(local_path, feature_dim)
         print_only("[weights] Weights loaded.")
@@ -1865,9 +1814,12 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     from pytorch_lightning.callbacks import Callback as _Callback
 
     _interrupt = {"requested": False, "count": 0, "saved": False}
+    stop_file = os.environ.get("APOLLO_STOP_FILE")
 
     def _interrupt_check(trainer) -> None:
         """Called from batch-end hooks: save at a consistent point, then stop."""
+        if stop_file and os.path.isfile(stop_file):
+            _interrupt["requested"] = True
         if not _interrupt["requested"] or _interrupt["saved"]:
             return
         if getattr(trainer.state, "fn", None) != "fit":
@@ -2111,6 +2063,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     import signal as _signal
     _signal.signal(_signal.SIGINT, _save_and_exit)
+    if hasattr(_signal, "SIGBREAK"):
+        _signal.signal(_signal.SIGBREAK, _save_and_exit)
 
     # Baseline val pass on pretrained weights before any training begins.
     # Skipped on resume since the checkpoint already has training history.

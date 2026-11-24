@@ -160,6 +160,10 @@ input/ output/           -- inference I/O staging dirs
 
 **Startup update check:** `apollo.bat` runs `git pull --rebase --autostash` on startup, so local edits to tracked files are stashed and reapplied. A conflict prints a warning and is non-fatal; `apollo.sh` has no update check.
 
+**Pretrained weights:** Fresh runs resolve the base (256) or Lew Universal (384) checkpoint and download it into `models/` if needed. The downloader checks the published artifacts against pinned SHA-256 digests. Cascade runs use the official base checkpoint by default. An existing `pytorch_model.bin` with different contents is preserved and the official base is stored as `apollo_base_official.bin`. Explicit weights and resume checkpoints take precedence.
+
+**Windows training interrupt:** The TUI reads Ctrl+C as a console key and requests a checkpoint through a per-process stop file. Training handles the request at its existing batch-end checkpoint hook, and the TUI returns directly to the main menu after the child exits. A second Ctrl+C terminates the child immediately.
+
 **Dev mode:** `apollo.bat --dev` sets `APOLLO_DEV=1`. `tui.py` includes `dev/*.yaml` in the config picker.
 
 **Checkpoint IO:** all checkpoint loads go through `look2hear.utils.ckpt_io.load_checkpoint` (`weights_only=True` first, full unpickle fallback with a warning). Downloads stream to `<dest>.part` and are moved into place only when complete (`download_file`). The resume patch rewrites the checkpoint atomically. Ctrl+C sets a flag; `train.py` saves `step=NNNNNN-interrupted.ckpt` at the next batch end and stops (second Ctrl+C force-quits). The TUI pause (`PAUSED`) is acknowledged by `PAUSED.ack`.

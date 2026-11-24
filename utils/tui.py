@@ -12,6 +12,7 @@ import platform
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -516,6 +517,53 @@ def _run_mid_training_inference(state: dict, cfg_path: Path, pause_file: Path) -
     pause_file.unlink(missing_ok=True)
 
 
+def _windows_console_keyboard_mode():
+    """Read Ctrl+C as a key so cmd.exe does not receive a batch interrupt."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetStdHandle.argtypes = [wintypes.DWORD]
+    kernel.GetStdHandle.restype = wintypes.HANDLE
+    kernel.GetConsoleMode.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel.SetConsoleMode.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+
+    class KeyEvent(ctypes.Structure):
+        _fields_ = [
+            ("down", wintypes.BOOL), ("repeat", wintypes.WORD),
+            ("virtual_key", wintypes.WORD), ("scan_code", wintypes.WORD),
+            ("character", wintypes.WCHAR), ("control_state", wintypes.DWORD),
+        ]
+
+    class InputRecord(ctypes.Structure):
+        # KEY_EVENT_RECORD is the largest member of the INPUT_RECORD union.
+        _fields_ = [("event_type", wintypes.WORD), ("key", KeyEvent)]
+
+    kernel.GetNumberOfConsoleInputEvents.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    kernel.ReadConsoleInputW.argtypes = [
+        wintypes.HANDLE, ctypes.POINTER(InputRecord), wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+    ]
+    handle = kernel.GetStdHandle(-10)  # STD_INPUT_HANDLE
+    mode = wintypes.DWORD()
+    if not kernel.GetConsoleMode(handle, ctypes.byref(mode)):
+        return None, None
+    if not kernel.SetConsoleMode(handle, mode.value & ~0x0001):  # ENABLE_PROCESSED_INPUT
+        raise ctypes.WinError(ctypes.get_last_error())
+    def read_key():
+        count = wintypes.DWORD()
+        record = InputRecord()
+        while kernel.GetNumberOfConsoleInputEvents(handle, ctypes.byref(count)) and count.value:
+            if not kernel.ReadConsoleInputW(handle, ctypes.byref(record), 1, ctypes.byref(count)):
+                break
+            if record.event_type == 1 and record.key.down:  # KEY_EVENT
+                if record.key.virtual_key == ord("C") and record.key.control_state & 0x000C:
+                    return "\x03"  # LEFT_CTRL_PRESSED or RIGHT_CTRL_PRESSED
+                return record.key.character
+        return None
+
+    return read_key, lambda: kernel.SetConsoleMode(handle, mode.value)
+
+
 def _run_subprocess(cmd: list[str], label: str, pause_dir: Path | None = None,
                     state: dict | None = None, cfg_path: Path | None = None) -> bool:
     """Run a subprocess, stream output. Returns True if completed, False if Ctrl+C.
@@ -534,28 +582,24 @@ def _run_subprocess(cmd: list[str], label: str, pause_dir: Path | None = None,
     console.print(Rule(style="dim cyan"))
 
     proc = None
+    stream_thread = None
     interrupted = False
     pause_file = (pause_dir / "PAUSED") if pause_dir else None
     if pause_file:
         pause_file.unlink(missing_ok=True)
         Path(str(pause_file) + ".ack").unlink(missing_ok=True)
     _pausing = threading.Event()
+    restore_console = None
+    key_reader = None
+    stop_dir = None
+    stop_file = None
 
     def _watch_for_ctrl_i():
         """Background thread: read raw stdin bytes, trigger pause on Ctrl+I (0x09)."""
         if not pause_dir or not sys.stdin.isatty():
             return
         try:
-            if IS_WINDOWS:
-                import msvcrt
-                while proc and proc.poll() is None:
-                    if msvcrt.kbhit():
-                        ch = msvcrt.getwch()
-                        if ch == "\t":  # Tab = Ctrl+I on Windows
-                            _pausing.set()
-                            break
-                    import time as _t; _t.sleep(0.05)
-            else:
+            if not IS_WINDOWS:
                 import tty as _tty, termios as _termios
                 fd = sys.stdin.fileno()
                 old = _termios.tcgetattr(fd)
@@ -575,8 +619,14 @@ def _run_subprocess(cmd: list[str], label: str, pause_dir: Path | None = None,
             console.print(f"[yellow]Ctrl+I watcher stopped: {exc}[/]")
 
     try:
+        if IS_WINDOWS and sys.stdin.isatty():
+            key_reader, restore_console = _windows_console_keyboard_mode()
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
+        if key_reader is not None and cfg_path is not None and state is not None:
+            stop_dir = tempfile.TemporaryDirectory(prefix="apollo-stop-")
+            stop_file = Path(stop_dir.name) / "stop"
+            env["APOLLO_STOP_FILE"] = str(stop_file)
         # Insert -u after the interpreter if the command starts with a Python binary,
         # so the child process flushes stdout per line even when writing to a pipe.
         _cmd = list(cmd)
@@ -591,6 +641,8 @@ def _run_subprocess(cmd: list[str], label: str, pause_dir: Path | None = None,
             bufsize=1,
             env=env,
             cwd=str(ROOT),
+            **({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+               if IS_WINDOWS else {"start_new_session": True}),
         )
 
         def _stream():
@@ -600,14 +652,28 @@ def _run_subprocess(cmd: list[str], label: str, pause_dir: Path | None = None,
                     sys.stdout.write(line)
                     sys.stdout.flush()
 
-        t = threading.Thread(target=_stream, daemon=True)
-        t.start()
+        stream_thread = threading.Thread(target=_stream, daemon=True)
+        stream_thread.start()
 
-        if pause_dir:
+        if pause_dir and not IS_WINDOWS:
             ki = threading.Thread(target=_watch_for_ctrl_i, daemon=True)
             ki.start()
 
         while proc.poll() is None:
+            if key_reader is not None:
+                key = key_reader()
+                if key == "\x03":
+                    if interrupted:
+                        proc.kill()
+                    else:
+                        interrupted = True
+                        if stop_file is not None:
+                            stop_file.touch()
+                            console.print("\n[yellow]Stopping at the next safe point...[/]")
+                        else:
+                            proc.send_signal(signal.CTRL_BREAK_EVENT)
+                elif key == "\t" and pause_dir and not interrupted:
+                    _pausing.set()
             if _pausing.is_set() and pause_dir and pause_file and cfg_path and state is not None:
                 pause_file.touch()
                 _run_mid_training_inference(state, cfg_path, pause_file)
@@ -616,25 +682,31 @@ def _run_subprocess(cmd: list[str], label: str, pause_dir: Path | None = None,
                 console.print(Rule(style="dim cyan"))
             import time as _t; _t.sleep(0.05)
 
-        t.join(timeout=5)
-
     except KeyboardInterrupt:
         interrupted = True
         if proc and proc.poll() is None:
             console.print("\n[yellow]Ctrl+C caught -- sending stop signal...[/]")
             if IS_WINDOWS:
-                proc.send_signal(signal.CTRL_C_EVENT)  # type: ignore[attr-defined]
+                proc.send_signal(signal.CTRL_BREAK_EVENT)
             else:
                 proc.send_signal(signal.SIGINT)
             try:
                 proc.wait(timeout=300)
-            except subprocess.TimeoutExpired:
+            except (KeyboardInterrupt, subprocess.TimeoutExpired):
                 proc.kill()
-        console.print("[dim]Returning to menu...[/]")
+                proc.wait()
     finally:
+        if restore_console is not None:
+            restore_console()
+        if stream_thread is not None:
+            stream_thread.join(timeout=5)
+        if stop_dir is not None:
+            stop_dir.cleanup()
         if pause_file and pause_file.exists():
             pause_file.unlink(missing_ok=True)
 
+    if interrupted:
+        console.print("[dim]Returning to menu...[/]")
     console.print(Rule(style="dim cyan"))
     return not interrupted
 
@@ -644,8 +716,8 @@ def _run_with_live_output(cmd: list[str], label: str,
                           state: dict | None = None,
                           cfg_path: Path | None = None) -> None:
     """Run a subprocess and wait for Enter before returning to menu."""
-    _run_subprocess(cmd, label, pause_dir=pause_dir, state=state, cfg_path=cfg_path)
-    console.input("[dim]Press Enter to return to menu[/]")
+    if _run_subprocess(cmd, label, pause_dir=pause_dir, state=state, cfg_path=cfg_path):
+        console.input("[dim]Press Enter to return to menu[/]")
 
 
 # ---------------------------------------------------------------------------
