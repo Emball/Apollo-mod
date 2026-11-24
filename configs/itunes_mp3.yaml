@@ -85,10 +85,6 @@ model:
   win: 20
   feature_dim: 384
   layer: 6
-  cascade: false
-  cascade_crossovers: [3000, 10000]
-  cascade_ramp_hz: 1000
-  cascade_expand_bands: false
 
 discriminator:
   _target_: look2hear.discriminators.frequencydis.MultiFrequencyDiscriminator

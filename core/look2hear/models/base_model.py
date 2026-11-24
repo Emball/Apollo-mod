@@ -26,7 +26,7 @@ class BaseModel(nn.Module, PyTorchModelHubMixin):
 
     @staticmethod
     def from_pretrain(pretrained_model_conf_or_path, *args, **kwargs):
-        from .apollo import Apollo, model_from_state
+        from .apollo import Apollo
         from ..utils.ckpt_io import load_checkpoint
 
         conf = load_checkpoint(pretrained_model_conf_or_path)
@@ -36,11 +36,6 @@ class BaseModel(nn.Module, PyTorchModelHubMixin):
         ckpt_state = conf.get("state_dict", conf)
         if not isinstance(ckpt_state, dict) or "BN.0.1.weight" not in ckpt_state:
             raise ValueError("Checkpoint is missing Apollo band projection weights")
-        if "cascade_frequencies" in ckpt_state:
-            model = model_from_state(ckpt_state, *args, **kwargs)
-            model.load_state_dict(ckpt_state, strict=True)
-            return model
-
         if str(conf.get("model_name", "Apollo")).lower() != "apollo":
             raise ValueError(f"Unsupported model: {conf['model_name']!r}")
         model = Apollo(*args, **kwargs)

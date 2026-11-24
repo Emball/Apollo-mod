@@ -11,12 +11,12 @@ BASE_APOLLO_URL = "https://huggingface.co/JusperLee/Apollo/resolve/0b123a4606d53
 UNIVERSAL_APOLLO_URL = "https://github.com/deton24/Lew-s-vocal-enhancer-for-Apollo-by-JusperLee/releases/download/uni/apollo_model_uni.ckpt"
 
 
-def ensure_pretrained_weights(feature_dim: int, models_dir: str, official_base: bool = False) -> str:
+def ensure_pretrained_weights(feature_dim: int, models_dir: str) -> str:
     if feature_dim == 256:
         filename = "pytorch_model.bin"
         url = BASE_APOLLO_URL
         digest = "99d9af7f1ff20e63c393035513a655392818d66b4d7fc23d658175c1f15e8d76"
-        candidates = ("apollo.ckpt", "apollo_model.ckpt") if not official_base else ()
+        candidates = ("apollo.ckpt", "apollo_model.ckpt")
     elif feature_dim == 384:
         filename = "apollo_model_uni.ckpt"
         url = UNIVERSAL_APOLLO_URL

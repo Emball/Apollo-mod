@@ -287,15 +287,12 @@ def _pick(title: str, items: list[str], hint: str = "", subtitle: str = "", star
 # Config helpers
 # ---------------------------------------------------------------------------
 
-def _list_configs(include_parallel: bool = True) -> list[Path]:
+def _list_configs() -> list[Path]:
     if not CONFIGS_DIR.exists():
         return []
     configs = list(CONFIGS_DIR.glob("*.yaml"))
     if os.environ.get("APOLLO_DEV") and DEV_CONFIGS_DIR.exists():
         configs += [p for p in DEV_CONFIGS_DIR.glob("*.yaml") if p.name != "AGENTS.md"]
-    if not include_parallel:
-        import yaml
-        configs = [path for path in configs if "parallel" not in (yaml.safe_load(path.read_text()) or {})]
     return sorted(configs, key=lambda p: p.stem)
 
 
@@ -381,9 +378,6 @@ def _config_summary(cfg_path: Path) -> str:
     """Return a one-line summary of training state for this config."""
     try:
         import re as _re
-        import yaml
-        if "parallel" in yaml.safe_load(cfg_path.read_text()):
-            return "runs low, mid and high concurrently"
         ckpts = _run_checkpoints(cfg_path)
         if ckpts is None:
             return "no runs yet"
@@ -775,8 +769,6 @@ def screen_train(state: dict) -> None:
             _exp_dir  = _cfg_data.get("exp", {}).get("dir", "./runs")
             _exp_name = _cfg_data.get("exp", {}).get("name") or cfg_path.stem
             _pause_dir = ROOT / _exp_dir / _exp_name
-            if "parallel" in _cfg_data:
-                _pause_dir = None
         except Exception:
             _pause_dir = None
         _run_with_live_output(cmd, f"Training: {cfg_path.stem}",
@@ -911,7 +903,27 @@ def _pick_ensemble(state: dict, cfg_stem: str) -> tuple:
         return [], "no ensemble"
 
 
-def _pick_inference_weights(cfg_path: Path, last_weights: str = "", title: str = "Inference -- select model") -> str | None:
+def screen_inference(state: dict) -> None:
+    configs = _list_configs()
+    if not configs:
+        console.clear()
+        console.print("[red]No configs found in configs/[/]")
+        console.input("Press Enter to return.")
+        return
+
+    last_cfg = state.get("inference", {}).get("last_config", "")
+    start = next((i for i, c in enumerate(configs) if c.name == last_cfg), 0)
+
+    items = [c.stem for c in configs]
+    idx = _pick("Inference -- select config", items, hint="Enter=select  Esc=back", start=start)
+    if idx is None:
+        return
+
+    cfg_path = configs[idx]
+    cfg_stem = cfg_path.stem
+    state.setdefault("inference", {})["last_config"] = cfg_path.name
+    _save_state(state)
+
     # Find checkpoint / model
     best_ckpt = _find_best_checkpoint(cfg_path)
     model_file = _find_model_for_config(cfg_path)
@@ -939,16 +951,17 @@ def _pick_inference_weights(cfg_path: Path, last_weights: str = "", title: str =
         model_paths.append(str(model_file))
     model_options.append("[ Enter custom weights path ]")
 
+    last_weights = state.get("inference", {}).get(cfg_stem, {}).get("last_weights", "")
     w_start = next((i for i, p in enumerate(model_paths) if p == last_weights), 0)
 
     widx = _pick(
-        title,
+        "Inference -- select model",
         model_options,
         hint="Enter=select  Esc=back",
         start=w_start,
     )
     if widx is None:
-        return None
+        return
 
     if widx == len(model_options) - 1:
         console.clear()
@@ -958,71 +971,9 @@ def _pick_inference_weights(cfg_path: Path, last_weights: str = "", title: str =
             return
     else:
         weights = model_paths[widx]
-    return weights
 
-
-def screen_inference(state: dict) -> None:
-    configs = _list_configs(include_parallel=False)
-    if not configs:
-        console.clear()
-        console.print("[red]No configs found in configs/[/]")
-        console.input("Press Enter to return.")
-        return
-
-    last_cfg = state.get("inference", {}).get("last_config", "")
-    start = next((i for i, c in enumerate(configs) if c.name == last_cfg), 0)
-
-    items = [c.stem for c in configs]
-    idx = _pick("Inference -- select config", items, hint="Enter=select  Esc=back", start=start)
-    if idx is None:
-        return
-
-    cfg_path = configs[idx]
-    cfg_stem = cfg_path.stem
-    state.setdefault("inference", {})["last_config"] = cfg_path.name
-    _save_state(state)
-
-    last_weights = state.get("inference", {}).get(cfg_stem, {}).get("last_weights", "")
-    weights = _pick_inference_weights(cfg_path, last_weights)
-    if weights is None:
-        return
     state.setdefault("inference", {}).setdefault(cfg_stem, {})["last_weights"] = weights
     _save_state(state)
-
-    import yaml
-    model_cfg = yaml.safe_load(cfg_path.read_text()).get("model", {})
-    detached_flags = []
-    mid_config = model_cfg.get("detached_mid_config")
-    if mid_config:
-        mode = _pick(
-            "Inference -- restoration mode",
-            ["Detached specialists", "Selected checkpoint only"],
-            hint="Enter=select  Esc=back",
-        )
-        if mode is None:
-            return
-        if mode == 0:
-            mid_weights = _pick_inference_weights(
-                cfg_path.parent / mid_config, title="Inference -- select mid specialist")
-            if mid_weights is None:
-                return
-            detached_flags = ["--detached_mid_weights", mid_weights]
-            high_config = model_cfg.get("detached_high_config")
-            if high_config:
-                high_mode = _pick(
-                    "Inference -- high specialist",
-                    ["Base Apollo on cleaned low and mids", "Independent checkpoint on original mix"],
-                    hint="Enter=select  Esc=back",
-                )
-                if high_mode is None:
-                    return
-                if high_mode == 1:
-                    high_weights = _pick_inference_weights(
-                        cfg_path.parent / high_config, title="Inference -- select high checkpoint")
-                    if high_weights is None:
-                        return
-                    detached_flags += ["--detached_high_weights", high_weights,
-                                       "--detached_high_input", "original"]
 
     # Pick input
     input_path = _pick_input_file(state, cfg_stem)
@@ -1031,9 +982,6 @@ def screen_inference(state: dict) -> None:
 
     # Pick ensemble options (applies to both single and batch)
     ensemble_flags, ensemble_label = _pick_ensemble(state, cfg_stem)
-    if detached_flags:
-        ensemble_flags = detached_flags + ensemble_flags
-        ensemble_label = f"detached, {ensemble_label}" if ensemble_flags != detached_flags else "detached"
     _save_state(state)
 
     # --- Batch mode: process all files in /input ---

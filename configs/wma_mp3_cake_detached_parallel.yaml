@@ -1,8 +1,0 @@
-parallel:
-  configs:
-    low: wma_mp3_cake_detached_low.yaml
-    mid: wma_mp3_cake_detached_mid.yaml
-    high: wma_mp3_cake_detached_high.yaml
-  batch_size: 1
-  grad_accum_steps: 2
-  num_workers: 0

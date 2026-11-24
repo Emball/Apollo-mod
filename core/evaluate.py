@@ -136,8 +136,8 @@ def _load_model(ckpt_path: str, feature_dim: int, sr: int, win: int, layer: int)
             cleaned[k[len("audio_model."):]] = v
         elif not any(k.startswith(p) for p in ("discriminator.", "metrics.", "optimizer")):
             cleaned[k] = v
-    model = look2hear.models.apollo.model_from_state(cleaned, sr, win, feature_dim, layer)
-    missing, _ = model.load_state_dict(cleaned, strict="cascade_frequencies" in cleaned)
+    model = look2hear.models.apollo.Apollo(sr=sr, win=win, feature_dim=feature_dim, layer=layer)
+    missing, _ = model.load_state_dict(cleaned, strict=False)
     if missing:
         print(f"  [warn] {len(missing)} missing keys")
     return model.cuda().eval() if torch.cuda.is_available() else model.eval()
@@ -410,7 +410,7 @@ def run_evaluation(
 
     # Val clip dir: same cache key train.py uses, so evaluate scores the clips training validated on
     import train as _train
-    _data_val = os.path.join(_REPO_ROOT, "data", cfg.exp.get("data_name") or exp_name, "val")
+    _data_val = os.path.join(_REPO_ROOT, "data", exp_name, "val")
     _key = _train._val_clip_key(cfg, _data_val, _train._fixed_delay_from_cfg(cfg))
     chunk_root = os.path.join(_train._CHUNK_CACHE_DIR, _key, "val")
     if not os.path.isdir(os.path.join(chunk_root, "LQ")):

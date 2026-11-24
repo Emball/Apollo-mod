@@ -302,12 +302,7 @@ class AudioLightningModule(pl.LightningModule):
             optimizer_d.zero_grad()
 
         # --- Generator forward (under Lightning's AMP context) ---
-        from look2hear.models.apollo import ApolloCascade
-        specialists = None
-        if isinstance(self.audio_model, ApolloCascade):
-            output, specialists = self.audio_model(codec_data, return_specialists=True)
-        else:
-            output = self(codec_data)
+        output = self(codec_data)
 
         # --- Discriminator update ---
         # output detached so D grads don't flow into the generator.
@@ -335,11 +330,7 @@ class AudioLightningModule(pl.LightningModule):
                 _, targets_feature_maps = self.discriminator(ori_data, sample_rate=44100)
             loss_g = self.loss_func["g"](
                 est_outputs, est_feature_maps, targets_feature_maps, output, ori_data
-            )
-            if specialists is not None:
-                loss_g = loss_g + self.loss_func["g"].specialist_loss(
-                    specialists, ori_data.unsqueeze(1), self.audio_model.cascade_frequencies[:2])
-            loss_g = loss_g / self.grad_accum_steps
+            ) / self.grad_accum_steps
 
             self._accum_loss_g = (self._accum_loss_g or 0.0) + loss_g.detach()
             self.manual_backward(loss_g)

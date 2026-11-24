@@ -108,8 +108,6 @@ def _known(p):
 def main():
     bad = 0
     for cfg_path in sorted((ROOT / "configs").glob("*.yaml")):
-        if cs.load_parallel_config(cfg_path) is not None:
-            continue
         res = cs.analyze(OmegaConf.to_container(OmegaConf.load(cfg_path), resolve=False))
         for kind in ("unknown", "dead", "missing"):
             for p in res[kind]:

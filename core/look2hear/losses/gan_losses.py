@@ -121,12 +121,12 @@ class MultiFrequencyGenLoss(_Loss):
                 )
         return self._weight_cache[key]
 
-    def _freq_MAE(self, output, target, band=None):
+    def _freq_MAE(self, output, target):
         loss   = 0.
         eps    = torch.finfo(torch.float32).eps
         device = output.device
-        flat_out = output.reshape(-1, output.shape[-1])
-        flat_tgt = target.reshape(-1, target.shape[-1])
+        flat_out = output.view(-1, output.shape[-1])
+        flat_tgt = target.view(-1, target.shape[-1])
 
         for win in self.all_win:
             hann = self._hann_cache[win]
@@ -134,12 +134,7 @@ class MultiFrequencyGenLoss(_Loss):
                 hann = hann.to(device)
                 self._hann_cache[win] = hann
 
-            if band is None:
-                weights = self._get_weights(win, device)
-            else:
-                center, sigma = band
-                hz = torch.arange(win // 2 + 1, device=device) * (self._sr / win)
-                weights = (1 + self._gain * torch.exp(-0.5 * ((hz-center)/sigma)**2)).view(1, -1, 1)
+            weights = self._get_weights(win, device)
 
             est_spec    = torch.stft(flat_out, n_fft=win, hop_length=win // 2,
                                      window=hann, return_complex=True)
@@ -151,11 +146,6 @@ class MultiFrequencyGenLoss(_Loss):
             loss         = loss + weighted_err
 
         return loss / len(self.all_win)
-
-    def specialist_loss(self, outputs, target, crossovers):
-        edges = (0., crossovers[0], crossovers[1], self._sr / 2)
-        return sum(self._freq_MAE(audio, target, ((lo+hi)/2, (hi-lo)/2))
-                   for audio, lo, hi in zip(outputs, edges[:-1], edges[1:])) / len(outputs)
 
     def forward(self, est_outputs, est_feature_maps, targets_feature_maps, output, ori_data):
         G_fake = 0

@@ -1213,7 +1213,7 @@ def prepare_data(cfg: DictConfig) -> None:
     Skips any split that is already chunked.
     """
     # Data source dirs live under data/<name>/train and data/<name>/val
-    data_root  = os.path.join(_REPO_ROOT, "data", cfg.exp.get("data_name") or cfg.exp.name)
+    data_root  = os.path.join(_REPO_ROOT, "data", cfg.exp.name)
     data_train = os.path.join(data_root, "train")
     data_val   = os.path.join(data_root, "val")
 
@@ -1477,10 +1477,7 @@ def freeze_early_layers(model, n_layers_to_freeze=4):
     total  = sum(p.numel() for p in model.parameters())
     print_only(f"Frozen {frozen:,} / {total:,} parameters ({100*frozen/total:.1f}%)")
 
-def train(cfg: DictConfig, prepared_data=None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    stop_file = os.environ.get("APOLLO_STOP_FILE")
-    if stop_file and os.path.isfile(stop_file):
-        return {}, {}
+def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # Apply hardware / compiler optimisations declared in cfg.optimizations
     apply_optimizations(cfg)
 
@@ -1488,19 +1485,16 @@ def train(cfg: DictConfig, prepared_data=None) -> Tuple[Dict[str, Any], Dict[str
         pl.seed_everything(cfg.seed, workers=True)
 
     # Auto-preprocess raw data and bootstrap eval if needed
-    data_name = cfg.exp.get("data_name") or cfg.exp.name
-    if prepared_data is None:
-        prepare_data(cfg)
-        val_clip_key = _val_clip_key(cfg, os.path.join(_REPO_ROOT, "data", data_name, "val"),
-                                     _fixed_delay_from_cfg(cfg))
-    else:
-        cfg.datas.train_dir, cfg.datas.eval_dir, val_clip_key = prepared_data
-        val_clip_key = f"{val_clip_key}:{cfg.exp.name}"
+    prepare_data(cfg)
+
+    # Recompute val_clip_key here (same formula as prepare_data) for use in the baseline cache.
+    val_clip_key = _val_clip_key(cfg, os.path.join(_REPO_ROOT, "data", cfg.exp.name, "val"),
+                                 _fixed_delay_from_cfg(cfg))
 
     # Verify chunks exist -- if data/ was empty, provide a clear error
     train_lq   = os.path.join(cfg.datas.train_dir, "LQ")
     if not os.path.isdir(train_lq) or not any(f.endswith(".wav") for f in os.listdir(train_lq)):
-        _name = data_name
+        _name = cfg.exp.name
         print_only("")
         print_only("ERROR: No training chunks found.")
         print_only("")
@@ -1604,8 +1598,8 @@ def train(cfg: DictConfig, prepared_data=None) -> Tuple[Dict[str, Any], Dict[str
             else:
                 model_state = raw
                 print_only("Detected bare state dict format (no prefix)")
-            m = look2hear.models.apollo.model_from_state(model_state, _m_sr, _m_win, feature_dim, _m_layer)
-            missing, unexpected = m.load_state_dict(model_state, strict="cascade_frequencies" in model_state)
+            m = look2hear.models.apollo.Apollo(sr=_m_sr, win=_m_win, feature_dim=feature_dim, layer=_m_layer)
+            missing, unexpected = m.load_state_dict(model_state, strict=False)
             if missing:
                 print_only(f"Missing keys ({len(missing)}): {missing[:5]}...")
             if unexpected:
@@ -1630,30 +1624,13 @@ def train(cfg: DictConfig, prepared_data=None) -> Tuple[Dict[str, Any], Dict[str
         local_path = cfg.get("weights_path", None)
 
         if not local_path:
-            local_path = ensure_pretrained_weights(
-                feature_dim, _MODELS_DIR, official_base=cfg.model.get("cascade", False),
-            )
+            local_path = ensure_pretrained_weights(feature_dim, _MODELS_DIR)
         print_only(f"[weights] Loading from: {local_path}")
         model = _load_weights(local_path, feature_dim)
         print_only("[weights] Weights loaded.")
 
     # Freeze early layers for fine-tuning -- count driven by config
     # (no-op when resuming since frozen params are restored by the checkpoint too)
-    if cfg.model.get("cascade", False):
-        if cfg.training.n_layers_to_freeze != 4:
-            raise ValueError("Cascade requires n_layers_to_freeze: 4")
-        if not isinstance(model, look2hear.models.apollo.ApolloCascade):
-            model = look2hear.models.apollo.ApolloCascade(
-                model, cfg.model.get("cascade_crossovers", [3000, 10000]),
-                cfg.model.get("cascade_ramp_hz", 1000), cfg.model.get("cascade_expand_bands", False))
-        elif ckpt_path is None:
-            # A warm start loads weights but uses the requested experiment settings.
-            model.configure(
-                cfg.model.get("cascade_crossovers", [3000, 10000]),
-                cfg.model.get("cascade_ramp_hz", 1000), cfg.model.get("cascade_expand_bands", False))
-        print_only("[cascade] Shared frozen backbone; three independent trainable tails")
-    elif isinstance(model, look2hear.models.apollo.ApolloCascade):
-        raise ValueError("Cascade checkpoint requires model.cascade: true")
     freeze_early_layers(model, n_layers_to_freeze=cfg.training.n_layers_to_freeze)
 
     # Instantiate discriminator fresh -- learns your artifact type from scratch
@@ -1821,6 +1798,7 @@ def train(cfg: DictConfig, prepared_data=None) -> Tuple[Dict[str, Any], Dict[str
     from pytorch_lightning.callbacks import Callback as _Callback
 
     _interrupt = {"requested": False, "count": 0, "saved": False}
+    stop_file = os.environ.get("APOLLO_STOP_FILE")
 
     def _interrupt_check(trainer) -> None:
         """Called from batch-end hooks: save at a consistent point, then stop."""
@@ -2082,7 +2060,7 @@ def train(cfg: DictConfig, prepared_data=None) -> Tuple[Dict[str, Any], Dict[str
         _baseline_cache_key_ = _baseline_cache_key(
             local_path or "",
             val_clip_key,
-            f"p{look2hear.system.audio_litmodule._VAL_PROTOCOL}:{cfg.get('training', {}).get('val_songs')}:{cfg.system.get('visqol_fraction', 1.0)}:{_m_sr}:{_m_win}:{_m_layer}:{feature_dim}:{cfg.model.get('cascade', False)}:{cfg.model.get('cascade_crossovers')}:{cfg.model.get('cascade_ramp_hz')}:{cfg.model.get('cascade_expand_bands', False)}",
+            f"p{look2hear.system.audio_litmodule._VAL_PROTOCOL}:{cfg.get('training', {}).get('val_songs')}:{cfg.system.get('visqol_fraction', 1.0)}:{_m_sr}:{_m_win}:{_m_layer}:{feature_dim}",
         )
         _baseline_cache_file = os.path.join(_baseline_cache_dir, f"{_baseline_cache_key_}.json")
 
@@ -2146,14 +2124,6 @@ def train(cfg: DictConfig, prepared_data=None) -> Tuple[Dict[str, Any], Dict[str
 
         if "state_dict" in _ckpt_data:
             _sd = _ckpt_data["state_dict"]
-            _saved_cascade = any(k in _sd for k in ("audio_model.cascade_frequencies", "cascade_frequencies"))
-            if _saved_cascade != isinstance(model, look2hear.models.apollo.ApolloCascade):
-                raise ValueError("Resume architecture mismatch: start a fresh run when switching cascade mode")
-            if _saved_cascade:
-                for name in ("cascade_frequencies", "cascade_expand_bands"):
-                    key = f"audio_model.{name}" if f"audio_model.{name}" in _sd else name
-                    if key in _sd and not torch.equal(_sd[key].cpu(), getattr(model, name).cpu()):
-                        raise ValueError(f"Resume setting mismatch ({name}): use a fresh run for cascade experiments")
             _current_keys = set(_sd.keys())
             # Detect legacy checkpoint: model keys lack the LightningModule wrapper prefixes.
             # Legacy: "BN.0.0.weight" -> expected: "audio_model.BN.0.0.weight"
@@ -2237,7 +2207,7 @@ def train(cfg: DictConfig, prepared_data=None) -> Tuple[Dict[str, Any], Dict[str
         print_only("[train] No best checkpoint found -- skipping best_model.pth export.")
 
 if __name__ == "__main__":
-    from config_schema import load_config, load_parallel_config
+    from config_schema import load_config
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--conf_dir",
@@ -2254,44 +2224,8 @@ if __name__ == "__main__":
         action="store_true",
         help="Resume from the last checkpoint in the experiment checkpoint directory.",
     )
-    parser.add_argument("--prepared-data", nargs=3, help=argparse.SUPPRESS)
-    parser.add_argument("--parallel-settings", nargs=3, type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
-    parallel = load_parallel_config(args.conf_dir)
-    if parallel is not None:
-        from parallel_training import run_parallel
-
-        configs, settings = parallel
-        members = [load_config(path) for path in configs.values()]
-        first = members[0]
-        source = first.exp.get("data_name") or first.exp.name
-        if any((member.exp.get("data_name") or member.exp.name) != source or member.datas != first.datas
-               for member in members):
-            parser.error("Parallel specialist presets must share the same dataset and data settings")
-        if len({(member.exp.dir, member.exp.name) for member in members}) != len(members):
-            parser.error("Parallel specialist presets must use separate experiment names")
-        prepare_data(first)
-        val_key = _val_clip_key(first, os.path.join(_REPO_ROOT, "data", source, "val"),
-                                _fixed_delay_from_cfg(first))
-        prepared = (first.datas.train_dir, first.datas.eval_dir, val_key)
-        common_args = ["--prepared-data", *prepared, "--parallel-settings",
-                       *(str(settings[key]) for key in ("batch_size", "grad_accum_steps", "num_workers"))]
-        if args.weights_path:
-            common_args += ["--weights_path", args.weights_path]
-        if args.resume:
-            common_args.append("--resume")
-        raise SystemExit(run_parallel(configs, common_args, __file__))
-
     cfg = load_config(args.conf_dir)
-    if args.parallel_settings is not None:
-        import threading
-
-        def watch_launcher():
-            sys.stdin.read()
-            os._exit(1)
-
-        threading.Thread(target=watch_launcher, daemon=True).start()
-        cfg.datas.batch_size, cfg.training.grad_accum_steps, cfg.datas.num_workers = args.parallel_settings
 
     # --- Autodiscovery ---
     # Derive exp.name from config filename stem if not explicitly set in config.
@@ -2302,8 +2236,7 @@ if __name__ == "__main__":
 
     # Derive data and chunk paths from exp.name if not explicitly set in config.
     # data/<name>/train, data/<name>/val, chunks/<name>/train, chunks/<name>/val
-    _data_name = cfg.exp.get("data_name") or cfg.exp.name
-    _data_name_root = os.path.join(_REPO_ROOT, "data", _data_name)
+    _data_name_root   = os.path.join(_REPO_ROOT, "data",   cfg.exp.name)
     _chunks_name_root = os.path.join(_REPO_ROOT, "chunks", cfg.exp.name)
 
     _default_train_dir = os.path.join("chunks", cfg.exp.name, "train")
@@ -2316,7 +2249,7 @@ if __name__ == "__main__":
 
     # If loose _LQ/_HQ files exist in data/ root, move them into data/<name>/
     _data_root = os.path.join(_REPO_ROOT, "data")
-    if args.prepared_data is None and os.path.isdir(_data_root):
+    if os.path.isdir(_data_root):
         import shutil as _shutil
         _loose = [f for f in os.listdir(_data_root)
                   if os.path.isfile(os.path.join(_data_root, f))
@@ -2328,9 +2261,9 @@ if __name__ == "__main__":
             for _f in _loose:
                 _shutil.move(os.path.join(_data_root, _f),
                              os.path.join(_data_name_root, _f))
-            print(f"[autodiscovery] Moved {len(_loose)} loose file(s) from data/ -> data/{_data_name}/")
+            print(f"[autodiscovery] Moved {len(_loose)} loose file(s) from data/ -> data/{cfg.exp.name}/")
 
-    print(f"[autodiscovery] name={cfg.exp.name}  data=data/{_data_name}  chunks=chunks/{cfg.exp.name}")
+    print(f"[autodiscovery] name={cfg.exp.name}  data=data/{cfg.exp.name}  chunks=chunks/{cfg.exp.name}")
     # --- End autodiscovery ---
 
     if args.weights_path:
@@ -2340,4 +2273,4 @@ if __name__ == "__main__":
 
     os.makedirs(os.path.join(cfg.exp.dir, cfg.exp.name), exist_ok=True)
 
-    train(cfg, prepared_data=args.prepared_data)
+    train(cfg)
