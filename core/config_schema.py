@@ -19,7 +19,7 @@ def _toggle(**kw):
 
 
 CONFIG = {
-    "exp": {"dir": "./runs", "name": None},
+    "exp": {"dir": "./runs", "name": None, "data_name": None},
     "resume_checkpoint": None,
     "resume": False,
     "seed": None,
@@ -96,6 +96,7 @@ OPEN = {"model", "system", "checkpoint", "logger", "trainer", "discriminator",
 # Keys the code reads only when present, so a config may omit them and they are never filled in.
 OPTIONAL = {
     ("exp", "name"),
+    ("exp", "data_name"),
     ("datas", "compression", "ffmpeg"),
     ("datas", "compression", "acmenc"),
 }

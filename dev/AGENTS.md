@@ -38,7 +38,7 @@ The target is a set of 2003 leaked tracks whose surviving files are all heavily 
 
 ## Planned Frequency-Specialized Restoration Experiments
 
-These experiments use the existing single-generator training and inference paths as the baseline for comparison. Option B has an experimental implementation; Option A remains proposed. The goal is to improve restoration of multigeneration codec damage while retaining natural high-frequency reconstruction on a small paired dataset.
+These experiments use the existing single-generator training and inference paths as the baseline for comparison. Both options have experimental implementations. The goal is to improve restoration of multigeneration codec damage while retaining natural high-frequency reconstruction on a small paired dataset.
 
 ### Motivation from listening tests
 
@@ -56,11 +56,11 @@ Merge the specialists with complementary, smoothly overlapping spectral weights.
 
 ### Option A: Detached parallel low/mid specialists with high-band regeneration
 
-- Run low and mid specialists on the same original LQ mix. Compute the shared frozen features once where both inputs are identical.
+- Run low and mid specialists on the same original LQ mix. The initial implementation uses ordinary checkpoints, each with its own copy of the backbone.
 - Merge their assigned output ranges, preserving musical context below the high-band crossover. Remove the unreliable upper frequencies from this intermediate result before passing it to the high specialist.
 - Run the high specialist on that cleaned, bandwidth-limited mix. Start by auditioning untouched base Apollo. Compare a low-pass filter with the successful MP3 encode/decode procedure. The high specialist contributes only the designated upper band to the final merge.
 - Train low and mid independently. If the high specialist needs adaptation, train it on intermediates from fixed upstream checkpoints, preferably generated from held-out or out-of-fold songs. This keeps the high-stage input distribution stable. Multiple upstream checkpoints could later be sampled to improve robustness to checkpoint changes.
-- This topology has 18 BSNet block applications along its three branches conceptually, with a longest signal path of 12 blocks. Reusing the shared low/mid features eliminates redundant frozen-block computation. The detached paths allow independent training and checkpoint selection, subject to the high specialist's dependence on its upstream input distribution.
+- Train `wma_mp3_cake_detached_low` and `wma_mp3_cake_detached_mid` separately. Both read the experimental dataset via `exp.data_name` and save independent runs. For combined inference, select the low config and its checkpoint, choose Detached specialists, then choose a mid checkpoint. The default high stage runs official base Apollo on the cleaned low and mids. The optional `wma_mp3_cake_detached_high` preset trains on the original mix. Select its checkpoint and original-mix input to audition three parallel specialists. The CLI accepts `--detached_mid_weights`, `--detached_high_weights`, and `--detached_high_input`; `--weights` selects the low checkpoint. The existing cascade crossover settings define the merged ranges. MP3 encode/decode between stages remains a follow-up experiment.
 
 ### Option B: Differentiable progressive cascade with joint fine-tuning
 

@@ -410,7 +410,7 @@ def run_evaluation(
 
     # Val clip dir: same cache key train.py uses, so evaluate scores the clips training validated on
     import train as _train
-    _data_val = os.path.join(_REPO_ROOT, "data", exp_name, "val")
+    _data_val = os.path.join(_REPO_ROOT, "data", cfg.exp.get("data_name") or exp_name, "val")
     _key = _train._val_clip_key(cfg, _data_val, _train._fixed_delay_from_cfg(cfg))
     chunk_root = os.path.join(_train._CHUNK_CACHE_DIR, _key, "val")
     if not os.path.isdir(os.path.join(chunk_root, "LQ")):

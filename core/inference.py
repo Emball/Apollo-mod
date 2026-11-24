@@ -488,6 +488,9 @@ def main(
     aux_weights=None,
     aux_conf_dir=None,
     aux_ensemble=None,
+    detached_mid_weights=None,
+    detached_high_weights=None,
+    detached_high_input="cleaned",
 ):
     """
     ensemble: list of band dicts (already parsed from JSON), or None.
@@ -498,10 +501,13 @@ def main(
     """
     # Config fills only args the user didn't explicitly provide (still None).
     # Explicit CLI args always win -- config is a fallback, not an override.
+    crossovers, ramp_hz = [3000, 10000], 1000
     if conf_dir is not None:
         cfg = load_config(conf_dir)
         m = cfg.get("model", {})
         d = cfg.get("datas", {})
+        crossovers = m.get("cascade_crossovers", crossovers)
+        ramp_hz = m.get("cascade_ramp_hz", ramp_hz)
         if sr          is None and "sr"          in m: sr          = int(m.sr)
         if win         is None and "win"         in m: win         = int(m.win)
         if feature_dim is None and "feature_dim" in m: feature_dim = int(m.feature_dim)
@@ -535,6 +541,18 @@ def main(
         weights = _find_best_checkpoint(conf_dir)
 
     model = load_model(weights=weights, sr=sr, win=win, feature_dim=feature_dim, layer=layer)
+    if detached_mid_weights is not None:
+        from look2hear.models.apollo import DetachedApollo
+        from look2hear.utils.ckpt_io import ensure_pretrained_weights
+
+        mid_model = load_model(detached_mid_weights, sr, win, feature_dim, layer)
+        if detached_high_weights is None:
+            detached_high_weights = ensure_pretrained_weights(256, _MODELS_DIR, official_base=True)
+        high_model = load_model(detached_high_weights, sr, win, feature_dim, layer)
+        model = DetachedApollo(model, mid_model, high_model, sr, crossovers, ramp_hz,
+                               high_input=detached_high_input)
+    elif detached_high_weights is not None or detached_high_input != "cleaned":
+        raise ValueError("Detached high-stage options require --detached_mid_weights")
     model = model.to(device).eval()
 
     # Aux model (optional second checkpoint for dual-checkpoint ensemble)
@@ -633,6 +651,10 @@ if __name__ == "__main__":
     parser.add_argument("--aux_ensemble",  type=str, default=None,
                         help="JSON band specs for blending the aux model output. "
                              "Omit to use the same bands as --ensemble.")
+    parser.add_argument("--detached_mid_weights", help="Mid specialist checkpoint. --weights supplies the low specialist.")
+    parser.add_argument("--detached_high_weights", help="High specialist checkpoint. Defaults to official base Apollo.")
+    parser.add_argument("--detached_high_input", choices=("cleaned", "original"), default="cleaned",
+                        help="Feed the high stage cleaned low/mids or the original mix")
     args = parser.parse_args()
 
     ensemble_parsed     = _json.loads(args.ensemble)    if args.ensemble    else None
@@ -659,4 +681,7 @@ if __name__ == "__main__":
         aux_weights=args.aux_weights,
         aux_conf_dir=args.aux_conf_dir,
         aux_ensemble=aux_ensemble_parsed,
+        detached_mid_weights=args.detached_mid_weights,
+        detached_high_weights=args.detached_high_weights,
+        detached_high_input=args.detached_high_input,
     )

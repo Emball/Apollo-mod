@@ -306,7 +306,32 @@ class Apollo(BaseModel):
         return model_args
 
 
-class ApolloCascade(Apollo):
+class BandCrossover:
+    @staticmethod
+    def _validate_frequencies(crossovers, ramp_hz, sr):
+        lo, hi = map(float, crossovers)
+        ramp = float(ramp_hz)
+        if not (0 < ramp < 2 * min(lo, (hi-lo)/2, sr/2-hi)):
+            raise ValueError("Crossovers and transition width must fit inside the spectrum without overlap")
+        return lo, hi, ramp
+
+    def _crossover_masks(self, audio):
+        lo, hi, ramp = self.cascade_frequencies.unbind()
+        hz = torch.arange(1025, device=audio.device) * (self.sr / 2048)
+        low = (0.5 - 0.5 * torch.sin(torch.pi * ((hz-lo)/ramp).clamp(-0.5, 0.5)))[:, None]
+        high = (0.5 + 0.5 * torch.sin(torch.pi * ((hz-hi)/ramp).clamp(-0.5, 0.5)))[:, None]
+        return low, 1 - low - high, high
+
+    def _spectrum(self, audio):
+        return torch.stft(audio.float().reshape(-1, audio.shape[-1]), 2048, 512,
+                          window=self.merge_window, return_complex=True, pad_mode="constant")
+
+    def _waveform(self, spectrum, reference):
+        return torch.istft(spectrum, 2048, 512, window=self.merge_window,
+                           length=reference.shape[-1]).reshape_as(reference).to(reference.dtype)
+
+
+class ApolloCascade(Apollo, BandCrossover):
     """Three frequency specialists sharing the first four pretrained BSNet blocks."""
 
     def __init__(self, base, crossovers=(3000., 10000.), ramp_hz=1000., expand_bands=False):
@@ -325,14 +350,6 @@ class ApolloCascade(Apollo):
         self.register_buffer("band_centers", centers, persistent=False)
         self.BN.requires_grad_(False)
         self.net[:4].requires_grad_(False)
-
-    @staticmethod
-    def _validate_frequencies(crossovers, ramp_hz, sr):
-        lo, hi = map(float, crossovers)
-        ramp = float(ramp_hz)
-        if not (0 < ramp < 2 * min(lo, (hi-lo)/2, sr/2-hi)):
-            raise ValueError("Cascade crossovers and transition width must fit inside the spectrum without overlap")
-        return lo, hi, ramp
 
     def configure(self, crossovers, ramp_hz, expand_bands):
         frequencies = self._validate_frequencies(crossovers, ramp_hz, self.sr)
@@ -363,21 +380,9 @@ class ApolloCascade(Apollo):
             feature = tail(feature)
         return self.reconstruct(feature, heads, audio)
 
-    def _spectrum(self, audio):
-        return torch.stft(audio.float().reshape(-1, audio.shape[-1]), 2048, 512,
-                          window=self.merge_window, return_complex=True,
-                          pad_mode="constant")
-
-    def _waveform(self, spectrum, reference):
-        return torch.istft(spectrum, 2048, 512, window=self.merge_window,
-                           length=reference.shape[-1]).reshape_as(reference).to(reference.dtype)
-
     def forward(self, input, return_specialists=False):
         lo, hi, ramp = self.cascade_frequencies.unbind()
-        hz = torch.arange(1025, device=input.device) * (self.sr / 2048)
-        low = (0.5 - 0.5 * torch.sin(torch.pi * ((hz-lo)/ramp).clamp(-0.5, 0.5)))[:, None]
-        high = (0.5 + 0.5 * torch.sin(torch.pi * ((hz-hi)/ramp).clamp(-0.5, 0.5)))[:, None]
-        mid = 1 - low - high
+        low, mid, high = self._crossover_masks(input)
 
         low_audio = self._specialist(input, self.net[4:], self.output, (0, lo+ramp/2))
         low_spec = self._spectrum(low_audio) * low
@@ -392,6 +397,33 @@ class ApolloCascade(Apollo):
         if return_specialists:
             return output, (low_audio, mid_audio, high_audio)
         return output
+
+
+class DetachedApollo(nn.Module, BandCrossover):
+    """Render independently trained checkpoints with complementary crossovers."""
+
+    def __init__(self, low_model, mid_model, high_model, sr, crossovers, ramp_hz,
+                 high_input="cleaned"):
+        super().__init__()
+        if high_input not in ("cleaned", "original"):
+            raise ValueError("High stage input must be 'cleaned' or 'original'")
+        if any(isinstance(model, ApolloCascade) for model in (low_model, mid_model, high_model)):
+            raise ValueError("Detached restoration requires individual Apollo checkpoints")
+        self.low_model = low_model
+        self.mid_model = mid_model
+        self.high_model = high_model
+        self.sr = sr
+        self.high_input = high_input
+        self.register_buffer("cascade_frequencies", torch.tensor(
+            self._validate_frequencies(crossovers, ramp_hz, sr)), persistent=False)
+        self.register_buffer("merge_window", torch.hann_window(2048), persistent=False)
+
+    def forward(self, audio):
+        low, mid, high = self._crossover_masks(audio)
+        cleaned = self._spectrum(self.low_model(audio)) * low
+        cleaned = cleaned + self._spectrum(self.mid_model(audio)) * mid
+        high_input = audio if self.high_input == "original" else self._waveform(cleaned, audio)
+        return self._waveform(cleaned + self._spectrum(self.high_model(high_input)) * high, audio)
 
 
 def model_from_state(state, sr, win, feature_dim, layer):

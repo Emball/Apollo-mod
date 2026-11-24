@@ -1213,7 +1213,7 @@ def prepare_data(cfg: DictConfig) -> None:
     Skips any split that is already chunked.
     """
     # Data source dirs live under data/<name>/train and data/<name>/val
-    data_root  = os.path.join(_REPO_ROOT, "data", cfg.exp.name)
+    data_root  = os.path.join(_REPO_ROOT, "data", cfg.exp.get("data_name") or cfg.exp.name)
     data_train = os.path.join(data_root, "train")
     data_val   = os.path.join(data_root, "val")
 
@@ -1488,13 +1488,14 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     prepare_data(cfg)
 
     # Recompute val_clip_key here (same formula as prepare_data) for use in the baseline cache.
-    val_clip_key = _val_clip_key(cfg, os.path.join(_REPO_ROOT, "data", cfg.exp.name, "val"),
+    data_name = cfg.exp.get("data_name") or cfg.exp.name
+    val_clip_key = _val_clip_key(cfg, os.path.join(_REPO_ROOT, "data", data_name, "val"),
                                  _fixed_delay_from_cfg(cfg))
 
     # Verify chunks exist -- if data/ was empty, provide a clear error
     train_lq   = os.path.join(cfg.datas.train_dir, "LQ")
     if not os.path.isdir(train_lq) or not any(f.endswith(".wav") for f in os.listdir(train_lq)):
-        _name = cfg.exp.name
+        _name = data_name
         print_only("")
         print_only("ERROR: No training chunks found.")
         print_only("")
@@ -2261,7 +2262,8 @@ if __name__ == "__main__":
 
     # Derive data and chunk paths from exp.name if not explicitly set in config.
     # data/<name>/train, data/<name>/val, chunks/<name>/train, chunks/<name>/val
-    _data_name_root   = os.path.join(_REPO_ROOT, "data",   cfg.exp.name)
+    _data_name = cfg.exp.get("data_name") or cfg.exp.name
+    _data_name_root = os.path.join(_REPO_ROOT, "data", _data_name)
     _chunks_name_root = os.path.join(_REPO_ROOT, "chunks", cfg.exp.name)
 
     _default_train_dir = os.path.join("chunks", cfg.exp.name, "train")
@@ -2286,9 +2288,9 @@ if __name__ == "__main__":
             for _f in _loose:
                 _shutil.move(os.path.join(_data_root, _f),
                              os.path.join(_data_name_root, _f))
-            print(f"[autodiscovery] Moved {len(_loose)} loose file(s) from data/ -> data/{cfg.exp.name}/")
+            print(f"[autodiscovery] Moved {len(_loose)} loose file(s) from data/ -> data/{_data_name}/")
 
-    print(f"[autodiscovery] name={cfg.exp.name}  data=data/{cfg.exp.name}  chunks=chunks/{cfg.exp.name}")
+    print(f"[autodiscovery] name={cfg.exp.name}  data=data/{_data_name}  chunks=chunks/{cfg.exp.name}")
     # --- End autodiscovery ---
 
     if args.weights_path:
