@@ -9,6 +9,7 @@ import sys
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import json
+from collections import deque
 from typing import Any, Dict, List, Tuple
 from omegaconf import OmegaConf, open_dict
 import argparse
@@ -1837,42 +1838,54 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         trainer.should_stop = True
 
     class StepPrinter(_Callback):
-        """
-        Replaces TQDM with a clean line-per-step console output.
-        Reports wall-clock cumulative it/s from the first step of the session,
-        excluding time spent in validation. Rises naturally as CUDA warms up.
-        """
+        """Report recent training throughput, excluding validation and pauses."""
+
+        def __init__(self):
+            self._samples = deque()
+            self._chunks = 0
+            self._paused_seconds = 0.0
+            self._val_t0 = None
+            self._last_batch_idx = None
+            self._speed = "measuring throughput"
+            self._line_width = 0
 
         def on_train_epoch_start(self, trainer, pl_module):
-            self._epoch_batches    = trainer.num_training_batches
-            self._last_global_step = trainer.global_step
-            self._last_batch_idx   = 0
-            self._val_t0           = None
-            self._session_t0       = None   # set on first optimizer step
-            self._session_done     = 0      # optimizer steps this session
-            self._val_elapsed      = 0.0    # cumulative val time excluded from rate
-            total = self._epoch_batches
-            print(f"\nEpoch {trainer.current_epoch} -- {total} batches", flush=True)
+            self._epoch_batches = trainer.num_training_batches
+            self._last_update = true_step(trainer.global_step)
+            self._last_batch_idx = None
+            self._line_width = 0
+            print(f"\nEpoch {trainer.current_epoch} -- {self._epoch_batches} batches", flush=True)
 
         def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-            now = _time.monotonic()
+            now = _time.monotonic() - self._paused_seconds
+            step = true_step(trainer.global_step)
+            self._chunks += batch[0].shape[0]
+            self._samples.append((now, self._chunks, step))
+            self._last_batch_idx = batch_idx
 
-            if self._session_t0 is None:
-                self._session_t0 = now
-
-            # Count every batch so it/s matches the original batch-level rate
-            self._session_done += 1
-            elapsed = (now - self._session_t0) - self._val_elapsed
-            its = self._session_done / elapsed if elapsed > 0 else 0.0
+            # Compare completed batches against the first batch-end timestamp.
+            # Retain at least three measured intervals when batches are slow.
+            while len(self._samples) > 4 and now - self._samples[1][0] >= 10.0:
+                self._samples.popleft()
+            start, start_chunks, start_step = self._samples[0]
+            elapsed = now - start
+            if len(self._samples) >= 4 and elapsed > 0:
+                chunks_per_second = (self._chunks - start_chunks) / elapsed
+                updates_per_second = (step - start_step) / elapsed
+                self._speed = f"{chunks_per_second:.2f} chunks/s  {updates_per_second:.2f} updates/s"
 
             # Only print on optimizer steps
-            if trainer.global_step == self._last_global_step:
+            if step == self._last_update:
                 return
-            self._last_global_step = trainer.global_step
-            done  = batch_idx + 1
+            self._last_update = step
+            self._print_progress(trainer, pl_module)
+            self.on_train_batch_end_pause_check()
+            _interrupt_check(trainer)
+
+        def _print_progress(self, trainer, pl_module):
+            done  = self._last_batch_idx + 1
             total = self._epoch_batches
             pct   = 100 * done / total
-            self._last_batch_idx = batch_idx
             # Show last val metrics inline if available
             visqol = getattr(pl_module, "_last_val_visqol", None)
             hfnr    = getattr(pl_module, "_last_val_hfnr",    None)
@@ -1882,13 +1895,13 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             if sisdr  is not None: val_parts.append(f"sisdr={float(sisdr):.3f}")
             if hfnr    is not None: val_parts.append(f"hfnr={float(hfnr):.3f}")
             val_str = "  " + "  ".join(val_parts) if val_parts else ""
-            print(
-                f"\r  {pct:5.1f}%  step={true_step(trainer.global_step)}  "
-                f"{done}/{total}  {its:.2f} it/s{val_str}",
-                end="", flush=True
-            )
-            self.on_train_batch_end_pause_check()
-            _interrupt_check(trainer)
+            line = (f"  {pct:5.1f}%  step={true_step(trainer.global_step)}  "
+                    f"{done}/{total}  {self._speed}{val_str}")
+            self._write_line(line)
+
+        def _write_line(self, line):
+            print("\r" + line.ljust(self._line_width), end="", flush=True)
+            self._line_width = len(line)
 
         def on_validation_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0):
             _interrupt_check(trainer)
@@ -1926,44 +1939,23 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             except OSError:
                 pass
             paused_dur = _time.monotonic() - pause_start
-            if hasattr(self, "_val_elapsed"):
-                self._val_elapsed += paused_dur
+            self._paused_seconds += paused_dur
             print("[resumed] Training continuing...", flush=True)
 
         def on_train_epoch_end(self, trainer, pl_module):
             print(flush=True)
 
-        def on_validation_epoch_start(self, trainer, pl_module):
-            self._val_t0     = _time.monotonic()
-            self._val_sanity = trainer.sanity_checking
-            if not self._val_sanity:
-                print("\r  Validating...                                                  ", end="", flush=True)
-
-        def on_validation_epoch_end(self, trainer, pl_module):
-            pass
+        def on_validation_start(self, trainer, pl_module):
+            self._val_t0 = _time.monotonic()
+            if not trainer.sanity_checking:
+                self._write_line("  Validating...")
 
         def on_validation_end(self, trainer, pl_module):
-            val_dur = _time.monotonic() - self._val_t0 if self._val_t0 else 0.0
-            if hasattr(self, '_val_elapsed'):
-                self._val_elapsed += val_dur
-            if not getattr(self, '_val_sanity', True):
-                # Reprint the progress bar line in place with updated val metrics
-                visqol = getattr(pl_module, "_last_val_visqol", None)
-                hfnr    = getattr(pl_module, "_last_val_hfnr",    None)
-                sisdr  = getattr(pl_module, "_last_val_sisdr",  None)
-                val_parts = []
-                if visqol is not None: val_parts.append(f"visqol={float(visqol):.3f}")
-                if sisdr  is not None: val_parts.append(f"sisdr={float(sisdr):.3f}")
-                if hfnr    is not None: val_parts.append(f"hfnr={float(hfnr):.3f}")
-                val_str = "  " + "  ".join(val_parts) if val_parts else ""
-                step  = true_step(trainer.global_step)
-                total = getattr(self, "_epoch_batches", 0)
-                done  = getattr(self, "_last_batch_idx", 0) + 1 if total else 0
-                pct   = 100 * done / total if total else 0.0
-                print(
-                    f"\r  {pct:5.1f}%  step={step}  {done}/{total}  --{val_str}",
-                    end="", flush=True
-                )
+            if self._val_t0 is not None:
+                self._paused_seconds += _time.monotonic() - self._val_t0
+                self._val_t0 = None
+            if not trainer.sanity_checking and self._last_batch_idx is not None:
+                self._print_progress(trainer, pl_module)
 
     callbacks: List[Callback] = [StepPrinter()]
 
