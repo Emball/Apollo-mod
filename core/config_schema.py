@@ -75,7 +75,9 @@ CONFIG = {
             },
         },
     },
-    "model": {"sr": 44100, "win": 20, "feature_dim": 256, "layer": 6},
+    "model": {"sr": 44100, "win": 20, "feature_dim": 256, "layer": 6,
+              "cascade": False, "cascade_crossovers": [3000, 10000], "cascade_ramp_hz": 1000,
+              "cascade_expand_bands": False},
     "optimizer": {
         "type": "AdamW",
         "lr_g": 1e-5,

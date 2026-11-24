@@ -1608,9 +1608,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
             else:
                 model_state = raw
                 print_only("Detected bare state dict format (no prefix)")
-            m = look2hear.models.apollo.Apollo(sr=_m_sr, win=_m_win,
-                                               feature_dim=feature_dim, layer=_m_layer)
-            missing, unexpected = m.load_state_dict(model_state, strict=False)
+            m = look2hear.models.apollo.model_from_state(model_state, _m_sr, _m_win, feature_dim, _m_layer)
+            missing, unexpected = m.load_state_dict(model_state, strict="cascade_frequencies" in model_state)
             if missing:
                 print_only(f"Missing keys ({len(missing)}): {missing[:5]}...")
             if unexpected:
@@ -1685,6 +1684,21 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     # Freeze early layers for fine-tuning -- count driven by config
     # (no-op when resuming since frozen params are restored by the checkpoint too)
+    if cfg.model.get("cascade", False):
+        if cfg.training.n_layers_to_freeze != 4:
+            raise ValueError("Cascade requires n_layers_to_freeze: 4")
+        if not isinstance(model, look2hear.models.apollo.ApolloCascade):
+            model = look2hear.models.apollo.ApolloCascade(
+                model, cfg.model.get("cascade_crossovers", [3000, 10000]),
+                cfg.model.get("cascade_ramp_hz", 1000), cfg.model.get("cascade_expand_bands", False))
+        elif ckpt_path is None:
+            # A warm start loads weights but uses the requested experiment settings.
+            model.configure(
+                cfg.model.get("cascade_crossovers", [3000, 10000]),
+                cfg.model.get("cascade_ramp_hz", 1000), cfg.model.get("cascade_expand_bands", False))
+        print_only("[cascade] Shared frozen backbone; three independent trainable tails")
+    elif isinstance(model, look2hear.models.apollo.ApolloCascade):
+        raise ValueError("Cascade checkpoint requires model.cascade: true")
     freeze_early_layers(model, n_layers_to_freeze=cfg.training.n_layers_to_freeze)
 
     # Instantiate discriminator fresh -- learns your artifact type from scratch
@@ -2118,7 +2132,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         _baseline_cache_key_ = _baseline_cache_key(
             local_path or "",
             val_clip_key,
-            f"p{look2hear.system.audio_litmodule._VAL_PROTOCOL}:{cfg.get('training', {}).get('val_songs')}:{cfg.system.get('visqol_fraction', 1.0)}:{_m_sr}:{_m_win}:{_m_layer}:{feature_dim}",
+            f"p{look2hear.system.audio_litmodule._VAL_PROTOCOL}:{cfg.get('training', {}).get('val_songs')}:{cfg.system.get('visqol_fraction', 1.0)}:{_m_sr}:{_m_win}:{_m_layer}:{feature_dim}:{cfg.model.get('cascade', False)}:{cfg.model.get('cascade_crossovers')}:{cfg.model.get('cascade_ramp_hz')}:{cfg.model.get('cascade_expand_bands', False)}",
         )
         _baseline_cache_file = os.path.join(_baseline_cache_dir, f"{_baseline_cache_key_}.json")
 
@@ -2182,6 +2196,14 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
         if "state_dict" in _ckpt_data:
             _sd = _ckpt_data["state_dict"]
+            _saved_cascade = any(k in _sd for k in ("audio_model.cascade_frequencies", "cascade_frequencies"))
+            if _saved_cascade != isinstance(model, look2hear.models.apollo.ApolloCascade):
+                raise ValueError("Resume architecture mismatch: start a fresh run when switching cascade mode")
+            if _saved_cascade:
+                for name in ("cascade_frequencies", "cascade_expand_bands"):
+                    key = f"audio_model.{name}" if f"audio_model.{name}" in _sd else name
+                    if key in _sd and not torch.equal(_sd[key].cpu(), getattr(model, name).cpu()):
+                        raise ValueError(f"Resume setting mismatch ({name}): use a fresh run for cascade experiments")
             _current_keys = set(_sd.keys())
             # Detect legacy checkpoint: model keys lack the LightningModule wrapper prefixes.
             # Legacy: "BN.0.0.weight" -> expected: "audio_model.BN.0.0.weight"

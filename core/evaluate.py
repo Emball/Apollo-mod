@@ -136,8 +136,8 @@ def _load_model(ckpt_path: str, feature_dim: int, sr: int, win: int, layer: int)
             cleaned[k[len("audio_model."):]] = v
         elif not any(k.startswith(p) for p in ("discriminator.", "metrics.", "optimizer")):
             cleaned[k] = v
-    model = look2hear.models.apollo.Apollo(sr=sr, win=win, feature_dim=feature_dim, layer=layer)
-    missing, _ = model.load_state_dict(cleaned, strict=False)
+    model = look2hear.models.apollo.model_from_state(cleaned, sr, win, feature_dim, layer)
+    missing, _ = model.load_state_dict(cleaned, strict="cascade_frequencies" in cleaned)
     if missing:
         print(f"  [warn] {len(missing)} missing keys")
     return model.cuda().eval() if torch.cuda.is_available() else model.eval()

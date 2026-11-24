@@ -275,10 +275,8 @@ def _load_ckpt(path: str, feature_dim: int, sr: int, win: int, layer: int):
     else:
         state = raw
         print("[inference] Bare state dict -- no prefix stripping needed")
-    model = look2hear.models.apollo.Apollo(
-        sr=sr, win=win, feature_dim=feature_dim, layer=layer
-    )
-    missing, unexpected = model.load_state_dict(state, strict=False)
+    model = look2hear.models.apollo.model_from_state(state, sr, win, feature_dim, layer)
+    missing, unexpected = model.load_state_dict(state, strict="cascade_frequencies" in state)
     if missing:
         print(f"[inference] Missing keys ({len(missing)}): {missing[:3]}{'...' if len(missing) > 3 else ''}")
     if unexpected:

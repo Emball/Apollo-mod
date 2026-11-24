@@ -31,6 +31,12 @@ class BaseModel(nn.Module, PyTorchModelHubMixin):
 
         conf = load_checkpoint(pretrained_model_conf_or_path)
 
+        if "cascade_frequencies" in conf["state_dict"]:
+            from .apollo import model_from_state
+            model = model_from_state(conf["state_dict"], *args, **kwargs)
+            model.load_state_dict(conf["state_dict"], strict=True)
+            return model
+
         model_class = get(conf["model_name"])
         # model_class = get("Conv_TasNet")
         model = model_class(*args, **kwargs)

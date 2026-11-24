@@ -36,6 +36,47 @@ The target is a set of 2003 leaked tracks whose surviving files are all heavily 
 
 ---
 
+## Planned Frequency-Specialized Restoration Experiments
+
+These experiments use the existing single-generator training and inference paths as the baseline for comparison. Option B has an experimental implementation; Option A remains proposed. The goal is to improve restoration of multigeneration codec damage while retaining natural high-frequency reconstruction on a small paired dataset.
+
+### Motivation from listening tests
+
+- Fine-tunes remove caked compression effectively but can produce noisy, synthetic sibilance and treble. Removing this treble, encoding the cleaned output to a low-bitrate MP3 (46–80 kbps tested by the user), and running pretrained Apollo again gives more natural high-frequency reconstruction. The MP3-only base model has generally sounded preferable to Universal in this experiment.
+- Deep gain and silence dip augmentation resolved the user's quiet-passage restoration problem quickly during fine-tuning, including a weakness present in the base model. Retain both augmentations.
+- Gaussian frequency weighting has already proved effective at directing restoration quality toward particular ranges. Previous stem-specific experiments were inconsistent, particularly for vocals. Previous changes to frequency-bin placement also caused problems.
+
+### Common architecture
+
+Use three specialists initialized from the MP3-only base Apollo weights (`feature_dim: 256`, six BSNet blocks, original 80 bands and STFT layout). Each receives full-spectrum musical context and predicts a full-spectrum output. Freeze the band front end (`BN`) and first four BSNet blocks, and give each specialist its own trainable final two blocks and reconstruction heads. Share one physical copy of the frozen front end and blocks across the specialists: ten unique BSNet blocks, of which six are trainable. Preserve independent specialist checkpoint selection when compatible with the chosen training mode.
+
+Emphasize each specialist's target frequency range through overlapping Gaussian reconstruction-loss curves. Keep a nonzero out-of-band loss so full-band predictions remain coherent. The existing Gaussian has a floor of 1 and a peak of `1 + band_weight_gain`; changing the gain also changes the magnitude reconstruction term relative to adversarial and feature-matching losses. Initial output ranges to audition are 0–3 kHz, 3–10 kHz, and 10–22.05 kHz. These are provisional, configurable boundaries. Training emphasis and inference crossover frequencies should be independently configurable.
+
+Merge the specialists with complementary, smoothly overlapping spectral weights. For this experiment, blend complex spectra so each specialist can contribute its own phase; the existing magnitude-only `_spectral_merge` retains the primary model's phase. Preserve sample alignment, stereo consistency and overlap-add behavior.
+
+### Option A: Detached parallel low/mid specialists with high-band regeneration
+
+- Run low and mid specialists on the same original LQ mix. Compute the shared frozen features once where both inputs are identical.
+- Merge their assigned output ranges, preserving musical context below the high-band crossover. Remove the unreliable upper frequencies from this intermediate result before passing it to the high specialist.
+- Run the high specialist on that cleaned, bandwidth-limited mix. Start by auditioning untouched base Apollo. Compare a low-pass filter with the successful MP3 encode/decode procedure. The high specialist contributes only the designated upper band to the final merge.
+- Train low and mid independently. If the high specialist needs adaptation, train it on intermediates from fixed upstream checkpoints, preferably generated from held-out or out-of-fold songs. This keeps the high-stage input distribution stable. Multiple upstream checkpoints could later be sampled to improve robustness to checkpoint changes.
+- This topology has 18 BSNet block applications along its three branches conceptually, with a longest signal path of 12 blocks. Reusing the shared low/mid features eliminates redundant frozen-block computation. The detached paths allow independent training and checkpoint selection, subject to the high specialist's dependence on its upstream input distribution.
+
+### Option B: Differentiable progressive cascade with joint fine-tuning
+
+- Low specialist receives the original full mix. Merge its restored low band with the original mid/high bands and feed the resulting full mix to the mid specialist.
+- Mid specialist restores its assigned region. Preserve the selected low-band contribution, retain the restored midrange, and remove unreliable high frequencies before feeding the high specialist.
+- High specialist reconstructs the upper range from the improved lower-frequency context. Final output merges the contributions of all three stages using the configured crossovers.
+- Use differentiable STFT masks, complex spectral blending and inverse STFT between stages. A conventional MP3 encode/decode is useful for detached experiments but interrupts the end-to-end gradient path. Use a differentiable low-pass for joint training.
+- Initialize from base Apollo or independently fine-tuned specialists, then jointly refine the six trainable BSNet blocks and their heads. Use per-specialist reconstruction objectives and a final full-band objective so upstream stages receive direct supervision and gradients from their effects on later stages. The GAN and feature-matching integration and loss balance must be verified during implementation.
+- The cascade executes 18 BSNet blocks sequentially, with ten unique blocks in memory. The frozen backbone is reused on different inputs at each stage. Freezing avoids parameter gradients and optimizer state for those weights, but later invocations must remain differentiable with respect to their inputs to propagate gradients upstream. Do not wrap them in `no_grad` during joint training. Each invocation has different activations; use activation checkpointing/recomputation and measure actual peak VRAM and throughput on the RTX 2080 Ti (11 GB). A staged warm start is available if joint adaptation is unstable.
+
+Compare both options against the existing fine-tune alone and the user's fine-tune → low-bitrate MP3 → base Apollo listening baseline, using identical held-out songs and level-matched previews. Evaluate artifact removal, vocal/sibilant naturalness, cymbal texture, quiet passages, crossover coherence, VRAM and speed. Consider per-band validation metrics and checkpoint selection alongside the existing full-band metrics. The user's priority is perceptual quality, with training time secondary to achieving it. Neither architecture requires training a new base model or moving the original frequency bins.
+
+**Option B implementation:** `ApolloCascade` in `core/look2hear/models/apollo.py` shares the existing BN and first four `net` blocks, with the original low tail/head and two copied tails/heads. `model.cascade: true` opts in (requires `feature_dim: 256`, `layer: 6`, `win: 20`, `sr: 44100`, `training.n_layers_to_freeze: 4`). `model.cascade_crossovers: [3000, 10000]` and `model.cascade_ramp_hz: 1000` set the complementary raised-sine spectral transitions. `model.cascade_expand_bands: false` is the normal path. When true, each specialist's trainable two-block tail receives 80 interpolated features spanning its assigned frequency range and transition zone, after the shared four blocks have processed the original 80 bands. Tail output is interpolated back to the original band centers; out-of-range heads receive shared backbone features. This is an experimental feature-space expansion, not new physical FFT resolution. Existing band projections, STFT and full-band context are preserved. The existing generator/discriminator loss evaluates the final merged mix; the generator additionally receives the mean of three Gaussian-weighted multi-resolution magnitude losses on the individual outputs (centers and widths derived from the crossovers). All gradients propagate through the cascade. The crossover settings and expansion toggle live in the model state dict, so inference/evaluation detect cascade checkpoints automatically, including exported `best_model.pth`. Start a fresh run when changing architecture or expansion settings; a cascade checkpoint can be loaded as a warm start using `weights_path`. Use `resume: false` when first switching an existing dataset config to cascade, then resume normally once a matching checkpoint exists. Start with batch size 1 and gradient checkpointing enabled to establish memory and throughput. `python dev/test_cascade.py` exercises both forward/backward variants, frozen parameters, and checkpoint restoration in an installed Apollo environment.
+
+---
+
 ## Folder Structure
 
 ```
