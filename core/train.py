@@ -1633,7 +1633,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     else:
         local_path = cfg.get("weights_path", None)
 
-        if not local_path:
+        # Cascade starts from the official MP3 base unless explicitly warm-started.
+        if not local_path and not cfg.model.get("cascade", False):
             # Auto-scan ./models/ -- prefer the checkpoint that matches feature_dim.
             # 384 -> apollo_model_uni.ckpt first; 256 -> apollo_model.ckpt / pytorch_model.bin first.
             os.makedirs(_MODELS_DIR, exist_ok=True)
@@ -1657,12 +1658,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                     local_path = candidate
                     break
 
-        if local_path:
-            print_only(f"[weights] Loading from: {local_path}")
-            model = _load_weights(local_path, feature_dim)
-            print_only("[weights] Weights loaded.")
-        else:
-            # Final fallback -- HuggingFace hub (256-dim only; no uni model exists on HF).
+        if not local_path:
+            # The official Hugging Face checkpoint is the 256-dim base model.
             if feature_dim == 384:
                 raise FileNotFoundError(
                     "[weights] feature_dim=384 requires a local universal checkpoint, "
@@ -1673,14 +1670,16 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
                 )
             hf_repo  = "JusperLee/Apollo"
             hf_file  = "pytorch_model.bin"
-            print_only(f"[weights] No local model found in models/ -- downloading from HuggingFace ({hf_file})...")
+            print_only(f"[weights] Resolving official base Apollo weights from Hugging Face ({hf_file})...")
             from huggingface_hub import hf_hub_download
-            weights_path = hf_hub_download(repo_id=hf_repo, filename=hf_file)
-            print_only(f"[weights] Cached at: {weights_path}")
-            model = look2hear.models.BaseModel.from_pretrain(
-                weights_path, sr=_m_sr, win=_m_win, feature_dim=feature_dim, layer=_m_layer
+            local_path = hf_hub_download(
+                repo_id=hf_repo, filename=hf_file,
+                revision="0b123a4606d5345d9082f6f633d8bfebe84c8e79",
             )
-            print_only("[weights] Pretrained weights loaded.")
+            print_only(f"[weights] Cached at: {local_path}")
+        print_only(f"[weights] Loading from: {local_path}")
+        model = _load_weights(local_path, feature_dim)
+        print_only("[weights] Weights loaded.")
 
     # Freeze early layers for fine-tuning -- count driven by config
     # (no-op when resuming since frozen params are restored by the checkpoint too)
