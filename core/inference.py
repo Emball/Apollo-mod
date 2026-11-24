@@ -287,19 +287,17 @@ def _load_ckpt(path: str, feature_dim: int, sr: int, win: int, layer: int):
 
 
 def load_model(weights, sr, win, feature_dim, layer):
-    if weights and weights.strip().lower() in KNOWN_MODELS:
-        local_path, registry_dim = ensure_model(weights.strip().lower())
+    model_name = (weights or "").strip().lower()
+    if model_name in ("", "jusperlee/apollo"):
+        model_name = "apollo"
+    if model_name in KNOWN_MODELS:
+        local_path, registry_dim = ensure_model(model_name)
         if feature_dim == 256 and registry_dim != 256:
             print(f"[inference] Auto-setting feature_dim={registry_dim} for {weights}")
             feature_dim = registry_dim
         weights = local_path
 
-    if not weights or weights.strip().lower() in ("", "jusperlee/apollo"):
-        print("[inference] Loading from HuggingFace hub: JusperLee/Apollo")
-        model = look2hear.models.BaseModel.from_pretrain(
-            "JusperLee/Apollo", sr=sr, win=win, feature_dim=feature_dim, layer=layer
-        )
-    elif weights.endswith(".ckpt"):
+    if weights.endswith(".ckpt"):
         print(f"[inference] Loading Lightning checkpoint: {weights}")
         model = _load_ckpt(weights, feature_dim=feature_dim, sr=sr, win=win, layer=layer)
     else:
